@@ -102,15 +102,15 @@ sshmux --debug
 │  │  (Mutex)    │         │   ├─> raw_output Vec<u8>│    │
 │  └──────┬──────┘         │   │     SFTP scraping   │    │
 │         │                │   ├─> dirty AtomicBool  │    │
-│         │                │   ├─> mouse_active       │   │
-│         │                │   └─> cursor_visible     │   │
+│         │                │   ├─> mouse_active      │    │
+│         │                │   └─> cursor_visible    │    │
 │         │                └─────────────┬───────────┘    │
 │         │                              │                │
 │         v                              v                │
 │  ┌──────────────────────────────────────────────────┐   │
 │  │          portable_pty  (PTY master)              │   │
 │  │          PTY slave fd                            │   │
-│  └──────────────────────────┬─────────────────────  ┘   │
+│  └───────────────────────────┬──────────────────────┘   │
 │                              │  spawn                   │
 └──────────────────────────────┼──────────────────────────┘
                                │
@@ -135,21 +135,21 @@ crossterm Event::Key
 send_str() / send_char()
     │  write bytes
     v
-PTY master writer ──────────────────────────────────┐
+PTY master writer ───────────────────────────────────┐
                                                      │ PTY slave stdin
                                                ┌─────v─────┐
                                                │  ssh(1)   │
                                                │  process  │
                                                └─────┬─────┘
                                                      │ PTY slave stdout
-PTY master reader <─────────────────────────────────┘
+PTY master reader <──────────────────────────────────┘
     │
     ├─> vt100::Parser::process(bytes)
     │        └─> screen grid updated
     │
     ├─> raw_output.extend(bytes)      (SFTP only)
     │
-    ├─> dirty.store(true)             ──> triggers ratatui redraw
+    ├─> dirty.store(true)            ──> triggers ratatui redraw
     │
     ├─> scan ESC[?...h/l             ──> mouse_active / cursor_visible
     │
