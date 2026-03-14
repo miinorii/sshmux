@@ -32,10 +32,14 @@ use ratatui::{
 /// Write a line to the debug log file, ignoring lock failures.
 /// Uses a macro so the call site can use `format!`-style arguments without
 /// paying the formatting cost when the lock is unavailable.
+/// When `$log` is `None` (debug mode not enabled) the macro is a no-op and
+/// the format arguments are never evaluated.
 macro_rules! log {
     ($log:expr, $($arg:tt)*) => {{
-        if let Ok(mut f) = $log.lock() {
-            writeln!(f, $($arg)*).ok();
+        if let Some(ref log_inner) = $log {
+            if let Ok(mut f) = log_inner.lock() {
+                writeln!(f, $($arg)*).ok();
+            }
         }
     }};
 }
@@ -104,7 +108,7 @@ struct EmbeddedTerminal {
 impl EmbeddedTerminal {
     /// Spawn a PTY of `rows × cols` cells, connect it to `ssh <ssh_host> -t`,
     /// and start the background reader thread.
-    fn new(rows: u16, cols: u16, ssh_host: &str, log: Arc<Mutex<std::fs::File>>) -> Result<Self> {
+    fn new(rows: u16, cols: u16, ssh_host: &str, log: Option<Arc<Mutex<std::fs::File>>>) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
 
@@ -133,7 +137,7 @@ impl EmbeddedTerminal {
         let dirty_c           = Arc::clone(&dirty);
         let mouse_active_c    = Arc::clone(&mouse_active);
         let cursor_visible_c  = Arc::clone(&cursor_visible);
-        let log_c             = Arc::clone(&log);
+        let log_c             = log.clone();
 
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
@@ -772,11 +776,12 @@ struct App {
     selected_tab: usize,
     /// Hosts parsed from `~/.ssh/config` at startup.
     hosts:        Vec<SshHost>,
-    log:          Arc<Mutex<std::fs::File>>,
+    /// `Some` when the process was launched with `--debug`; `None` otherwise.
+    log:          Option<Arc<Mutex<std::fs::File>>>,
 }
 
 impl App {
-    fn new(log: Arc<Mutex<std::fs::File>>) -> Self {
+    fn new(log: Option<Arc<Mutex<std::fs::File>>>) -> Self {
         App {
             tabs: vec![Tab::new("1")],
             selected_tab: 0,
@@ -817,7 +822,7 @@ impl App {
         let pane_area = self.focused_pane_area(area);
         // Subtract the pane border when multiple panes are visible.
         let term_area = if self.tab().leaf_count() > 1 { pane_inner(pane_area) } else { pane_area };
-        let term = EmbeddedTerminal::new(term_area.height, term_area.width, &host.label, Arc::clone(&self.log))?;
+        let term = EmbeddedTerminal::new(term_area.height, term_area.width, &host.label, self.log.clone())?;
         if self.tab().leaf_count() == 1 {
             self.tab_mut().name = host.label.clone();
         }
@@ -927,7 +932,15 @@ fn pane_inner(area: Rect) -> Rect {
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<()> {
-    let log_file = Arc::new(Mutex::new(std::fs::File::create("debug.log")?));
+    // Enable debug logging by passing `--debug` on the command line.
+    // When active, structured events are written to `debug.log` in the
+    // working directory.  Omitting the flag silences all log output.
+    let debug = std::env::args().any(|a| a == "--debug");
+    let log_file: Option<Arc<Mutex<std::fs::File>>> = if debug {
+        Some(Arc::new(Mutex::new(std::fs::File::create("debug.log")?)))
+    } else {
+        None
+    };
 
     // Enter the alternate screen so the TUI does not clobber the user's
     // scrollback, and enable raw mode so key events arrive unfiltered.
@@ -938,7 +951,7 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(Arc::clone(&log_file));
+    let mut app = App::new(log_file.clone());
     let mut last_area = { let s = terminal.size()?; Rect { x:0, y:0, width: s.width, height: s.height } };
     // Tracks whether mouse capture has been re-enabled after ratatui's draw
     // cycle temporarily disables it; we keep it permanently active.
