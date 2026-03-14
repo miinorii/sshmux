@@ -4,8 +4,8 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
@@ -15,17 +15,17 @@ use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, StatefulWidget, Widget},
-    Terminal,
 };
 
 // ---------------------------------------------------------------------------
@@ -62,7 +62,12 @@ fn count_dsr(data: &[u8]) -> usize {
     let mut count = 0;
     let mut i = 0;
     while i + DSR.len() <= data.len() {
-        if data[i..].starts_with(DSR) { count += 1; i += DSR.len(); } else { i += 1; }
+        if data[i..].starts_with(DSR) {
+            count += 1;
+            i += DSR.len();
+        } else {
+            i += 1;
+        }
     }
     count
 }
@@ -84,73 +89,90 @@ fn count_dsr(data: &[u8]) -> usize {
 /// - `cursor_visible`— tracks DEC mode 25 (show/hide cursor).
 struct EmbeddedTerminal {
     /// VT100 screen state, updated by the reader thread.
-    parser:         Arc<Mutex<vt100::Parser>>,
+    parser: Arc<Mutex<vt100::Parser>>,
     /// PTY master handle, kept alive so the slave side stays open.
-    master:         Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     /// Write half of the PTY; used to forward key events and commands.
-    writer:         Arc<Mutex<Box<dyn Write + Send>>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     /// Set to `true` by the reader thread whenever new output is processed.
     /// Cleared (swapped to `false`) during the dirty-check phase of the event
     /// loop so that spurious redraws are avoided.
-    dirty:          Arc<AtomicBool>,
+    dirty: Arc<AtomicBool>,
     /// `true` while the remote application has requested SGR mouse reporting
     /// (modes 1000, 1002, 1003, or 1006).  Mouse events are only forwarded
     /// to the PTY when this flag is set.
-    mouse_active:   Arc<AtomicBool>,
+    mouse_active: Arc<AtomicBool>,
     /// Tracks DEC private mode 25 (`ESC [ ? 25 h/l`): `true` while the cursor
     /// is visible, `false` when the remote app has hidden it.  Starts `true`
     /// because the cursor is visible by default in every VT terminal.
     cursor_visible: Arc<AtomicBool>,
     /// Current PTY dimensions, kept in sync with every `resize` call.
-    rows:           u16,
-    cols:           u16,
+    rows: u16,
+    cols: u16,
     /// Raw byte accumulator for subprocess output (used by SFTP scraping).
     /// Appended by the reader thread; read and drained by the main thread.
-    raw_output:     Arc<Mutex<Vec<u8>>>,
+    raw_output: Arc<Mutex<Vec<u8>>>,
 }
 
 impl EmbeddedTerminal {
     /// Spawn `cmd` inside a PTY of `rows × cols` cells and start the
     /// background reader thread.
-    fn new(rows: u16, cols: u16, cmd: CommandBuilder, log: Option<Arc<Mutex<std::fs::File>>>) -> Result<Self> {
+    fn new(
+        rows: u16,
+        cols: u16,
+        cmd: CommandBuilder,
+        log: Option<Arc<Mutex<std::fs::File>>>,
+    ) -> Result<Self> {
         let pty_system = native_pty_system();
-        let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
+        let pair = pty_system.openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
 
         let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
         let mut reader = pair.master.try_clone_reader()?;
 
         pair.slave.spawn_command(cmd)?;
 
-        let parser         = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
-        let dirty          = Arc::new(AtomicBool::new(false));
-        let mouse_active   = Arc::new(AtomicBool::new(false));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let dirty = Arc::new(AtomicBool::new(false));
+        let mouse_active = Arc::new(AtomicBool::new(false));
         // Cursor starts visible — DEC mode 25 is on by default.
         let cursor_visible = Arc::new(AtomicBool::new(true));
 
-        let raw_output       = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let raw_output = Arc::new(Mutex::new(Vec::<u8>::new()));
 
         // Clone Arc handles for the reader thread before moving into the closure.
-        let parser_c         = Arc::clone(&parser);
-        let writer_c         = Arc::clone(&writer);
-        let dirty_c          = Arc::clone(&dirty);
-        let mouse_active_c   = Arc::clone(&mouse_active);
+        let parser_c = Arc::clone(&parser);
+        let writer_c = Arc::clone(&writer);
+        let dirty_c = Arc::clone(&dirty);
+        let mouse_active_c = Arc::clone(&mouse_active);
         let cursor_visible_c = Arc::clone(&cursor_visible);
-        let raw_output_c     = Arc::clone(&raw_output);
-        let log_c            = log.clone();
+        let raw_output_c = Arc::clone(&raw_output);
+        let log_c = log.clone();
 
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) => { log!(log_c, "PTY EOF"); break; }
+                    Ok(0) => {
+                        log!(log_c, "PTY EOF");
+                        break;
+                    }
                     Ok(n) => {
                         let data = &buf[..n];
 
                         // Feed raw bytes into the VT100 parser to update the
                         // virtual screen, then signal the main thread to redraw.
-                        if let Ok(mut p) = parser_c.lock() { p.process(data); }
+                        if let Ok(mut p) = parser_c.lock() {
+                            p.process(data);
+                        }
                         // Also accumulate into the raw buffer for SFTP scraping.
-                        if let Ok(mut rb) = raw_output_c.lock() { rb.extend_from_slice(data); }
+                        if let Ok(mut rb) = raw_output_c.lock() {
+                            rb.extend_from_slice(data);
+                        }
                         dirty_c.store(true, Ordering::Release);
 
                         // Scan for DEC private mode set/reset sequences
@@ -159,10 +181,12 @@ impl EmbeddedTerminal {
                         // the cursor (mode 25).
                         let mut i = 0;
                         while i + 2 < data.len() {
-                            if data[i] == 0x1b && data[i+1] == b'[' && data[i+2] == b'?' {
+                            if data[i] == 0x1b && data[i + 1] == b'[' && data[i + 2] == b'?' {
                                 let start = i + 3;
                                 let mut end = start;
-                                while end < data.len() && data[end] != b'h' && data[end] != b'l' { end += 1; }
+                                while end < data.len() && data[end] != b'h' && data[end] != b'l' {
+                                    end += 1;
+                                }
                                 if end < data.len() {
                                     if let Ok(params) = std::str::from_utf8(&data[start..end]) {
                                         let set = data[end] == b'h';
@@ -195,24 +219,46 @@ impl EmbeddedTerminal {
                             let (row, col) = if let Ok(p) = parser_c.lock() {
                                 let pos = p.screen().cursor_position();
                                 (pos.0 + 1, pos.1 + 1)
-                            } else { (1, 1) };
+                            } else {
+                                (1, 1)
+                            };
                             let reply = format!("\x1b[{};{}R", row, col);
                             if let Ok(mut w) = writer_c.lock() {
-                                for _ in 0..dsr_count { let _ = w.write_all(reply.as_bytes()); }
+                                for _ in 0..dsr_count {
+                                    let _ = w.write_all(reply.as_bytes());
+                                }
                             }
                         }
                     }
-                    Err(e) => { log!(log_c, "PTY error: {}", e); break; }
+                    Err(e) => {
+                        log!(log_c, "PTY error: {}", e);
+                        break;
+                    }
                 }
             }
         });
 
         let master = Arc::new(Mutex::new(pair.master));
-        Ok(Self { parser, master, writer, dirty, mouse_active, cursor_visible, rows, cols, raw_output })
+        Ok(Self {
+            parser,
+            master,
+            writer,
+            dirty,
+            mouse_active,
+            cursor_visible,
+            rows,
+            cols,
+            raw_output,
+        })
     }
 
     /// Build and spawn an SSH interactive session to `host`.
-    fn ssh(rows: u16, cols: u16, host: &str, log: Option<Arc<Mutex<std::fs::File>>>) -> Result<Self> {
+    fn ssh(
+        rows: u16,
+        cols: u16,
+        host: &str,
+        log: Option<Arc<Mutex<std::fs::File>>>,
+    ) -> Result<Self> {
         let mut cmd = CommandBuilder::new("ssh");
         cmd.arg(host);
         cmd.arg("-t");
@@ -241,7 +287,9 @@ impl EmbeddedTerminal {
 
     /// Write a raw byte string directly into the PTY input stream.
     fn send_str(&mut self, s: &str) {
-        if let Ok(mut w) = self.writer.lock() { let _ = w.write_all(s.as_bytes()); }
+        if let Ok(mut w) = self.writer.lock() {
+            let _ = w.write_all(s.as_bytes());
+        }
     }
 
     /// Encode `c` as UTF-8 and forward it to the PTY.
@@ -257,9 +305,16 @@ impl EmbeddedTerminal {
     /// best-effort heuristic: the remote application will receive `SIGWINCH`
     /// and typically redraws itself completely anyway.
     fn resize(&mut self, rows: u16, cols: u16) {
-        if rows == self.rows && cols == self.cols { return; }
+        if rows == self.rows && cols == self.cols {
+            return;
+        }
         if let Ok(m) = self.master.lock() {
-            let _ = m.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            let _ = m.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
         }
         if let Ok(mut p) = self.parser.lock() {
             let snapshot = p.screen().contents_formatted();
@@ -279,15 +334,17 @@ impl EmbeddedTerminal {
     /// the host terminal's hardware cursor is obscured by ratatui's own draw
     /// cycle.
     fn render_into(&self, area: Rect, buf: &mut Buffer) {
-        let Ok(parser) = self.parser.try_lock() else { return };
+        let Ok(parser) = self.parser.try_lock() else {
+            return;
+        };
         let screen = parser.screen();
 
         /// Translate a `vt100::Color` to the ratatui equivalent.
         fn vc(c: vt100::Color) -> Color {
             match c {
                 vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
-                vt100::Color::Idx(i)       => Color::Indexed(i),
-                _                          => Color::Reset,
+                vt100::Color::Idx(i) => Color::Indexed(i),
+                _ => Color::Reset,
             }
         }
 
@@ -301,10 +358,18 @@ impl EmbeddedTerminal {
                         let mut style = Style::default()
                             .fg(vc(cell.fgcolor()))
                             .bg(vc(cell.bgcolor()));
-                        if cell.bold()      { style = style.add_modifier(Modifier::BOLD); }
-                        if cell.italic()    { style = style.add_modifier(Modifier::ITALIC); }
-                        if cell.underline() { style = style.add_modifier(Modifier::UNDERLINED); }
-                        if cell.inverse()   { style = style.add_modifier(Modifier::REVERSED); }
+                        if cell.bold() {
+                            style = style.add_modifier(Modifier::BOLD);
+                        }
+                        if cell.italic() {
+                            style = style.add_modifier(Modifier::ITALIC);
+                        }
+                        if cell.underline() {
+                            style = style.add_modifier(Modifier::UNDERLINED);
+                        }
+                        if cell.inverse() {
+                            style = style.add_modifier(Modifier::REVERSED);
+                        }
                         bc.set_style(style);
                     }
                 }
@@ -330,8 +395,12 @@ impl EmbeddedTerminal {
     /// Return the cursor position as `(col, row)` in terminal-local coordinates,
     /// or `None` if the remote app has hidden the cursor (DEC mode 25 off).
     fn cursor_pos(&self) -> Option<(u16, u16)> {
-        if !self.cursor_visible.load(Ordering::Acquire) { return None; }
-        let Ok(parser) = self.parser.try_lock() else { return None };
+        if !self.cursor_visible.load(Ordering::Acquire) {
+            return None;
+        }
+        let Ok(parser) = self.parser.try_lock() else {
+            return None;
+        };
         let screen = parser.screen();
         let (cy, cx) = screen.cursor_position();
         Some((cx, cy))
@@ -344,14 +413,18 @@ impl EmbeddedTerminal {
     /// multiple callers can read the same output; call `drain_raw()` after
     /// processing is complete to avoid unbounded growth.
     fn raw_lines(&self) -> Vec<String> {
-        let Ok(rb) = self.raw_output.lock() else { return vec![] };
+        let Ok(rb) = self.raw_output.lock() else {
+            return vec![];
+        };
         let text = strip_ansi(&rb);
         text.lines().map(|l| l.trim_end().to_string()).collect()
     }
 
     /// Drain (clear) the raw output accumulator.
     fn drain_raw(&self) {
-        if let Ok(mut rb) = self.raw_output.lock() { rb.clear(); }
+        if let Ok(mut rb) = self.raw_output.lock() {
+            rb.clear();
+        }
     }
 
     /// Return the current byte length of the raw output accumulator.
@@ -366,7 +439,9 @@ impl EmbeddedTerminal {
 
 /// A single entry from `~/.ssh/config` that can be dialled directly.
 #[derive(Clone)]
-struct SshHost { label: String }
+struct SshHost {
+    label: String,
+}
 
 /// Parse `~/.ssh/config` and return all non-wildcard `Host` entries.
 ///
@@ -375,10 +450,10 @@ struct SshHost { label: String }
 fn parse_ssh_config() -> Vec<SshHost> {
     let config_path = match dirs::home_dir() {
         Some(h) => h.join(".ssh").join("config"),
-        None    => return vec![],
+        None => return vec![],
     };
     let content = match std::fs::read_to_string(&config_path) {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(_) => return vec![],
     };
     let mut hosts = Vec::new();
@@ -391,7 +466,9 @@ fn parse_ssh_config() -> Vec<SshHost> {
             if kw.eq_ignore_ascii_case("host") {
                 let name = rest.trim();
                 if !name.is_empty() && !name.contains('*') && !name.contains('?') {
-                    hosts.push(SshHost { label: name.to_string() });
+                    hosts.push(SshHost {
+                        label: name.to_string(),
+                    });
                 }
             }
         }
@@ -406,19 +483,22 @@ fn parse_ssh_config() -> Vec<SshHost> {
 /// A single entry in a directory listing (local or remote).
 #[derive(Clone)]
 struct FsEntry {
-    name:     String,
-    is_dir:   bool,
+    name: String,
+    is_dir: bool,
     /// Human-readable size string (e.g. "4.2 MB").  Empty for directories.
-    size:     String,
+    size: String,
     /// Permission string as returned by ls (e.g. `drwxr-xr-x`).
-    perms:    String,
+    perms: String,
     /// Last-modified date string (e.g. `Mar 14 09:44` or `Oct  1  2021`).
     modified: String,
 }
 
 /// Which panel of the file browser is active.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BrowserFocus { Local, Remote }
+enum BrowserFocus {
+    Local,
+    Remote,
+}
 
 /// State machine for the SFTP subprocess interaction.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -444,58 +524,58 @@ enum SftpState {
 /// In-progress or completed transfer record shown in the status bar.
 #[derive(Clone)]
 struct TransferStatus {
-    filename:  String,
-    done:      bool,
+    filename: String,
+    done: bool,
     /// Latest progress line scraped from the sftp output (e.g. "50%").
-    progress:  String,
+    progress: String,
 }
 
 /// State for a `Pane::FileBrowser`.
 struct FileBrowser {
-    host:             String,
+    host: String,
     /// The hidden SFTP subprocess used for all remote operations.
-    sftp:             EmbeddedTerminal,
-    sftp_state:       SftpState,
+    sftp: EmbeddedTerminal,
+    sftp_state: SftpState,
 
     /// Local filesystem path currently displayed in the left panel.
-    local_path:       PathBuf,
-    local_entries:    Vec<FsEntry>,
-    local_sel:        ListState,
+    local_path: PathBuf,
+    local_entries: Vec<FsEntry>,
+    local_sel: ListState,
 
     /// Current remote working directory (updated after every successful cd).
-    remote_path:      String,
-    remote_entries:   Vec<FsEntry>,
-    remote_sel:       ListState,
+    remote_path: String,
+    remote_entries: Vec<FsEntry>,
+    remote_sel: ListState,
 
-    focus:            BrowserFocus,
+    focus: BrowserFocus,
 
     /// Most recent transfer, shown in the status bar.
-    last_transfer:    Option<TransferStatus>,
+    last_transfer: Option<TransferStatus>,
     /// Queue of commands waiting to be sent once the sftp subprocess is idle.
     /// Using a queue rather than a single Option ensures that rapid navigation
     /// (e.g. pressing Enter twice quickly) does not silently drop commands.
-    pending_cmds:     VecDeque<String>,
+    pending_cmds: VecDeque<String>,
     /// Status / error message to display at the bottom of the pane.
-    status_msg:       String,
+    status_msg: String,
     /// Snapshot of raw sftp output shown in the remote panel while connecting
     /// or waiting for an ls to complete.  Cleared once entries are populated.
-    raw_snapshot:     Vec<String>,
+    raw_snapshot: Vec<String>,
     /// Number of consecutive ticks the prompt has been stable (buffer unchanged).
     /// We only act on a prompt once it has been stable for several ticks,
     /// ensuring all ls output has arrived before we parse and drain.
-    prompt_stable:    u8,
+    prompt_stable: u8,
     /// Byte length of raw_output on the previous tick, used to detect growth.
-    prev_raw_len:     usize,
+    prev_raw_len: usize,
     /// Set to `true` by tick() when a state transition requires a redraw even
     /// if the sftp PTY dirty flag is not set.
-    needs_redraw:     bool,
+    needs_redraw: bool,
     /// When `Some(name)`, a confirmation prompt is shown before deleting.
-    confirm_delete:   Option<String>,
+    confirm_delete: Option<String>,
     /// Name of the remote file currently being deleted, used to set the
     /// success message once `WaitingDelete` completes.
     pending_delete_name: Option<String>,
     /// Shared debug log handle — `None` unless `--debug` was passed at launch.
-    log:              Option<Arc<Mutex<std::fs::File>>>,
+    log: Option<Arc<Mutex<std::fs::File>>>,
 }
 
 impl FileBrowser {
@@ -529,11 +609,11 @@ impl FileBrowser {
             status_msg: String::from("Connecting…"),
             raw_snapshot: vec![],
             prompt_stable: 0,
-            prev_raw_len:  0,
-            needs_redraw:  false,
+            prev_raw_len: 0,
+            needs_redraw: false,
             confirm_delete: None,
             pending_delete_name: None,
-            log:            log.clone(),
+            log: log.clone(),
         })
     }
 
@@ -551,7 +631,7 @@ impl FileBrowser {
         if cur_len != self.prev_raw_len {
             // New bytes arrived — reset the stability counter.
             self.prompt_stable = 0;
-            self.prev_raw_len  = cur_len;
+            self.prev_raw_len = cur_len;
         } else if self.prompt_raw_ends_with_prompt() {
             // Buffer unchanged and prompt visible — increment stability.
             self.prompt_stable = self.prompt_stable.saturating_add(1);
@@ -592,8 +672,8 @@ impl FileBrowser {
                 if prompt_ready {
                     self.prompt_stable = 0;
                     let lines = self.sftp.raw_lines();
-                    self.remote_path = parse_pwd(&lines)
-                        .unwrap_or_else(|| self.remote_path.clone());
+                    self.remote_path =
+                        parse_pwd(&lines).unwrap_or_else(|| self.remote_path.clone());
                     log!(self.log, "SFTP pwd => {}, sending ls -la", self.remote_path);
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
@@ -607,9 +687,16 @@ impl FileBrowser {
                 if prompt_ready {
                     self.prompt_stable = 0;
                     let lines = self.sftp.raw_lines();
-                    if let Some(p) = parse_pwd(&lines) { self.remote_path = p; }
+                    if let Some(p) = parse_pwd(&lines) {
+                        self.remote_path = p;
+                    }
                     let parsed = parse_ls(&lines);
-                    log!(self.log, "SFTP ls done: {} entries parsed (raw {} lines)", parsed.len(), lines.len());
+                    log!(
+                        self.log,
+                        "SFTP ls done: {} entries parsed (raw {} lines)",
+                        parsed.len(),
+                        lines.len()
+                    );
                     if parsed.len() > 1 {
                         self.remote_entries = parsed;
                         self.raw_snapshot.clear();
@@ -618,7 +705,9 @@ impl FileBrowser {
                         let cur = self.remote_sel.selected().unwrap_or(0);
                         self.remote_sel.select(Some(cur.min(max)));
                     }
-                    if self.remote_sel.selected().is_none() { self.remote_sel.select_first(); }
+                    if self.remote_sel.selected().is_none() {
+                        self.remote_sel.select_first();
+                    }
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
                     self.sftp_state = SftpState::Idle;
@@ -659,7 +748,11 @@ impl FileBrowser {
                 if prompt_ready {
                     self.prompt_stable = 0;
                     let lines = self.sftp.raw_lines();
-                    log!(self.log, "SFTP WaitingDelete complete, raw output: {:?}", lines);
+                    log!(
+                        self.log,
+                        "SFTP WaitingDelete complete, raw output: {:?}",
+                        lines
+                    );
                     // Set a success message using the name we stored before sending rm.
                     if let Some(name) = self.pending_delete_name.take() {
                         self.status_msg = format!("Deleted remote: {}", name);
@@ -684,7 +777,9 @@ impl FileBrowser {
 
     /// Return `true` when the last non-empty line of raw output contains `sftp>`.
     fn prompt_raw_ends_with_prompt(&self) -> bool {
-        let Ok(rb) = self.sftp.raw_output.lock() else { return false };
+        let Ok(rb) = self.sftp.raw_output.lock() else {
+            return false;
+        };
         let text = strip_ansi(&rb);
         text.lines()
             .rev()
@@ -697,14 +792,14 @@ impl FileBrowser {
 
     fn nav_up(&mut self) {
         match self.focus {
-            BrowserFocus::Local  => self.local_sel.select_previous(),
+            BrowserFocus::Local => self.local_sel.select_previous(),
             BrowserFocus::Remote => self.remote_sel.select_previous(),
         }
     }
 
     fn nav_down(&mut self) {
         match self.focus {
-            BrowserFocus::Local  => self.local_sel.select_next(),
+            BrowserFocus::Local => self.local_sel.select_next(),
             BrowserFocus::Remote => self.remote_sel.select_next(),
         }
     }
@@ -716,7 +811,11 @@ impl FileBrowser {
         match self.focus {
             BrowserFocus::Local => {
                 if let Some(i) = self.local_sel.selected() {
-                    let entry = if let Some(e) = self.local_entries.get(i).cloned() { e } else { return };
+                    let entry = if let Some(e) = self.local_entries.get(i).cloned() {
+                        e
+                    } else {
+                        return;
+                    };
                     if entry.name == ".." {
                         if let Some(p) = self.local_path.parent() {
                             self.local_path = p.to_path_buf();
@@ -734,12 +833,15 @@ impl FileBrowser {
                 }
             }
             BrowserFocus::Remote => {
-                if self.sftp_state != SftpState::Idle { return; }
+                if self.sftp_state != SftpState::Idle {
+                    return;
+                }
                 if let Some(i) = self.remote_sel.selected() {
                     if let Some(entry) = self.remote_entries.get(i).cloned() {
                         if entry.is_dir {
                             // Send cd as a single command; WaitingCd → WaitingPwd → WaitingLs.
-                            self.sftp.send_str(&format!("cd {}\r\n", shell_quote(&entry.name)));
+                            self.sftp
+                                .send_str(&format!("cd {}\r\n", shell_quote(&entry.name)));
                             self.sftp_state = SftpState::WaitingCd;
                             log!(self.log, "SFTP cd {}", entry.name);
                         } else {
@@ -764,7 +866,9 @@ impl FileBrowser {
                 self.local_sel.select_first();
             }
             BrowserFocus::Remote => {
-                if self.sftp_state != SftpState::Idle { return; }
+                if self.sftp_state != SftpState::Idle {
+                    return;
+                }
                 self.sftp.send_str("cd ..\r\n");
                 self.sftp_state = SftpState::WaitingCd;
                 log!(self.log, "SFTP cd ..");
@@ -776,10 +880,18 @@ impl FileBrowser {
 
     /// Download the selected remote file to the current local directory (F5).
     fn download(&mut self) {
-        if self.sftp_state != SftpState::Idle { return; }
+        if self.sftp_state != SftpState::Idle {
+            return;
+        }
         if let Some(i) = self.remote_sel.selected() {
-            let entry = if let Some(e) = self.remote_entries.get(i).cloned() { e } else { return };
-            if entry.is_dir { return; }
+            let entry = if let Some(e) = self.remote_entries.get(i).cloned() {
+                e
+            } else {
+                return;
+            };
+            if entry.is_dir {
+                return;
+            }
             let local_dest = self.local_path.to_string_lossy().replace('\\', "/");
             let cmd = format!("get {} {}/\r\n", shell_quote(&entry.name), local_dest);
             self.last_transfer = Some(TransferStatus {
@@ -796,12 +908,20 @@ impl FileBrowser {
 
     /// Upload the selected local file to the current remote directory (F6).
     fn upload(&mut self) {
-        if self.sftp_state != SftpState::Idle { return; }
+        if self.sftp_state != SftpState::Idle {
+            return;
+        }
         if let Some(i) = self.local_sel.selected() {
-            let entry = if let Some(e) = self.local_entries.get(i).cloned() { e } else { return };
-            if entry.is_dir { return; }
+            let entry = if let Some(e) = self.local_entries.get(i).cloned() {
+                e
+            } else {
+                return;
+            };
+            if entry.is_dir {
+                return;
+            }
             let local_path = self.local_path.join(&entry.name);
-            let local_str  = local_path.to_string_lossy().replace('\\', "/");
+            let local_str = local_path.to_string_lossy().replace('\\', "/");
             let cmd = format!("put {}\r\n", shell_quote(&local_str));
             self.last_transfer = Some(TransferStatus {
                 filename: entry.name.clone(),
@@ -822,8 +942,14 @@ impl FileBrowser {
         match self.focus {
             BrowserFocus::Local => {
                 if let Some(i) = self.local_sel.selected() {
-                    let entry = if let Some(e) = self.local_entries.get(i).cloned() { e } else { return };
-                    if entry.name == ".." { return; }
+                    let entry = if let Some(e) = self.local_entries.get(i).cloned() {
+                        e
+                    } else {
+                        return;
+                    };
+                    if entry.name == ".." {
+                        return;
+                    }
                     // Prefix with "local:" so confirm_delete_yes knows which side to delete.
                     self.confirm_delete = Some(format!("local:{}", entry.name));
                     self.needs_redraw = true;
@@ -831,14 +957,29 @@ impl FileBrowser {
             }
             BrowserFocus::Remote => {
                 if let Some(i) = self.remote_sel.selected() {
-                    let entry = if let Some(e) = self.remote_entries.get(i).cloned() { e } else {
-                        log!(self.log, "SFTP delete: no entry at index {:?}", self.remote_sel.selected());
+                    let entry = if let Some(e) = self.remote_entries.get(i).cloned() {
+                        e
+                    } else {
+                        log!(
+                            self.log,
+                            "SFTP delete: no entry at index {:?}",
+                            self.remote_sel.selected()
+                        );
                         return;
                     };
-                    log!(self.log, "SFTP delete candidate: '{}' is_dir={} state={:?}",
-                        entry.name, entry.is_dir, self.sftp_state == SftpState::Idle);
-                    if entry.name == ".." { return; }
-                    if self.sftp_state != SftpState::Idle { return; }
+                    log!(
+                        self.log,
+                        "SFTP delete candidate: '{}' is_dir={} state={:?}",
+                        entry.name,
+                        entry.is_dir,
+                        self.sftp_state == SftpState::Idle
+                    );
+                    if entry.name == ".." {
+                        return;
+                    }
+                    if self.sftp_state != SftpState::Idle {
+                        return;
+                    }
                     self.confirm_delete = Some(format!("remote:{}", entry.name));
                     self.needs_redraw = true;
                 }
@@ -921,24 +1062,40 @@ impl FileBrowser {
 
         // Reserve one line at the bottom for the status bar.
         let status_h = 1u16;
-        let panels_area = Rect { height: inner.height.saturating_sub(status_h + 1), ..inner };
+        let panels_area = Rect {
+            height: inner.height.saturating_sub(status_h + 1),
+            ..inner
+        };
         let status_area = Rect {
-            y:      inner.y + inner.height.saturating_sub(status_h),
+            y: inner.y + inner.height.saturating_sub(status_h),
             height: status_h,
             ..inner
         };
 
         // Divide the panels area into left (local) and right (remote).
         let half = panels_area.width / 2;
-        let local_area = Rect { width: half, ..panels_area };
-        let remote_area = Rect { x: panels_area.x + half, width: panels_area.width - half, ..panels_area };
+        let local_area = Rect {
+            width: half,
+            ..panels_area
+        };
+        let remote_area = Rect {
+            x: panels_area.x + half,
+            width: panels_area.width - half,
+            ..panels_area
+        };
 
-        self.render_panel(local_area,  buf, BrowserFocus::Local,  is_focus);
+        self.render_panel(local_area, buf, BrowserFocus::Local, is_focus);
         self.render_panel(remote_area, buf, BrowserFocus::Remote, is_focus);
         self.render_status(status_area, buf);
     }
 
-    fn render_panel(&mut self, area: Rect, buf: &mut Buffer, side: BrowserFocus, pane_focused: bool) {
+    fn render_panel(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        side: BrowserFocus,
+        pane_focused: bool,
+    ) {
         let is_active = self.focus == side && pane_focused;
         let (title, path_str, entries, list_state) = match side {
             BrowserFocus::Local => (
@@ -955,7 +1112,11 @@ impl FileBrowser {
             ),
         };
 
-        let border_col = if is_active { Color::Cyan } else { Color::DarkGray };
+        let border_col = if is_active {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_col))
@@ -970,16 +1131,21 @@ impl FileBrowser {
         // When the remote panel has no real entries yet (only the synthetic ".."
         // or completely empty), show the raw sftp output so the user can see
         // banners, errors, host-key prompts, and ls output in real time.
-        let only_dotdot = entries.len() <= 1 && entries.first().map(|e| e.name == "..").unwrap_or(true);
+        let only_dotdot =
+            entries.len() <= 1 && entries.first().map(|e| e.name == "..").unwrap_or(true);
         if side == BrowserFocus::Remote && only_dotdot && !self.raw_snapshot.is_empty() {
             // Show last N lines of raw output that fit in the panel.
-            let visible: Vec<&String> = self.raw_snapshot.iter()
+            let visible: Vec<&String> = self
+                .raw_snapshot
+                .iter()
                 .filter(|l| !l.trim().is_empty())
                 .collect();
             let start = visible.len().saturating_sub(inner.height as usize);
             for (i, line) in visible[start..].iter().enumerate() {
                 let y = inner.y + i as u16;
-                if y >= inner.y + inner.height { break; }
+                if y >= inner.y + inner.height {
+                    break;
+                }
                 let span = Span::styled(
                     line.chars().take(inner.width as usize).collect::<String>(),
                     Style::default().fg(Color::DarkGray),
@@ -991,40 +1157,51 @@ impl FileBrowser {
 
         // Fixed column widths: size(9) + modified(16) + perms(10) + separators.
         // Name gets the remaining space and is truncated to fit.
-        const W_SIZE:  usize =  9;
-        const W_MOD:   usize = 16;
+        const W_SIZE: usize = 9;
+        const W_MOD: usize = 16;
         const W_PERMS: usize = 10;
-        const W_GAPS:  usize =  3;
+        const W_GAPS: usize = 3;
         let w_name = (inner.width as usize).saturating_sub(W_SIZE + W_MOD + W_PERMS + W_GAPS);
 
-        let items: Vec<ListItem> = entries.iter().map(|e| {
-            let name_col = if e.is_dir { Color::Cyan } else { Color::White };
-            let display_name = if e.is_dir { format!("{}/", e.name) } else { e.name.clone() };
-            let name_trunc: String = display_name.chars().take(w_name).collect();
-            let name_padded = format!("{:<width$}", name_trunc, width = w_name);
-            let line = Line::from(vec![
-                Span::styled(name_padded, Style::default().fg(name_col)),
-                Span::styled(
-                    format!(" {:>W_SIZE$}", e.size),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!(" {:<W_MOD$}", e.modified),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!(" {:<W_PERMS$}", e.perms),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]);
-            ListItem::new(line)
-        }).collect();
+        let items: Vec<ListItem> = entries
+            .iter()
+            .map(|e| {
+                let name_col = if e.is_dir { Color::Cyan } else { Color::White };
+                let display_name = if e.is_dir {
+                    format!("{}/", e.name)
+                } else {
+                    e.name.clone()
+                };
+                let name_trunc: String = display_name.chars().take(w_name).collect();
+                let name_padded = format!("{:<width$}", name_trunc, width = w_name);
+                let line = Line::from(vec![
+                    Span::styled(name_padded, Style::default().fg(name_col)),
+                    Span::styled(
+                        format!(" {:>W_SIZE$}", e.size),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!(" {:<W_MOD$}", e.modified),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!(" {:<W_PERMS$}", e.perms),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]);
+                ListItem::new(line)
+            })
+            .collect();
 
         let list = List::new(items)
             .highlight_style(
                 Style::default()
                     .fg(Color::Black)
-                    .bg(if is_active { Color::Cyan } else { Color::DarkGray })
+                    .bg(if is_active {
+                        Color::Cyan
+                    } else {
+                        Color::DarkGray
+                    })
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("> ");
@@ -1034,45 +1211,73 @@ impl FileBrowser {
     fn render_status(&self, area: Rect, buf: &mut Buffer) {
         // Confirmation prompt overrides the normal status bar.
         if let Some(ref tagged) = self.confirm_delete {
-            let name = tagged.strip_prefix("local:").or_else(|| tagged.strip_prefix("remote:")).unwrap_or(tagged);
-            let side = if tagged.starts_with("local:") { "local" } else { "remote" };
+            let name = tagged
+                .strip_prefix("local:")
+                .or_else(|| tagged.strip_prefix("remote:"))
+                .unwrap_or(tagged);
+            let side = if tagged.starts_with("local:") {
+                "local"
+            } else {
+                "remote"
+            };
             let msg = format!("  Delete {} '{}'?  [y] Yes   [n] No", side, name);
-            let span = Span::styled(msg, Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD));
+            let span = Span::styled(
+                msg,
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            );
             buf.set_span(area.x, area.y, &span, area.width);
             return;
         }
 
         let (state_label, state_col) = match self.sftp_state {
-            SftpState::Connecting    => ("[connecting]", Color::Yellow),
-            SftpState::WaitingCd     => ("[cd…]",        Color::Yellow),
-            SftpState::WaitingPwd    => ("[pwd…]",       Color::Yellow),
-            SftpState::Idle          => ("[idle]",       Color::DarkGray),
-            SftpState::WaitingLs     => ("[ls…]",        Color::Yellow),
-            SftpState::WaitingDelete => ("[deleting…]",  Color::Red),
-            SftpState::Transferring  => ("[xfer…]",      Color::Green),
+            SftpState::Connecting => ("[connecting]", Color::Yellow),
+            SftpState::WaitingCd => ("[cd…]", Color::Yellow),
+            SftpState::WaitingPwd => ("[pwd…]", Color::Yellow),
+            SftpState::Idle => ("[idle]", Color::DarkGray),
+            SftpState::WaitingLs => ("[ls…]", Color::Yellow),
+            SftpState::WaitingDelete => ("[deleting…]", Color::Red),
+            SftpState::Transferring => ("[xfer…]", Color::Green),
         };
 
         let transfer_str = if let Some(ref t) = self.last_transfer {
-            if t.done { format!("✓ {}  ", t.filename) }
-            else      { format!("⟳ {} {}  ", t.filename, t.progress) }
+            if t.done {
+                format!("✓ {}  ", t.filename)
+            } else {
+                format!("⟳ {} {}  ", t.filename, t.progress)
+            }
         } else {
             String::new()
         };
 
         let parse_hint = if self.remote_entries.len() <= 1 && !self.raw_snapshot.is_empty() {
-            self.raw_snapshot.iter().rev()
+            self.raw_snapshot
+                .iter()
+                .rev()
                 .find(|l| !l.trim().is_empty())
                 .map(|l| format!(" | {}", l.trim().chars().take(40).collect::<String>()))
                 .unwrap_or_default()
-        } else { String::new() };
+        } else {
+            String::new()
+        };
 
         let help = "Tab:switch  Spc/Enter:cd  Bksp:up  F5:Download  F6:Upload  Del:rm";
         let state_span = Span::styled(state_label, Style::default().fg(state_col));
-        let rest_span  = Span::styled(
-            format!(" {}{}  {}  {}", self.status_msg, parse_hint, transfer_str, help),
+        let rest_span = Span::styled(
+            format!(
+                " {}{}  {}  {}",
+                self.status_msg, parse_hint, transfer_str, help
+            ),
             Style::default().fg(Color::DarkGray),
         );
-        buf.set_line(area.x, area.y, &Line::from(vec![state_span, rest_span]), area.width);
+        buf.set_line(
+            area.x,
+            area.y,
+            &Line::from(vec![state_span, rest_span]),
+            area.width,
+        );
     }
 }
 
@@ -1090,27 +1295,36 @@ fn strip_ansi(raw: &[u8]) -> String {
     while i < raw.len() {
         if raw[i] == 0x1b {
             i += 1;
-            if i >= raw.len() { break; }
+            if i >= raw.len() {
+                break;
+            }
             match raw[i] {
                 // CSI sequence: ESC [ ... <0x40–0x7e>
                 b'[' => {
                     i += 1;
-                    while i < raw.len() && !(0x40..=0x7e).contains(&raw[i]) { i += 1; }
+                    while i < raw.len() && !(0x40..=0x7e).contains(&raw[i]) {
+                        i += 1;
+                    }
                     i += 1; // consume final byte
                 }
                 // OSC sequence: ESC ] ... BEL or ST
                 b']' => {
                     i += 1;
                     while i < raw.len() && raw[i] != 0x07 {
-                        if raw[i] == 0x1b && i + 1 < raw.len() && raw[i+1] == b'\\' {
-                            i += 2; break;
+                        if raw[i] == 0x1b && i + 1 < raw.len() && raw[i + 1] == b'\\' {
+                            i += 2;
+                            break;
                         }
                         i += 1;
                     }
-                    if i < raw.len() { i += 1; } // consume BEL
+                    if i < raw.len() {
+                        i += 1;
+                    } // consume BEL
                 }
                 // Two-byte ESC sequence
-                _ => { i += 1; }
+                _ => {
+                    i += 1;
+                }
             }
         } else {
             out.push(raw[i]);
@@ -1125,7 +1339,6 @@ fn strip_ansi(raw: &[u8]) -> String {
 // SFTP screen-scraping helpers
 // ---------------------------------------------------------------------------
 
-
 /// Extract the remote working directory from `pwd` output.
 ///
 /// OpenSSH sftp prints: `Remote working directory: /home/user`
@@ -1135,11 +1348,14 @@ fn parse_pwd(lines: &[String]) -> Option<String> {
     if let Some(l) = lines.iter().find(|l| l.contains("working directory")) {
         if let Some(path) = l.splitn(2, ':').nth(1) {
             let p = path.trim();
-            if !p.is_empty() { return Some(p.to_string()); }
+            if !p.is_empty() {
+                return Some(p.to_string());
+            }
         }
     }
     // Fallback: first line that looks like an absolute path after the `pwd` echo.
-    lines.iter()
+    lines
+        .iter()
         .find(|l| {
             let t = l.trim();
             (t.starts_with('/') || t.starts_with('~')) && !t.contains(' ')
@@ -1158,7 +1374,13 @@ fn parse_pwd(lines: &[String]) -> Option<String> {
 /// counting from 0 (perms=0, links=1, user=2, group=3, size=4,
 /// month=5, day=6, time-or-year=7, name=8+).
 fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
-    let mut entries = vec![FsEntry { name: "..".to_string(), is_dir: true, size: String::new(), perms: String::new(), modified: String::new() }];
+    let mut entries = vec![FsEntry {
+        name: "..".to_string(),
+        is_dir: true,
+        size: String::new(),
+        perms: String::new(),
+        modified: String::new(),
+    }];
     for line in lines {
         let line = line.trim();
         if line.is_empty()
@@ -1167,18 +1389,24 @@ fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
             || line.starts_with("Changing")
             || line.starts_with("total")
             || line.starts_with("ls")
-        { continue; }
+        {
+            continue;
+        }
 
         // Split into tokens on runs of whitespace (not individual chars).
         let tokens: Vec<&str> = line.split_whitespace().collect();
 
         // Need at least 9 tokens: perms links user group size month day time name
-        if tokens.len() < 9 { continue; }
+        if tokens.len() < 9 {
+            continue;
+        }
 
-        let perms   = tokens[0];
-        let is_dir  = perms.starts_with('d');
+        let perms = tokens[0];
+        let is_dir = perms.starts_with('d');
         let is_link = perms.starts_with('l');
-        if !perms.starts_with('-') && !is_dir && !is_link { continue; }
+        if !perms.starts_with('-') && !is_dir && !is_link {
+            continue;
+        }
 
         // Size is token[4]; link count may be '?' so we don't parse tokens[1].
         let size_bytes: u64 = tokens[4].parse().unwrap_or(0);
@@ -1187,7 +1415,9 @@ fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
         // position using the original line rather than re-joining tokens.
         let name = skip_n_tokens(line, 8).trim_end().to_string();
 
-        if name.is_empty() || name == "." || name == ".." { continue; }
+        if name.is_empty() || name == "." || name == ".." {
+            continue;
+        }
 
         // Symlinks: strip " -> target" suffix.
         let name = if is_link {
@@ -1199,9 +1429,13 @@ fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
         let modified = format!("{} {} {}", tokens[5], tokens[6], tokens[7]);
         entries.push(FsEntry {
             name,
-            is_dir:   is_dir || is_link,
-            size:     if is_dir { String::new() } else { human_size(size_bytes) },
-            perms:    perms.to_string(),
+            is_dir: is_dir || is_link,
+            size: if is_dir {
+                String::new()
+            } else {
+                human_size(size_bytes)
+            },
+            perms: perms.to_string(),
             modified,
         });
     }
@@ -1216,7 +1450,9 @@ fn skip_n_tokens(line: &str, n: usize) -> &str {
     let mut remaining = line.trim_start();
     for _ in 0..n {
         // Skip one token (non-whitespace run).
-        let end = remaining.find(|c: char| c.is_ascii_whitespace()).unwrap_or(remaining.len());
+        let end = remaining
+            .find(|c: char| c.is_ascii_whitespace())
+            .unwrap_or(remaining.len());
         remaining = &remaining[end..];
         // Skip whitespace between tokens.
         remaining = remaining.trim_start();
@@ -1245,22 +1481,39 @@ fn scrape_transfer_progress(lines: &[String]) -> Option<String> {
 /// Decompose a Unix timestamp into (year, month, day, hour, minute).
 fn epoch_to_ymd(secs: u64) -> (u32, u32, u32, u32, u32) {
     let mi = (secs / 60) % 60;
-    let h  = (secs / 3600) % 24;
+    let h = (secs / 3600) % 24;
     let days = secs / 86400;
     let mut y = 1970u32;
     let mut d = days as u32;
     loop {
         let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
         let ydays = if leap { 366 } else { 365 };
-        if d < ydays { break; }
+        if d < ydays {
+            break;
+        }
         d -= ydays;
         y += 1;
     }
     let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let month_days: [u32; 12] = [31, if leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days: [u32; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut mo = 0u32;
     for mlen in month_days {
-        if d < mlen { break; }
+        if d < mlen {
+            break;
+        }
         d -= mlen;
         mo += 1;
     }
@@ -1275,25 +1528,44 @@ fn local_root() -> &'static str {
 
 /// Read a local directory into a sorted `Vec<FsEntry>`.
 fn read_local_dir(path: &Path) -> Vec<FsEntry> {
-    let mut entries = vec![FsEntry { name: "..".to_string(), is_dir: true, size: String::new(), perms: String::new(), modified: String::new() }];
+    let mut entries = vec![FsEntry {
+        name: "..".to_string(),
+        is_dir: true,
+        size: String::new(),
+        perms: String::new(),
+        modified: String::new(),
+    }];
     if let Ok(rd) = fs::read_dir(path) {
         for entry in rd.flatten() {
             let meta = entry.metadata().ok();
             let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
-            let size   = meta.as_ref().and_then(|m| if is_dir { None } else { Some(human_size(m.len())) }).unwrap_or_default();
-            let modified = meta.as_ref()
+            let size = meta
+                .as_ref()
+                .and_then(|m| {
+                    if is_dir {
+                        None
+                    } else {
+                        Some(human_size(m.len()))
+                    }
+                })
+                .unwrap_or_default();
+            let modified = meta
+                .as_ref()
                 .and_then(|m| m.modified().ok())
                 .map(|t| {
-                    let secs = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let secs = t
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
                     let (y, mo, d, h, mi) = epoch_to_ymd(secs);
                     format!("{:04}-{:02}-{:02} {:02}:{:02}", y, mo, d, h, mi)
                 })
                 .unwrap_or_default();
             entries.push(FsEntry {
-                name:     entry.file_name().to_string_lossy().to_string(),
+                name: entry.file_name().to_string_lossy().to_string(),
                 is_dir,
                 size,
-                perms:    String::new(),
+                perms: String::new(),
                 modified,
             });
         }
@@ -1311,7 +1583,11 @@ fn human_size(bytes: u64) -> String {
         val /= 1024.0;
         unit += 1;
     }
-    if unit == 0 { format!("{} B", bytes) } else { format!("{:.1} {}", val, UNITS[unit]) }
+    if unit == 0 {
+        format!("{} B", bytes)
+    } else {
+        format!("{:.1} {}", val, UNITS[unit])
+    }
 }
 
 /// Quote a filename for use in an sftp command.
@@ -1326,7 +1602,10 @@ fn shell_quote(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Direction along which a split divides its available area.
-enum Split { Horizontal, Vertical }
+enum Split {
+    Horizontal,
+    Vertical,
+}
 
 /// A node in the pane tree.
 ///
@@ -1338,10 +1617,10 @@ enum Split { Horizontal, Vertical }
 /// Internal variant:
 /// - `Split` — divides its area among `children` horizontally or vertically.
 enum Pane {
-    Connect     { list_state: ListState },
-    Session     { terminal: EmbeddedTerminal },
+    Connect { list_state: ListState },
+    Session { terminal: EmbeddedTerminal },
     FileBrowser { browser: FileBrowser },
-    Split       { kind: Split, children: Vec<Pane> },
+    Split { kind: Split, children: Vec<Pane> },
 }
 
 impl Pane {
@@ -1358,7 +1637,11 @@ impl Pane {
             Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } => vec![area],
             Pane::Split { kind, children } => {
                 let areas = split_areas(area, kind, children.len());
-                children.iter().zip(areas).flat_map(|(c, a)| c.leaf_areas(a)).collect()
+                children
+                    .iter()
+                    .zip(areas)
+                    .flat_map(|(c, a)| c.leaf_areas(a))
+                    .collect()
             }
         }
     }
@@ -1375,13 +1658,19 @@ impl Pane {
     fn leaf_mut(&mut self, n: usize) -> Option<&mut Pane> {
         match self {
             Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } => {
-                if n == 0 { Some(self) } else { None }
+                if n == 0 {
+                    Some(self)
+                } else {
+                    None
+                }
             }
             Pane::Split { children, .. } => {
                 let mut offset = 0;
                 for child in children {
                     let count = child.leaf_count();
-                    if n < offset + count { return child.leaf_mut(n - offset); }
+                    if n < offset + count {
+                        return child.leaf_mut(n - offset);
+                    }
                     offset += count;
                 }
                 None
@@ -1393,13 +1682,19 @@ impl Pane {
     fn leaf(&self, n: usize) -> Option<&Pane> {
         match self {
             Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } => {
-                if n == 0 { Some(self) } else { None }
+                if n == 0 {
+                    Some(self)
+                } else {
+                    None
+                }
             }
             Pane::Split { children, .. } => {
                 let mut offset = 0;
                 for child in children {
                     let count = child.leaf_count();
-                    if n < offset + count { return child.leaf(n - offset); }
+                    if n < offset + count {
+                        return child.leaf(n - offset);
+                    }
                     offset += count;
                 }
                 None
@@ -1419,7 +1714,10 @@ impl Pane {
                     if n < offset + count {
                         if count == 1 {
                             let old = std::mem::replace(child, Pane::new_connect());
-                            *child = Pane::Split { kind, children: vec![old, Pane::new_connect()] };
+                            *child = Pane::Split {
+                                kind,
+                                children: vec![old, Pane::new_connect()],
+                            };
                         } else {
                             child.split_leaf(n - offset, kind);
                         }
@@ -1435,14 +1733,14 @@ impl Pane {
     /// Return `true` if any leaf has produced new output since the last call.
     fn any_dirty(&mut self) -> bool {
         match self {
-            Pane::Session     { terminal } => terminal.dirty.swap(false, Ordering::AcqRel),
-            Pane::FileBrowser { browser  } => {
+            Pane::Session { terminal } => terminal.dirty.swap(false, Ordering::AcqRel),
+            Pane::FileBrowser { browser } => {
                 let pty_dirty = browser.sftp.dirty.swap(false, Ordering::AcqRel);
                 let state_dirty = browser.needs_redraw;
                 browser.needs_redraw = false;
                 pty_dirty || state_dirty
             }
-            Pane::Split { children, .. }   => children.iter_mut().any(|c| c.any_dirty()),
+            Pane::Split { children, .. } => children.iter_mut().any(|c| c.any_dirty()),
             _ => false,
         }
     }
@@ -1451,7 +1749,7 @@ impl Pane {
     fn tick_browsers(&mut self) {
         match self {
             Pane::FileBrowser { browser } => browser.tick(),
-            Pane::Split { children, .. }  => children.iter_mut().for_each(|c| c.tick_browsers()),
+            Pane::Split { children, .. } => children.iter_mut().for_each(|c| c.tick_browsers()),
             _ => {}
         }
     }
@@ -1486,7 +1784,15 @@ impl Pane {
     }
 
     /// Recursively render the pane tree into `buf`.
-    fn render(&mut self, area: Rect, buf: &mut Buffer, hosts: &[SshHost], focus_idx: usize, leaf_count: usize, my_idx: &mut usize) {
+    fn render(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        hosts: &[SshHost],
+        focus_idx: usize,
+        leaf_count: usize,
+        my_idx: &mut usize,
+    ) {
         match self {
             Pane::Connect { list_state } => {
                 let is_focus = *my_idx == focus_idx;
@@ -1498,7 +1804,10 @@ impl Pane {
                     } else {
                         Style::default().fg(Color::DarkGray)
                     };
-                    let block = Block::default().borders(Borders::ALL).border_style(border_style).title(" connect ");
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(border_style)
+                        .title(" connect ");
                     let inner = block.inner(area);
                     block.render(area, buf);
                     inner
@@ -1508,7 +1817,8 @@ impl Pane {
 
                 const HELP_LINES: u16 = 8;
                 let list_area = Rect {
-                    x: inner.x, y: inner.y,
+                    x: inner.x,
+                    y: inner.y,
                     width: inner.width,
                     height: inner.height.saturating_sub(HELP_LINES + 1),
                 };
@@ -1522,26 +1832,38 @@ impl Pane {
                 let items: Vec<&str> = hosts.iter().map(|h| h.label.as_str()).collect();
                 let list = List::new(items)
                     .style(Style::default().fg(Color::White))
-                    .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                    .highlight_style(
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )
                     .highlight_symbol("> ");
                 StatefulWidget::render(list, list_area, buf, list_state);
 
                 let shortcuts = [
-                    ("Alt+T",    "new tab"),
-                    ("Alt+W",    "close pane / tab"),
-                    ("Alt+-",    "split vertical"),
-                    ("Alt++",    "split horizontal"),
-                    ("Alt+B",    "open file browser"),
-                    ("Alt+↑↓",   "cycle pane focus"),
-                    ("Alt+←→",   "switch tab"),
-                    ("Ctrl+C",   "quit"),
+                    ("Alt+T", "new tab"),
+                    ("Alt+W", "close pane / tab"),
+                    ("Alt+-", "split vertical"),
+                    ("Alt++", "split horizontal"),
+                    ("Alt+B", "open file browser"),
+                    ("Alt+↑↓", "cycle pane focus"),
+                    ("Alt+←→", "switch tab"),
+                    ("Ctrl+C", "quit"),
                 ];
                 for (i, (key, desc)) in shortcuts.iter().enumerate() {
                     let y = help_area.y + i as u16;
-                    if y >= help_area.y + help_area.height { break; }
-                    let key_span  = Span::raw(format!("  {:10}", key)).style(Style::default().fg(Color::Yellow));
+                    if y >= help_area.y + help_area.height {
+                        break;
+                    }
+                    let key_span = Span::raw(format!("  {:10}", key))
+                        .style(Style::default().fg(Color::Yellow));
                     let desc_span = Span::raw(*desc).style(Style::default().fg(Color::DarkGray));
-                    buf.set_line(help_area.x, y, &Line::from(vec![key_span, desc_span]), help_area.width);
+                    buf.set_line(
+                        help_area.x,
+                        y,
+                        &Line::from(vec![key_span, desc_span]),
+                        help_area.width,
+                    );
                 }
             }
 
@@ -1555,7 +1877,9 @@ impl Pane {
                     } else {
                         Style::default().fg(Color::DarkGray)
                     };
-                    let block = Block::default().borders(Borders::ALL).border_style(border_style);
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(border_style);
                     let inner = block.inner(area);
                     block.render(area, buf);
                     inner
@@ -1586,25 +1910,39 @@ impl Pane {
 /// The last child absorbs any remainder so that the combined widths/heights
 /// always equal the parent dimension exactly.
 fn split_areas(area: Rect, kind: &Split, count: usize) -> Vec<Rect> {
-    if count == 0 { return vec![]; }
+    if count == 0 {
+        return vec![];
+    }
     match kind {
         Split::Horizontal => {
             let w = area.width / count as u16;
-            (0..count).map(|i| Rect {
-                x:      area.x + i as u16 * w,
-                y:      area.y,
-                width:  if i == count - 1 { area.width - i as u16 * w } else { w },
-                height: area.height,
-            }).collect()
+            (0..count)
+                .map(|i| Rect {
+                    x: area.x + i as u16 * w,
+                    y: area.y,
+                    width: if i == count - 1 {
+                        area.width - i as u16 * w
+                    } else {
+                        w
+                    },
+                    height: area.height,
+                })
+                .collect()
         }
         Split::Vertical => {
             let h = area.height / count as u16;
-            (0..count).map(|i| Rect {
-                x:      area.x,
-                y:      area.y + i as u16 * h,
-                width:  area.width,
-                height: if i == count - 1 { area.height - i as u16 * h } else { h },
-            }).collect()
+            (0..count)
+                .map(|i| Rect {
+                    x: area.x,
+                    y: area.y + i as u16 * h,
+                    width: area.width,
+                    height: if i == count - 1 {
+                        area.height - i as u16 * h
+                    } else {
+                        h
+                    },
+                })
+                .collect()
         }
     }
 }
@@ -1615,37 +1953,48 @@ fn split_areas(area: Rect, kind: &Split, count: usize) -> Vec<Rect> {
 
 /// A named workspace containing one pane tree and a focused-leaf index.
 struct Tab {
-    name:      String,
+    name: String,
     /// Root of the pane tree; may be a single leaf or a nested split.
-    root:      Pane,
+    root: Pane,
     /// DFS index of the currently focused leaf pane.
     focus_idx: usize,
 }
 
 impl Tab {
     fn new(name: &str) -> Self {
-        Tab { name: name.to_string(), root: Pane::new_connect(), focus_idx: 0 }
+        Tab {
+            name: name.to_string(),
+            root: Pane::new_connect(),
+            focus_idx: 0,
+        }
     }
 
-    fn leaf_count(&self) -> usize { self.root.leaf_count() }
+    fn leaf_count(&self) -> usize {
+        self.root.leaf_count()
+    }
 
     /// Move focus to the next leaf (wraps around).
-    fn focus_next(&mut self) { self.focus_idx = (self.focus_idx + 1) % self.leaf_count(); }
+    fn focus_next(&mut self) {
+        self.focus_idx = (self.focus_idx + 1) % self.leaf_count();
+    }
 
     /// Move focus to the previous leaf (wraps around).
     fn focus_prev(&mut self) {
-        if self.focus_idx == 0 { self.focus_idx = self.leaf_count() - 1; }
-        else { self.focus_idx -= 1; }
+        if self.focus_idx == 0 {
+            self.focus_idx = self.leaf_count() - 1;
+        } else {
+            self.focus_idx -= 1;
+        }
     }
 
     /// Label shown in the tab bar.
     fn display_name(&self) -> &str {
         if self.leaf_count() == 1 {
             match &self.root {
-                Pane::Connect     { .. } => "<connect>",
-                Pane::Session     { .. } => &self.name,
+                Pane::Connect { .. } => "<connect>",
+                Pane::Session { .. } => &self.name,
                 Pane::FileBrowser { .. } => &self.name,
-                _                        => &self.name,
+                _ => &self.name,
             }
         } else {
             &self.name
@@ -1659,11 +2008,14 @@ impl Tab {
     /// Wrap the currently focused leaf in a new split node and trigger a
     /// full resize pass so every terminal receives the correct new dimensions.
     fn split(&mut self, kind: Split, area: Rect) {
-        let n     = self.focus_idx;
+        let n = self.focus_idx;
         let count = self.leaf_count();
         if count == 1 {
             let old = std::mem::replace(&mut self.root, Pane::new_connect());
-            self.root = Pane::Split { kind, children: vec![old, Pane::new_connect()] };
+            self.root = Pane::Split {
+                kind,
+                children: vec![old, Pane::new_connect()],
+            };
         } else {
             self.root.split_leaf(n, kind);
         }
@@ -1682,10 +2034,14 @@ impl Tab {
     /// Return the terminal-absolute cursor position for the focused session,
     /// or `None` if the focused pane is not a session or cursor is hidden.
     fn focused_cursor(&self, content: Rect) -> Option<(u16, u16)> {
-        let areas     = self.root.leaf_areas(content);
+        let areas = self.root.leaf_areas(content);
         let pane_area = areas.get(self.focus_idx)?;
         let leaf_count = self.leaf_count();
-        let inner = if leaf_count > 1 { pane_inner(*pane_area) } else { *pane_area };
+        let inner = if leaf_count > 1 {
+            pane_inner(*pane_area)
+        } else {
+            *pane_area
+        };
         if let Some(Pane::Session { terminal }) = self.root.leaf(self.focus_idx) {
             if let Some((cx, cy)) = terminal.cursor_pos() {
                 let sx = inner.x + cx;
@@ -1704,18 +2060,23 @@ fn remove_leaf(pane: &mut Pane, n: usize) {
     match pane {
         Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } => {}
         Pane::Split { children, .. } => {
-            let mut offset    = 0;
+            let mut offset = 0;
             let mut to_remove = None;
             for (i, child) in children.iter_mut().enumerate() {
                 let count = child.leaf_count();
                 if n < offset + count {
-                    if count == 1 { to_remove = Some(i); }
-                    else { remove_leaf(child, n - offset); }
+                    if count == 1 {
+                        to_remove = Some(i);
+                    } else {
+                        remove_leaf(child, n - offset);
+                    }
                     break;
                 }
                 offset += count;
             }
-            if let Some(i) = to_remove { children.remove(i); }
+            if let Some(i) = to_remove {
+                children.remove(i);
+            }
         }
     }
 }
@@ -1726,15 +2087,15 @@ fn remove_leaf(pane: &mut Pane, n: usize) {
 
 /// Top-level application state.
 struct App {
-    tabs:         Vec<Tab>,
+    tabs: Vec<Tab>,
     selected_tab: usize,
     /// Hosts parsed from `~/.ssh/config` at startup.
-    hosts:        Vec<SshHost>,
+    hosts: Vec<SshHost>,
     /// `Some` when the process was launched with `--debug`; `None` otherwise.
-    log:          Option<Arc<Mutex<std::fs::File>>>,
+    log: Option<Arc<Mutex<std::fs::File>>>,
     /// Tracks which pane a mouse-drag originated from (DFS leaf index).
     /// Used to implement intra-TUI drag-and-drop between browser panels.
-    drag_origin:  Option<usize>,
+    drag_origin: Option<usize>,
 }
 
 impl App {
@@ -1748,8 +2109,12 @@ impl App {
         }
     }
 
-    fn tab(&self)     -> &Tab     { &self.tabs[self.selected_tab] }
-    fn tab_mut(&mut self) -> &mut Tab { &mut self.tabs[self.selected_tab] }
+    fn tab(&self) -> &Tab {
+        &self.tabs[self.selected_tab]
+    }
+    fn tab_mut(&mut self) -> &mut Tab {
+        &mut self.tabs[self.selected_tab]
+    }
 
     /// Return `true` if any session in any tab has produced new output.
     fn any_dirty(&mut self) -> bool {
@@ -1779,11 +2144,26 @@ impl App {
 
     /// Open an SSH session to `hosts[host_idx]` in the currently focused connect pane.
     fn open_session(&mut self, host_idx: usize, area: Rect) -> Result<()> {
-        let host      = self.hosts.get(host_idx).cloned().ok_or_else(|| anyhow::anyhow!("invalid host"))?;
+        let host = self
+            .hosts
+            .get(host_idx)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("invalid host"))?;
         let pane_area = self.focused_pane_area(area);
-        let term_area = if self.tab().leaf_count() > 1 { pane_inner(pane_area) } else { pane_area };
-        let term      = EmbeddedTerminal::ssh(term_area.height, term_area.width, &host.label, self.log.clone())?;
-        if self.tab().leaf_count() == 1 { self.tab_mut().name = host.label.clone(); }
+        let term_area = if self.tab().leaf_count() > 1 {
+            pane_inner(pane_area)
+        } else {
+            pane_area
+        };
+        let term = EmbeddedTerminal::ssh(
+            term_area.height,
+            term_area.width,
+            &host.label,
+            self.log.clone(),
+        )?;
+        if self.tab().leaf_count() == 1 {
+            self.tab_mut().name = host.label.clone();
+        }
         if let Some(pane) = self.tab_mut().focused_pane_mut() {
             *pane = Pane::Session { terminal: term };
         }
@@ -1792,9 +2172,15 @@ impl App {
 
     /// Open a `FileBrowser` to `hosts[host_idx]` in the currently focused pane.
     fn open_browser(&mut self, host_idx: usize) -> Result<()> {
-        let host    = self.hosts.get(host_idx).cloned().ok_or_else(|| anyhow::anyhow!("invalid host"))?;
+        let host = self
+            .hosts
+            .get(host_idx)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("invalid host"))?;
         let browser = FileBrowser::new(&host.label, self.log.clone())?;
-        if self.tab().leaf_count() == 1 { self.tab_mut().name = format!("sftp:{}", host.label); }
+        if self.tab().leaf_count() == 1 {
+            self.tab_mut().name = format!("sftp:{}", host.label);
+        }
         if let Some(pane) = self.tab_mut().focused_pane_mut() {
             *pane = Pane::FileBrowser { browser };
         }
@@ -1803,7 +2189,7 @@ impl App {
 
     fn focused_pane_area(&self, full: Rect) -> Rect {
         let content = content_area(full);
-        let areas   = self.tab().root.leaf_areas(content);
+        let areas = self.tab().root.leaf_areas(content);
         areas.get(self.tab().focus_idx).copied().unwrap_or(content)
     }
 
@@ -1839,35 +2225,57 @@ impl App {
     fn render(&mut self, full: Rect, buf: &mut Buffer) {
         let mut spans: Vec<Span> = Vec::new();
         for (i, tab) in self.tabs.iter().enumerate() {
-            if i > 0 { spans.push(Span::raw(" │ ").style(Style::default().fg(Color::DarkGray))); }
+            if i > 0 {
+                spans.push(Span::raw(" │ ").style(Style::default().fg(Color::DarkGray)));
+            }
             let span = Span::raw(format!(" {} ", tab.display_name()));
             if i == self.selected_tab {
-                spans.push(span.style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+                spans.push(
+                    span.style(
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                );
             } else {
                 spans.push(span.style(Style::default().fg(Color::White)));
             }
         }
 
-        let outer_block = Block::default().borders(Borders::ALL).title(Line::from(spans));
+        let outer_block = Block::default()
+            .borders(Borders::ALL)
+            .title(Line::from(spans));
         let content = outer_block.inner(full);
         outer_block.render(full, buf);
 
-        let focus_idx  = self.tabs[self.selected_tab].focus_idx;
-        let hosts      = &self.hosts;
-        let mut idx    = 0;
+        let focus_idx = self.tabs[self.selected_tab].focus_idx;
+        let hosts = &self.hosts;
+        let mut idx = 0;
         let leaf_count = self.tabs[self.selected_tab].root.leaf_count();
-        self.tabs[self.selected_tab].root.render(content, buf, hosts, focus_idx, leaf_count, &mut idx);
+        self.tabs[self.selected_tab]
+            .root
+            .render(content, buf, hosts, focus_idx, leaf_count, &mut idx);
     }
 }
 
 /// The drawable area inside the outer application border (1-cell inset on all sides).
 fn content_area(full: Rect) -> Rect {
-    Rect { x: full.x + 1, y: full.y + 1, width: full.width.saturating_sub(2), height: full.height.saturating_sub(2) }
+    Rect {
+        x: full.x + 1,
+        y: full.y + 1,
+        width: full.width.saturating_sub(2),
+        height: full.height.saturating_sub(2),
+    }
 }
 
 /// The drawable area inside a pane's own border (1-cell inset on all sides).
 fn pane_inner(area: Rect) -> Rect {
-    Rect { x: area.x + 1, y: area.y + 1, width: area.width.saturating_sub(2), height: area.height.saturating_sub(2) }
+    Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1889,13 +2297,25 @@ fn main() -> Result<()> {
     // scrollback, and enable raw mode so key events arrive unfiltered.
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
 
-    let backend  = CrosstermBackend::new(stdout);
+    let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app       = App::new(log_file.clone());
-    let mut last_area = { let s = terminal.size()?; Rect { x: 0, y: 0, width: s.width, height: s.height } };
+    let mut app = App::new(log_file.clone());
+    let mut last_area = {
+        let s = terminal.size()?;
+        Rect {
+            x: 0,
+            y: 0,
+            width: s.width,
+            height: s.height,
+        }
+    };
     // Tracks whether mouse capture has been re-enabled after ratatui's draw
     // cycle temporarily disables it; we keep it permanently active.
     let mut host_mouse_captured = false;
@@ -1924,23 +2344,28 @@ fn main() -> Result<()> {
             match event::read()? {
                 Event::Key(key) => {
                     // Ignore key-release and key-repeat events; act on presses only.
-                    if key.kind != KeyEventKind::Press { continue; }
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
 
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                    let alt  = key.modifiers.contains(KeyModifiers::ALT);
+                    let alt = key.modifiers.contains(KeyModifiers::ALT);
 
                     // ---- Global shortcuts (Alt+...) ----
                     if alt && !ctrl {
                         match key.code {
-                            KeyCode::Left  => {
-                                if app.selected_tab > 0 { app.selected_tab -= 1; }
-                                else { app.selected_tab = app.tabs.len() - 1; }
+                            KeyCode::Left => {
+                                if app.selected_tab > 0 {
+                                    app.selected_tab -= 1;
+                                } else {
+                                    app.selected_tab = app.tabs.len() - 1;
+                                }
                             }
                             KeyCode::Right => {
                                 app.selected_tab = (app.selected_tab + 1) % app.tabs.len();
                             }
-                            KeyCode::Up    => app.tab_mut().focus_prev(),
-                            KeyCode::Down  => app.tab_mut().focus_next(),
+                            KeyCode::Up => app.tab_mut().focus_prev(),
+                            KeyCode::Down => app.tab_mut().focus_next(),
                             KeyCode::Char('w') => {
                                 let was_last_pane = app.tab().leaf_count() == 1;
                                 if was_last_pane {
@@ -1972,7 +2397,11 @@ fn main() -> Result<()> {
                                     // Use the selected host from the connect list.
                                     let selected = if let Some(Pane::Connect { list_state }) =
                                         app.tab_mut().focused_pane_mut()
-                                    { list_state.selected() } else { None };
+                                    {
+                                        list_state.selected()
+                                    } else {
+                                        None
+                                    };
                                     if let Some(idx) = selected {
                                         if let Err(e) = app.open_browser(idx) {
                                             log!(log_file, "open_browser error: {}", e);
@@ -1996,24 +2425,36 @@ fn main() -> Result<()> {
                         match key.code {
                             KeyCode::Char('c') if ctrl && !alt => {
                                 disable_raw_mode()?;
-                                execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture)?;
+                                execute!(
+                                    terminal.backend_mut(),
+                                    LeaveAlternateScreen,
+                                    crossterm::event::DisableMouseCapture
+                                )?;
                                 terminal.show_cursor()?;
                                 return Ok(());
                             }
-                            KeyCode::Up   | KeyCode::Char('k') => {
-                                if let Some(Pane::Connect { list_state }) = app.tab_mut().focused_pane_mut() {
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if let Some(Pane::Connect { list_state }) =
+                                    app.tab_mut().focused_pane_mut()
+                                {
                                     list_state.select_previous();
                                 }
                             }
                             KeyCode::Down | KeyCode::Char('j') => {
-                                if let Some(Pane::Connect { list_state }) = app.tab_mut().focused_pane_mut() {
+                                if let Some(Pane::Connect { list_state }) =
+                                    app.tab_mut().focused_pane_mut()
+                                {
                                     list_state.select_next();
                                 }
                             }
                             KeyCode::Enter => {
-                                let selected = if let Some(Pane::Connect { list_state }) = app.tab_mut().focused_pane_mut() {
+                                let selected = if let Some(Pane::Connect { list_state }) =
+                                    app.tab_mut().focused_pane_mut()
+                                {
                                     list_state.selected()
-                                } else { None };
+                                } else {
+                                    None
+                                };
                                 if let Some(idx) = selected {
                                     if let Err(e) = app.open_session(idx, last_area) {
                                         log!(log_file, "open_session error: {}", e);
@@ -2034,33 +2475,43 @@ fn main() -> Result<()> {
                     );
 
                     if focused_is_browser {
-                        if let Some(Pane::FileBrowser { browser }) = app.tab_mut().focused_pane_mut() {
+                        if let Some(Pane::FileBrowser { browser }) =
+                            app.tab_mut().focused_pane_mut()
+                        {
                             // When a deletion confirmation is pending, only y/n/Esc are active.
                             if browser.confirm_delete.is_some() {
                                 match key.code {
-                                    KeyCode::Char('y') | KeyCode::Char('Y') => browser.confirm_delete_yes(),
-                                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => browser.confirm_delete_no(),
+                                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                        browser.confirm_delete_yes()
+                                    }
+                                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                                        browser.confirm_delete_no()
+                                    }
                                     _ => {}
                                 }
                             } else {
                                 match key.code {
-                                    KeyCode::Tab                  => {
+                                    KeyCode::Tab => {
                                         browser.focus = if browser.focus == BrowserFocus::Local {
                                             BrowserFocus::Remote
                                         } else {
                                             BrowserFocus::Local
                                         };
                                     }
-                                    KeyCode::Up                   => browser.nav_up(),
-                                    KeyCode::Down                 => browser.nav_down(),
+                                    KeyCode::Up => browser.nav_up(),
+                                    KeyCode::Down => browser.nav_down(),
                                     KeyCode::Char(' ') | KeyCode::Enter => browser.enter(),
-                                    KeyCode::Backspace            => browser.go_up(),
-                                    KeyCode::F(5)                 => browser.download(),
-                                    KeyCode::F(6)                 => browser.upload(),
-                                    KeyCode::Delete               => browser.delete_focused(),
-                                    KeyCode::Char('c') if ctrl    => {
+                                    KeyCode::Backspace => browser.go_up(),
+                                    KeyCode::F(5) => browser.download(),
+                                    KeyCode::F(6) => browser.upload(),
+                                    KeyCode::Delete => browser.delete_focused(),
+                                    KeyCode::Char('c') if ctrl => {
                                         disable_raw_mode()?;
-                                        execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture)?;
+                                        execute!(
+                                            terminal.backend_mut(),
+                                            LeaveAlternateScreen,
+                                            crossterm::event::DisableMouseCapture
+                                        )?;
                                         terminal.show_cursor()?;
                                         return Ok(());
                                     }
@@ -2078,10 +2529,22 @@ fn main() -> Result<()> {
                     // works in bash, nano, zsh, and other readline-based apps.
                     if ctrl && !alt {
                         match key.code {
-                            KeyCode::Left  => { app.send_str("\x1b[1;5D"); continue; }
-                            KeyCode::Right => { app.send_str("\x1b[1;5C"); continue; }
-                            KeyCode::Up    => { app.send_str("\x1b[1;5A"); continue; }
-                            KeyCode::Down  => { app.send_str("\x1b[1;5B"); continue; }
+                            KeyCode::Left => {
+                                app.send_str("\x1b[1;5D");
+                                continue;
+                            }
+                            KeyCode::Right => {
+                                app.send_str("\x1b[1;5C");
+                                continue;
+                            }
+                            KeyCode::Up => {
+                                app.send_str("\x1b[1;5A");
+                                continue;
+                            }
+                            KeyCode::Down => {
+                                app.send_str("\x1b[1;5B");
+                                continue;
+                            }
                             _ => {}
                         }
                     }
@@ -2097,27 +2560,38 @@ fn main() -> Result<()> {
                             app.send_char(c);
                         }
                         // Map special keys to their standard VT/xterm escape sequences.
-                        KeyCode::Enter     => app.send_str("\r"),
+                        KeyCode::Enter => app.send_str("\r"),
                         KeyCode::Backspace => app.send_str("\x7f"),
-                        KeyCode::Delete    => app.send_str("\x1b[3~"),
-                        KeyCode::Tab       => app.send_str("\t"),
-                        KeyCode::BackTab   => app.send_str("\x1b[Z"),
-                        KeyCode::Left      => app.send_str("\x1b[D"),
-                        KeyCode::Right     => app.send_str("\x1b[C"),
-                        KeyCode::Up        => app.send_str("\x1b[A"),
-                        KeyCode::Down      => app.send_str("\x1b[B"),
-                        KeyCode::Home      => app.send_str("\x1b[H"),
-                        KeyCode::End       => app.send_str("\x1b[F"),
-                        KeyCode::PageUp    => app.send_str("\x1b[5~"),
-                        KeyCode::PageDown  => app.send_str("\x1b[6~"),
+                        KeyCode::Delete => app.send_str("\x1b[3~"),
+                        KeyCode::Tab => app.send_str("\t"),
+                        KeyCode::BackTab => app.send_str("\x1b[Z"),
+                        KeyCode::Left => app.send_str("\x1b[D"),
+                        KeyCode::Right => app.send_str("\x1b[C"),
+                        KeyCode::Up => app.send_str("\x1b[A"),
+                        KeyCode::Down => app.send_str("\x1b[B"),
+                        KeyCode::Home => app.send_str("\x1b[H"),
+                        KeyCode::End => app.send_str("\x1b[F"),
+                        KeyCode::PageUp => app.send_str("\x1b[5~"),
+                        KeyCode::PageDown => app.send_str("\x1b[6~"),
                         KeyCode::F(n) => {
                             let seq = match n {
-                                1=>"OP", 2=>"OQ", 3=>"OR", 4=>"OS",
-                                5=>"\x1b[15~", 6=>"\x1b[17~", 7=>"\x1b[18~", 8=>"\x1b[19~",
-                                9=>"\x1b[20~", 10=>"\x1b[21~", 11=>"\x1b[23~", 12=>"\x1b[24~",
+                                1 => "OP",
+                                2 => "OQ",
+                                3 => "OR",
+                                4 => "OS",
+                                5 => "\x1b[15~",
+                                6 => "\x1b[17~",
+                                7 => "\x1b[18~",
+                                8 => "\x1b[19~",
+                                9 => "\x1b[20~",
+                                10 => "\x1b[21~",
+                                11 => "\x1b[23~",
+                                12 => "\x1b[24~",
                                 _ => "",
                             };
-                            if !seq.is_empty() { app.send_str(seq); }
+                            if !seq.is_empty() {
+                                app.send_str(seq);
+                            }
                         }
                         _ => {}
                     }
@@ -2125,13 +2599,19 @@ fn main() -> Result<()> {
 
                 Event::Mouse(mouse) => {
                     let content = content_area(last_area);
-                    let areas   = app.tabs[app.selected_tab].root.leaf_areas(content);
+                    let areas = app.tabs[app.selected_tab].root.leaf_areas(content);
 
                     // Determine which pane was hit by the mouse event.
-                    let clicked_pane = areas.iter().enumerate().find(|(_, area)| {
-                        mouse.column >= area.x && mouse.column < area.x + area.width
-                            && mouse.row >= area.y && mouse.row < area.y + area.height
-                    }).map(|(i, area)| (i, *area));
+                    let clicked_pane = areas
+                        .iter()
+                        .enumerate()
+                        .find(|(_, area)| {
+                            mouse.column >= area.x
+                                && mouse.column < area.x + area.width
+                                && mouse.row >= area.y
+                                && mouse.row < area.y + area.height
+                        })
+                        .map(|(i, area)| (i, *area));
 
                     if let Some((pane_idx, pane_area)) = clicked_pane {
                         let prev_focus = app.tabs[app.selected_tab].focus_idx;
@@ -2151,10 +2631,15 @@ fn main() -> Result<()> {
                             if let MouseEventKind::Up(_) = mouse.kind {
                                 // Check if this is the end of a cross-pane drag.
                                 let origin = app.drag_origin.take();
-                                let origin_is_browser = origin.map(|o| o != pane_idx && matches!(
-                                    app.tabs[app.selected_tab].root.leaf(o),
-                                    Some(Pane::FileBrowser { .. })
-                                )).unwrap_or(false);
+                                let origin_is_browser = origin
+                                    .map(|o| {
+                                        o != pane_idx
+                                            && matches!(
+                                                app.tabs[app.selected_tab].root.leaf(o),
+                                                Some(Pane::FileBrowser { .. })
+                                            )
+                                    })
+                                    .unwrap_or(false);
 
                                 if origin_is_browser {
                                     // Drag ended on a different browser pane — not applicable
@@ -2165,9 +2650,13 @@ fn main() -> Result<()> {
                                 {
                                     // Determine which panel the mouse is in based on x position.
                                     let inner = pane_inner(pane_area);
-                                    let half  = inner.width / 2;
+                                    let half = inner.width / 2;
                                     let in_remote = mouse.column >= inner.x + half;
-                                    browser.focus = if in_remote { BrowserFocus::Remote } else { BrowserFocus::Local };
+                                    browser.focus = if in_remote {
+                                        BrowserFocus::Remote
+                                    } else {
+                                        BrowserFocus::Local
+                                    };
                                 }
                             }
 
@@ -2178,10 +2667,14 @@ fn main() -> Result<()> {
                                     app.tab_mut().focused_pane_mut()
                                 {
                                     let inner = pane_inner(pane_area);
-                                    let half  = inner.width / 2;
+                                    let half = inner.width / 2;
                                     let in_remote = mouse.column >= inner.x + half;
                                     // Store which side the drag started on.
-                                    browser.focus = if in_remote { BrowserFocus::Remote } else { BrowserFocus::Local };
+                                    browser.focus = if in_remote {
+                                        BrowserFocus::Remote
+                                    } else {
+                                        BrowserFocus::Local
+                                    };
                                 }
                             }
 
@@ -2195,15 +2688,16 @@ fn main() -> Result<()> {
                                 if let Some(Pane::FileBrowser { browser }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
-                                    let inner    = pane_inner(pane_area);
-                                    let half     = inner.width / 2;
+                                    let inner = pane_inner(pane_area);
+                                    let half = inner.width / 2;
                                     let in_remote = mouse.column >= inner.x + half;
                                     let prev_focus_panel = browser.focus;
                                     // If mouse released in the opposite panel from where
                                     // the drag started, trigger a transfer.
                                     if in_remote && prev_focus_panel == BrowserFocus::Local {
                                         browser.drag_local_to_remote();
-                                    } else if !in_remote && prev_focus_panel == BrowserFocus::Remote {
+                                    } else if !in_remote && prev_focus_panel == BrowserFocus::Remote
+                                    {
                                         browser.drag_remote_to_local();
                                     }
                                 }
@@ -2219,38 +2713,72 @@ fn main() -> Result<()> {
                         //   2. The remote application has requested mouse reporting.
                         let same_pane = pane_idx == prev_focus;
                         let pane_wants_mouse = app.tabs[app.selected_tab]
-                            .root.leaf_mut(pane_idx)
-                            .map(|p| if let Pane::Session { terminal } = p {
-                                terminal.mouse_active.load(Ordering::Acquire)
-                            } else { false })
+                            .root
+                            .leaf_mut(pane_idx)
+                            .map(|p| {
+                                if let Pane::Session { terminal } = p {
+                                    terminal.mouse_active.load(Ordering::Acquire)
+                                } else {
+                                    false
+                                }
+                            })
                             .unwrap_or(false);
 
                         if same_pane && pane_wants_mouse {
                             let leaf_count = app.tabs[app.selected_tab].root.leaf_count();
-                            let inner = if leaf_count > 1 { pane_inner(pane_area) } else { pane_area };
+                            let inner = if leaf_count > 1 {
+                                pane_inner(pane_area)
+                            } else {
+                                pane_area
+                            };
                             // Translate absolute screen coordinates to pane-local coordinates.
                             let col = (mouse.column as i32 - inner.x as i32).max(0) as u16;
-                            let row = (mouse.row    as i32 - inner.y as i32).max(0) as u16;
+                            let row = (mouse.row as i32 - inner.y as i32).max(0) as u16;
                             // Encode as SGR mouse sequences (1-based column/row).
                             let seq = match mouse.kind {
-                                MouseEventKind::Down(MouseButton::Left)   => format!("\x1b[<0;{};{}M", col+1, row+1),
-                                MouseEventKind::Up(MouseButton::Left)     => format!("\x1b[<0;{};{}m", col+1, row+1),
-                                MouseEventKind::Down(MouseButton::Right)  => format!("\x1b[<2;{};{}M", col+1, row+1),
-                                MouseEventKind::Up(MouseButton::Right)    => format!("\x1b[<2;{};{}m", col+1, row+1),
-                                MouseEventKind::Down(MouseButton::Middle) => format!("\x1b[<1;{};{}M", col+1, row+1),
-                                MouseEventKind::Up(MouseButton::Middle)   => format!("\x1b[<1;{};{}m", col+1, row+1),
-                                MouseEventKind::ScrollUp                  => format!("\x1b[<64;{};{}M", col+1, row+1),
-                                MouseEventKind::ScrollDown                => format!("\x1b[<65;{};{}M", col+1, row+1),
-                                MouseEventKind::Drag(MouseButton::Left)   => format!("\x1b[<32;{};{}M", col+1, row+1),
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    format!("\x1b[<0;{};{}M", col + 1, row + 1)
+                                }
+                                MouseEventKind::Up(MouseButton::Left) => {
+                                    format!("\x1b[<0;{};{}m", col + 1, row + 1)
+                                }
+                                MouseEventKind::Down(MouseButton::Right) => {
+                                    format!("\x1b[<2;{};{}M", col + 1, row + 1)
+                                }
+                                MouseEventKind::Up(MouseButton::Right) => {
+                                    format!("\x1b[<2;{};{}m", col + 1, row + 1)
+                                }
+                                MouseEventKind::Down(MouseButton::Middle) => {
+                                    format!("\x1b[<1;{};{}M", col + 1, row + 1)
+                                }
+                                MouseEventKind::Up(MouseButton::Middle) => {
+                                    format!("\x1b[<1;{};{}m", col + 1, row + 1)
+                                }
+                                MouseEventKind::ScrollUp => {
+                                    format!("\x1b[<64;{};{}M", col + 1, row + 1)
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    format!("\x1b[<65;{};{}M", col + 1, row + 1)
+                                }
+                                MouseEventKind::Drag(MouseButton::Left) => {
+                                    format!("\x1b[<32;{};{}M", col + 1, row + 1)
+                                }
                                 _ => String::new(),
                             };
-                            if !seq.is_empty() { app.send_str(&seq); }
+                            if !seq.is_empty() {
+                                app.send_str(&seq);
+                            }
                         }
                     }
                 }
 
                 Event::Resize(w, h) => {
-                    last_area = Rect { x: 0, y: 0, width: w, height: h };
+                    last_area = Rect {
+                        x: 0,
+                        y: 0,
+                        width: w,
+                        height: h,
+                    };
                     app.resize_all(last_area);
                     log!(log_file, "resize {}x{}", w, h);
                 }
@@ -2263,7 +2791,9 @@ fn main() -> Result<()> {
                 last_area = f.area();
                 // Re-run resize propagation when dirty output implies the
                 // terminal may have been resized between draw calls.
-                if needs_draw { app.resize_all(last_area); }
+                if needs_draw {
+                    app.resize_all(last_area);
+                }
                 app.render(last_area, f.buffer_mut());
 
                 // Place the hardware cursor at the focused session's cursor
@@ -2290,52 +2820,116 @@ mod tests {
     // Helpers
     // -----------------------------------------------------------------------
 
-    fn r(w: u16, h: u16) -> Rect { Rect { x: 0, y: 0, width: w, height: h } }
-    fn connect() -> Pane { Pane::new_connect() }
+    fn r(w: u16, h: u16) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width: w,
+            height: h,
+        }
+    }
+    fn connect() -> Pane {
+        Pane::new_connect()
+    }
     fn hsplit() -> Pane {
-        Pane::Split { kind: Split::Horizontal, children: vec![connect(), connect()] }
+        Pane::Split {
+            kind: Split::Horizontal,
+            children: vec![connect(), connect()],
+        }
     }
     fn vsplit() -> Pane {
-        Pane::Split { kind: Split::Vertical, children: vec![connect(), connect()] }
+        Pane::Split {
+            kind: Split::Vertical,
+            children: vec![connect(), connect()],
+        }
     }
-    fn ls(raw: &str) -> Vec<String> { raw.lines().map(|l| l.to_string()).collect() }
+    fn ls(raw: &str) -> Vec<String> {
+        raw.lines().map(|l| l.to_string()).collect()
+    }
 
     // -----------------------------------------------------------------------
     // split_areas
     // -----------------------------------------------------------------------
 
-    #[test] fn split_areas_horizontal_even() {
-        let a = split_areas(r(100,20), &Split::Horizontal, 2);
-        assert_eq!(a[0], Rect { x:0,  y:0, width:50, height:20 });
-        assert_eq!(a[1], Rect { x:50, y:0, width:50, height:20 });
+    #[test]
+    fn split_areas_horizontal_even() {
+        let a = split_areas(r(100, 20), &Split::Horizontal, 2);
+        assert_eq!(
+            a[0],
+            Rect {
+                x: 0,
+                y: 0,
+                width: 50,
+                height: 20
+            }
+        );
+        assert_eq!(
+            a[1],
+            Rect {
+                x: 50,
+                y: 0,
+                width: 50,
+                height: 20
+            }
+        );
     }
-    #[test] fn split_areas_horizontal_remainder_to_last() {
-        let a = split_areas(r(101,20), &Split::Horizontal, 2);
+    #[test]
+    fn split_areas_horizontal_remainder_to_last() {
+        let a = split_areas(r(101, 20), &Split::Horizontal, 2);
         assert_eq!(a[0].width + a[1].width, 101);
         assert_eq!(a[1].width, 51);
     }
-    #[test] fn split_areas_vertical_even() {
-        let a = split_areas(r(80,40), &Split::Vertical, 2);
-        assert_eq!(a[0], Rect { x:0, y:0,  width:80, height:20 });
-        assert_eq!(a[1], Rect { x:0, y:20, width:80, height:20 });
+    #[test]
+    fn split_areas_vertical_even() {
+        let a = split_areas(r(80, 40), &Split::Vertical, 2);
+        assert_eq!(
+            a[0],
+            Rect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 20
+            }
+        );
+        assert_eq!(
+            a[1],
+            Rect {
+                x: 0,
+                y: 20,
+                width: 80,
+                height: 20
+            }
+        );
     }
-    #[test] fn split_areas_vertical_three() {
-        let a = split_areas(r(80,30), &Split::Vertical, 3);
+    #[test]
+    fn split_areas_vertical_three() {
+        let a = split_areas(r(80, 30), &Split::Vertical, 3);
         assert_eq!(a.len(), 3);
         assert_eq!(a.iter().map(|x| x.height).sum::<u16>(), 30);
     }
-    #[test] fn split_areas_empty() {
-        assert!(split_areas(r(80,40), &Split::Horizontal, 0).is_empty());
+    #[test]
+    fn split_areas_empty() {
+        assert!(split_areas(r(80, 40), &Split::Horizontal, 0).is_empty());
     }
 
     // -----------------------------------------------------------------------
     // Pane::leaf_count
     // -----------------------------------------------------------------------
 
-    #[test] fn leaf_count_single()      { assert_eq!(connect().leaf_count(), 1); }
-    #[test] fn leaf_count_split()       { assert_eq!(hsplit().leaf_count(),  2); }
-    #[test] fn leaf_count_nested() {
-        let p = Pane::Split { kind: Split::Horizontal, children: vec![connect(), vsplit()] };
+    #[test]
+    fn leaf_count_single() {
+        assert_eq!(connect().leaf_count(), 1);
+    }
+    #[test]
+    fn leaf_count_split() {
+        assert_eq!(hsplit().leaf_count(), 2);
+    }
+    #[test]
+    fn leaf_count_nested() {
+        let p = Pane::Split {
+            kind: Split::Horizontal,
+            children: vec![connect(), vsplit()],
+        };
         assert_eq!(p.leaf_count(), 3);
     }
 
@@ -2343,41 +2937,64 @@ mod tests {
     // Pane::leaf / leaf_areas
     // -----------------------------------------------------------------------
 
-    #[test] fn leaf_single_bounds() {
+    #[test]
+    fn leaf_single_bounds() {
         let p = connect();
         assert!(p.leaf(0).is_some());
         assert!(p.leaf(1).is_none());
     }
-    #[test] fn leaf_split_dfs_order() {
+    #[test]
+    fn leaf_split_dfs_order() {
         let p = hsplit();
-        assert!(matches!(p.leaf(0), Some(Pane::Connect{..})));
-        assert!(matches!(p.leaf(1), Some(Pane::Connect{..})));
+        assert!(matches!(p.leaf(0), Some(Pane::Connect { .. })));
+        assert!(matches!(p.leaf(1), Some(Pane::Connect { .. })));
         assert!(p.leaf(2).is_none());
     }
-    #[test] fn leaf_areas_covers_full() {
-        assert_eq!(connect().leaf_areas(r(100,50)), vec![r(100,50)]);
+    #[test]
+    fn leaf_areas_covers_full() {
+        assert_eq!(connect().leaf_areas(r(100, 50)), vec![r(100, 50)]);
     }
-    #[test] fn leaf_areas_sum_equals_parent() {
-        let a = hsplit().leaf_areas(r(100,50));
+    #[test]
+    fn leaf_areas_sum_equals_parent() {
+        let a = hsplit().leaf_areas(r(100, 50));
         assert_eq!(a[0].width + a[1].width, 100);
     }
-    #[test] fn leaf_areas_count_matches_leaf_count() {
-        let p = Pane::Split { kind: Split::Horizontal, children: vec![connect(), vsplit()] };
-        assert_eq!(p.leaf_areas(r(120,60)).len(), p.leaf_count());
+    #[test]
+    fn leaf_areas_count_matches_leaf_count() {
+        let p = Pane::Split {
+            kind: Split::Horizontal,
+            children: vec![connect(), vsplit()],
+        };
+        assert_eq!(p.leaf_areas(r(120, 60)).len(), p.leaf_count());
     }
 
     // -----------------------------------------------------------------------
     // remove_leaf
     // -----------------------------------------------------------------------
 
-    #[test] fn remove_leaf_first()  { let mut p = hsplit(); remove_leaf(&mut p, 0); assert_eq!(p.leaf_count(), 1); }
-    #[test] fn remove_leaf_second() { let mut p = hsplit(); remove_leaf(&mut p, 1); assert_eq!(p.leaf_count(), 1); }
-    #[test] fn remove_leaf_nested() {
-        let mut p = Pane::Split { kind: Split::Horizontal, children: vec![connect(), vsplit()] };
+    #[test]
+    fn remove_leaf_first() {
+        let mut p = hsplit();
+        remove_leaf(&mut p, 0);
+        assert_eq!(p.leaf_count(), 1);
+    }
+    #[test]
+    fn remove_leaf_second() {
+        let mut p = hsplit();
+        remove_leaf(&mut p, 1);
+        assert_eq!(p.leaf_count(), 1);
+    }
+    #[test]
+    fn remove_leaf_nested() {
+        let mut p = Pane::Split {
+            kind: Split::Horizontal,
+            children: vec![connect(), vsplit()],
+        };
         remove_leaf(&mut p, 1);
         assert_eq!(p.leaf_count(), 2);
     }
-    #[test] fn remove_leaf_noop_on_single() {
+    #[test]
+    fn remove_leaf_noop_on_single() {
         let mut p = connect();
         remove_leaf(&mut p, 0); // must not panic
         assert_eq!(p.leaf_count(), 1);
@@ -2387,43 +3004,71 @@ mod tests {
     // Tab
     // -----------------------------------------------------------------------
 
-    #[test] fn tab_initial_state() {
+    #[test]
+    fn tab_initial_state() {
         let t = Tab::new("1");
         assert_eq!(t.leaf_count(), 1);
         assert_eq!(t.focus_idx, 0);
-        assert!(matches!(t.root, Pane::Connect{..}));
+        assert!(matches!(t.root, Pane::Connect { .. }));
         assert_eq!(t.display_name(), "<connect>");
     }
-    #[test] fn tab_split_h() { let mut t = Tab::new("1"); t.split(Split::Horizontal, r(200,50)); assert_eq!(t.leaf_count(), 2); }
-    #[test] fn tab_split_v() { let mut t = Tab::new("1"); t.split(Split::Vertical,   r(200,50)); assert_eq!(t.leaf_count(), 2); }
-    #[test] fn tab_double_split_three_panes() {
+    #[test]
+    fn tab_split_h() {
         let mut t = Tab::new("1");
-        t.split(Split::Horizontal, r(200,50));
+        t.split(Split::Horizontal, r(200, 50));
+        assert_eq!(t.leaf_count(), 2);
+    }
+    #[test]
+    fn tab_split_v() {
+        let mut t = Tab::new("1");
+        t.split(Split::Vertical, r(200, 50));
+        assert_eq!(t.leaf_count(), 2);
+    }
+    #[test]
+    fn tab_double_split_three_panes() {
+        let mut t = Tab::new("1");
+        t.split(Split::Horizontal, r(200, 50));
         t.focus_idx = 1;
-        t.split(Split::Vertical, r(200,50));
+        t.split(Split::Vertical, r(200, 50));
         assert_eq!(t.leaf_count(), 3);
     }
-    #[test] fn tab_focus_next_wraps() {
-        let mut t = Tab::new("1"); t.split(Split::Horizontal, r(200,50));
-        t.focus_next(); assert_eq!(t.focus_idx, 1);
-        t.focus_next(); assert_eq!(t.focus_idx, 0);
-    }
-    #[test] fn tab_focus_prev_wraps() {
-        let mut t = Tab::new("1"); t.split(Split::Horizontal, r(200,50));
-        t.focus_prev(); assert_eq!(t.focus_idx, 1);
-        t.focus_prev(); assert_eq!(t.focus_idx, 0);
-    }
-    #[test] fn tab_close_reduces_count() {
-        let mut t = Tab::new("1"); t.split(Split::Horizontal, r(200,50));
-        t.close_focused(); assert_eq!(t.leaf_count(), 1);
-    }
-    #[test] fn tab_close_clamps_focus() {
-        let mut t = Tab::new("1"); t.split(Split::Horizontal, r(200,50));
-        t.focus_idx = 1; t.close_focused();
+    #[test]
+    fn tab_focus_next_wraps() {
+        let mut t = Tab::new("1");
+        t.split(Split::Horizontal, r(200, 50));
+        t.focus_next();
+        assert_eq!(t.focus_idx, 1);
+        t.focus_next();
         assert_eq!(t.focus_idx, 0);
     }
-    #[test] fn tab_display_name_multi_pane() {
-        let mut t = Tab::new("myhost"); t.split(Split::Horizontal, r(200,50));
+    #[test]
+    fn tab_focus_prev_wraps() {
+        let mut t = Tab::new("1");
+        t.split(Split::Horizontal, r(200, 50));
+        t.focus_prev();
+        assert_eq!(t.focus_idx, 1);
+        t.focus_prev();
+        assert_eq!(t.focus_idx, 0);
+    }
+    #[test]
+    fn tab_close_reduces_count() {
+        let mut t = Tab::new("1");
+        t.split(Split::Horizontal, r(200, 50));
+        t.close_focused();
+        assert_eq!(t.leaf_count(), 1);
+    }
+    #[test]
+    fn tab_close_clamps_focus() {
+        let mut t = Tab::new("1");
+        t.split(Split::Horizontal, r(200, 50));
+        t.focus_idx = 1;
+        t.close_focused();
+        assert_eq!(t.focus_idx, 0);
+    }
+    #[test]
+    fn tab_display_name_multi_pane() {
+        let mut t = Tab::new("myhost");
+        t.split(Split::Horizontal, r(200, 50));
         assert_eq!(t.display_name(), "myhost");
     }
 
@@ -2431,47 +3076,88 @@ mod tests {
     // parse_pwd
     // -----------------------------------------------------------------------
 
-    #[test] fn parse_pwd_label()   { assert_eq!(parse_pwd(&["Remote working directory: /home/debian".to_string()]), Some("/home/debian".to_string())); }
-    #[test] fn parse_pwd_root()    { assert_eq!(parse_pwd(&["Remote working directory: /".to_string()]), Some("/".to_string())); }
-    #[test] fn parse_pwd_bare()    { assert_eq!(parse_pwd(&["/home/user".to_string()]), Some("/home/user".to_string())); }
-    #[test] fn parse_pwd_spaces()  { assert_eq!(parse_pwd(&["/home/my dir".to_string()]), None); }
-    #[test] fn parse_pwd_empty()   { assert_eq!(parse_pwd(&[]), None); }
+    #[test]
+    fn parse_pwd_label() {
+        assert_eq!(
+            parse_pwd(&["Remote working directory: /home/debian".to_string()]),
+            Some("/home/debian".to_string())
+        );
+    }
+    #[test]
+    fn parse_pwd_root() {
+        assert_eq!(
+            parse_pwd(&["Remote working directory: /".to_string()]),
+            Some("/".to_string())
+        );
+    }
+    #[test]
+    fn parse_pwd_bare() {
+        assert_eq!(
+            parse_pwd(&["/home/user".to_string()]),
+            Some("/home/user".to_string())
+        );
+    }
+    #[test]
+    fn parse_pwd_spaces() {
+        assert_eq!(parse_pwd(&["/home/my dir".to_string()]), None);
+    }
+    #[test]
+    fn parse_pwd_empty() {
+        assert_eq!(parse_pwd(&[]), None);
+    }
 
     // -----------------------------------------------------------------------
     // parse_ls
     // -----------------------------------------------------------------------
 
-    #[test] fn parse_ls_file_and_dir() {
-        let e = parse_ls(&ls("drwx------    ? debian  debian  4096 Mar 14 09:44 docs\n-rw-r--r--    ? debian  debian   220 Aug  4  2021 .bashrc\nsftp>"));
+    #[test]
+    fn parse_ls_file_and_dir() {
+        let e = parse_ls(&ls(
+            "drwx------    ? debian  debian  4096 Mar 14 09:44 docs\n-rw-r--r--    ? debian  debian   220 Aug  4  2021 .bashrc\nsftp>",
+        ));
         assert_eq!(e.len(), 3);
         assert!(e.iter().any(|x| x.name == "docs"));
         assert!(e.iter().any(|x| x.name == ".bashrc"));
     }
-    #[test] fn parse_ls_dirs_first() {
-        let e = parse_ls(&ls("-rw-r--r--    ? u g   100 Jan  1  2020 aaa.txt\ndrwxr-xr-x    ? u g  4096 Jan  1  2020 zzz_dir"));
+    #[test]
+    fn parse_ls_dirs_first() {
+        let e = parse_ls(&ls(
+            "-rw-r--r--    ? u g   100 Jan  1  2020 aaa.txt\ndrwxr-xr-x    ? u g  4096 Jan  1  2020 zzz_dir",
+        ));
         assert_eq!(e[0].name, "..");
         assert_eq!(e[1].name, "zzz_dir");
         assert_eq!(e[2].name, "aaa.txt");
     }
-    #[test] fn parse_ls_skips_dot_dotdot() {
-        let e = parse_ls(&ls("drwx------    ? u g 4096 Mar 14 09:44 .\ndrwx------    ? u g 4096 Jan  1  2020 .."));
+    #[test]
+    fn parse_ls_skips_dot_dotdot() {
+        let e = parse_ls(&ls(
+            "drwx------    ? u g 4096 Mar 14 09:44 .\ndrwx------    ? u g 4096 Jan  1  2020 ..",
+        ));
         assert_eq!(e.len(), 1);
     }
-    #[test] fn parse_ls_symlink() {
-        let e = parse_ls(&ls("lrwxrwxrwx    ? u g 11 Jan  1  2020 mylink -> /etc/target"));
+    #[test]
+    fn parse_ls_symlink() {
+        let e = parse_ls(&ls(
+            "lrwxrwxrwx    ? u g 11 Jan  1  2020 mylink -> /etc/target",
+        ));
         let link = e.iter().find(|x| x.name == "mylink");
         assert!(link.is_some());
         assert!(link.unwrap().is_dir);
     }
-    #[test] fn parse_ls_skips_noise() {
-        let e = parse_ls(&ls("sftp>\ntotal 42\n-rw-r--r--    ? u g 100 Jan  1  2020 file.txt"));
+    #[test]
+    fn parse_ls_skips_noise() {
+        let e = parse_ls(&ls(
+            "sftp>\ntotal 42\n-rw-r--r--    ? u g 100 Jan  1  2020 file.txt",
+        ));
         assert_eq!(e.len(), 2);
     }
-    #[test] fn parse_ls_masked_perms() {
+    #[test]
+    fn parse_ls_masked_perms() {
         let e = parse_ls(&ls("drwx******    ? u g 4096 Mar 14 09:44 somedir"));
         assert!(e.iter().find(|x| x.name == "somedir").unwrap().is_dir);
     }
-    #[test] fn parse_ls_perms_modified() {
+    #[test]
+    fn parse_ls_perms_modified() {
         let e = parse_ls(&ls("-rw-r--r--    ? u g 100 Jan  1 12:00 notes.txt"));
         let f = e.iter().find(|x| x.name == "notes.txt").unwrap();
         assert_eq!(f.perms, "-rw-r--r--");
@@ -2482,49 +3168,108 @@ mod tests {
     // strip_ansi
     // -----------------------------------------------------------------------
 
-    #[test] fn strip_ansi_plain()     { assert_eq!(strip_ansi(b"hello"),           "hello"); }
-    #[test] fn strip_ansi_csi()       { assert_eq!(strip_ansi(b"\x1b[32mhi\x1b[0m"), "hi"); }
-    #[test] fn strip_ansi_osc()       { assert_eq!(strip_ansi(b"\x1b]0;title\x07x"), "x"); }
-    #[test] fn strip_ansi_bare_esc()  { assert_eq!(strip_ansi(b"\x1bMtext"),        "text"); }
-    #[test] fn strip_ansi_empty()     { assert_eq!(strip_ansi(b""),                 ""); }
+    #[test]
+    fn strip_ansi_plain() {
+        assert_eq!(strip_ansi(b"hello"), "hello");
+    }
+    #[test]
+    fn strip_ansi_csi() {
+        assert_eq!(strip_ansi(b"\x1b[32mhi\x1b[0m"), "hi");
+    }
+    #[test]
+    fn strip_ansi_osc() {
+        assert_eq!(strip_ansi(b"\x1b]0;title\x07x"), "x");
+    }
+    #[test]
+    fn strip_ansi_bare_esc() {
+        assert_eq!(strip_ansi(b"\x1bMtext"), "text");
+    }
+    #[test]
+    fn strip_ansi_empty() {
+        assert_eq!(strip_ansi(b""), "");
+    }
 
     // -----------------------------------------------------------------------
     // human_size
     // -----------------------------------------------------------------------
 
-    #[test] fn hs_bytes() { assert_eq!(human_size(500),              "500 B");  }
-    #[test] fn hs_kb()    { assert_eq!(human_size(1024),             "1.0 KB"); }
-    #[test] fn hs_mb()    { assert_eq!(human_size(1024*1024),        "1.0 MB"); }
-    #[test] fn hs_gb()    { assert_eq!(human_size(1024*1024*1024),   "1.0 GB"); }
-    #[test] fn hs_zero()  { assert_eq!(human_size(0),                "0 B");   }
+    #[test]
+    fn hs_bytes() {
+        assert_eq!(human_size(500), "500 B");
+    }
+    #[test]
+    fn hs_kb() {
+        assert_eq!(human_size(1024), "1.0 KB");
+    }
+    #[test]
+    fn hs_mb() {
+        assert_eq!(human_size(1024 * 1024), "1.0 MB");
+    }
+    #[test]
+    fn hs_gb() {
+        assert_eq!(human_size(1024 * 1024 * 1024), "1.0 GB");
+    }
+    #[test]
+    fn hs_zero() {
+        assert_eq!(human_size(0), "0 B");
+    }
 
     // -----------------------------------------------------------------------
     // shell_quote
     // -----------------------------------------------------------------------
 
-    #[test] fn sq_plain()  { assert_eq!(shell_quote("hello"),  "'hello'");     }
-    #[test] fn sq_spaces() { assert_eq!(shell_quote("my file"),"'my file'");  }
-    #[test] fn sq_quote()  { assert_eq!(shell_quote("it's"),   "'it'\\''s'"); }
-    #[test] fn sq_empty()  { assert_eq!(shell_quote(""),        "''");         }
+    #[test]
+    fn sq_plain() {
+        assert_eq!(shell_quote("hello"), "'hello'");
+    }
+    #[test]
+    fn sq_spaces() {
+        assert_eq!(shell_quote("my file"), "'my file'");
+    }
+    #[test]
+    fn sq_quote() {
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+    #[test]
+    fn sq_empty() {
+        assert_eq!(shell_quote(""), "''");
+    }
 
     // -----------------------------------------------------------------------
     // skip_n_tokens
     // -----------------------------------------------------------------------
 
-    #[test] fn snt_zero()   { assert_eq!(skip_n_tokens("a b c", 0), "a b c"); }
-    #[test] fn snt_one()    { assert_eq!(skip_n_tokens("a b c", 1), "b c");   }
-    #[test] fn snt_all()    { assert_eq!(skip_n_tokens("a b c", 3), "");      }
-    #[test] fn snt_spaces_in_name() {
-        assert_eq!(skip_n_tokens("-rw-r--r-- 1 u g 100 Jan 1 12:00 my great file.txt", 8), "my great file.txt");
+    #[test]
+    fn snt_zero() {
+        assert_eq!(skip_n_tokens("a b c", 0), "a b c");
+    }
+    #[test]
+    fn snt_one() {
+        assert_eq!(skip_n_tokens("a b c", 1), "b c");
+    }
+    #[test]
+    fn snt_all() {
+        assert_eq!(skip_n_tokens("a b c", 3), "");
+    }
+    #[test]
+    fn snt_spaces_in_name() {
+        assert_eq!(
+            skip_n_tokens("-rw-r--r-- 1 u g 100 Jan 1 12:00 my great file.txt", 8),
+            "my great file.txt"
+        );
     }
 
     // -----------------------------------------------------------------------
     // epoch_to_ymd
     // -----------------------------------------------------------------------
 
-    #[test] fn epoch_unix_origin() { assert_eq!(epoch_to_ymd(0), (1970,1,1,0,0)); }
-    #[test] fn epoch_known_date()  {
-        let (y,mo,d,_,_) = epoch_to_ymd(1710374400); // 2024-03-14
-        assert_eq!((y,mo,d), (2024,3,14));
+    #[test]
+    fn epoch_unix_origin() {
+        assert_eq!(epoch_to_ymd(0), (1970, 1, 1, 0, 0));
+    }
+    #[test]
+    fn epoch_known_date() {
+        let (y, mo, d, _, _) = epoch_to_ymd(1710374400); // 2024-03-14
+        assert_eq!((y, mo, d), (2024, 3, 14));
     }
 }
