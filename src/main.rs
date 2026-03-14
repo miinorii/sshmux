@@ -992,6 +992,9 @@ fn main() -> Result<()> {
                                     app.close_tab();
                                 } else {
                                     app.tab_mut().close_focused();
+                                    // Surviving panes now occupy more screen space;
+                                    // resize all PTYs to reflect the new layout.
+                                    app.resize_all(last_area);
                                 }
                             }
                             KeyCode::Char('t') => app.new_tab(),
