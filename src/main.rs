@@ -491,6 +491,9 @@ struct FileBrowser {
     needs_redraw:     bool,
     /// When `Some(name)`, a confirmation prompt is shown before deleting.
     confirm_delete:   Option<String>,
+    /// Name of the remote file currently being deleted, used to set the
+    /// success message once `WaitingDelete` completes.
+    pending_delete_name: Option<String>,
     /// Shared debug log handle — `None` unless `--debug` was passed at launch.
     log:              Option<Arc<Mutex<std::fs::File>>>,
 }
@@ -529,6 +532,7 @@ impl FileBrowser {
             prev_raw_len:  0,
             needs_redraw:  false,
             confirm_delete: None,
+            pending_delete_name: None,
             log:            log.clone(),
         })
     }
@@ -656,6 +660,10 @@ impl FileBrowser {
                     self.prompt_stable = 0;
                     let lines = self.sftp.raw_lines();
                     log!(self.log, "SFTP WaitingDelete complete, raw output: {:?}", lines);
+                    // Set a success message using the name we stored before sending rm.
+                    if let Some(name) = self.pending_delete_name.take() {
+                        self.status_msg = format!("Deleted remote: {}", name);
+                    }
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
                     self.sftp.send_str("ls -la\r\n");
@@ -844,7 +852,7 @@ impl FileBrowser {
                     self.status_msg = format!("Delete failed: {}", e);
                     log!(self.log, "Local delete error: {}", e);
                 } else {
-                    self.status_msg = format!("Deleted {}", name);
+                    self.status_msg = format!("Deleted local: {}", name);
                     self.local_entries = read_local_dir(&self.local_path);
                 }
                 self.needs_redraw = true;
@@ -854,6 +862,7 @@ impl FileBrowser {
                 self.sftp.send_str(&cmd);
                 self.sftp_state = SftpState::WaitingDelete;
                 self.status_msg = format!("Deleting {}...", name);
+                self.pending_delete_name = Some(name.to_string());
                 self.needs_redraw = true;
             }
         }
