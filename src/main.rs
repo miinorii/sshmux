@@ -725,6 +725,8 @@ impl FileBrowser {
                         }
                     } else if entry.is_dir {
                         self.local_path.push(&entry.name);
+                    } else {
+                        return; // plain file — nothing to do on local side
                     }
                     self.local_entries = read_local_dir(&self.local_path);
                     self.local_sel.select_first();
@@ -774,6 +776,7 @@ impl FileBrowser {
 
     /// Download the selected remote file to the current local directory (F5).
     fn download(&mut self) {
+        if self.sftp_state != SftpState::Idle { return; }
         if let Some(i) = self.remote_sel.selected() {
             let entry = if let Some(e) = self.remote_entries.get(i).cloned() { e } else { return };
             if entry.is_dir { return; }
@@ -793,6 +796,7 @@ impl FileBrowser {
 
     /// Upload the selected local file to the current remote directory (F6).
     fn upload(&mut self) {
+        if self.sftp_state != SftpState::Idle { return; }
         if let Some(i) = self.local_sel.selected() {
             let entry = if let Some(e) = self.local_entries.get(i).cloned() { e } else { return };
             if entry.is_dir { return; }
