@@ -433,6 +433,8 @@ enum SftpState {
     WaitingPwd,
     /// An `ls -la` command was sent; waiting for the prompt to reappear.
     WaitingLs,
+    /// A `cd` command was sent; waiting for the prompt before issuing `pwd`.
+    WaitingCd,
     /// A `remove` command was sent; waiting for the prompt before issuing `ls -la`.
     WaitingDelete,
     /// A `get` or `put` command was sent; watching for completion.
@@ -489,6 +491,8 @@ struct FileBrowser {
     needs_redraw:     bool,
     /// When `Some(name)`, a confirmation prompt is shown before deleting.
     confirm_delete:   Option<String>,
+    /// Shared debug log handle — `None` unless `--debug` was passed at launch.
+    log:              Option<Arc<Mutex<std::fs::File>>>,
 }
 
 impl FileBrowser {
@@ -497,7 +501,7 @@ impl FileBrowser {
     /// The SFTP subprocess is spawned immediately; the first `ls` is sent as
     /// soon as the initial `sftp>` prompt is detected in `tick()`.
     fn new(host: &str, log: Option<Arc<Mutex<std::fs::File>>>) -> Result<Self> {
-        let sftp = EmbeddedTerminal::sftp(host, log)?;
+        let sftp = EmbeddedTerminal::sftp(host, log.clone())?;
         let local_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let local_entries = read_local_dir(&local_path);
 
@@ -525,6 +529,7 @@ impl FileBrowser {
             prev_raw_len:  0,
             needs_redraw:  false,
             confirm_delete: None,
+            log:            log.clone(),
         })
     }
 
@@ -564,7 +569,18 @@ impl FileBrowser {
                     self.sftp.send_str("pwd\r\n");
                     self.sftp_state = SftpState::WaitingPwd;
                     self.status_msg = format!("Connected to {}", self.host);
+                    log!(self.log, "SFTP connected to {}, sent pwd", self.host);
                     self.needs_redraw = true;
+                }
+            }
+
+            SftpState::WaitingCd => {
+                if prompt_ready {
+                    self.prompt_stable = 0;
+                    self.sftp.drain_raw();
+                    self.prev_raw_len = 0;
+                    self.sftp.send_str("pwd\r\n");
+                    self.sftp_state = SftpState::WaitingPwd;
                 }
             }
 
@@ -574,7 +590,7 @@ impl FileBrowser {
                     let lines = self.sftp.raw_lines();
                     self.remote_path = parse_pwd(&lines)
                         .unwrap_or_else(|| self.remote_path.clone());
-                    self.local_entries = read_local_dir(&self.local_path);
+                    log!(self.log, "SFTP pwd => {}, sending ls -la", self.remote_path);
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
                     self.sftp.send_str("ls -la\r\n");
@@ -589,9 +605,14 @@ impl FileBrowser {
                     let lines = self.sftp.raw_lines();
                     if let Some(p) = parse_pwd(&lines) { self.remote_path = p; }
                     let parsed = parse_ls(&lines);
+                    log!(self.log, "SFTP ls done: {} entries parsed (raw {} lines)", parsed.len(), lines.len());
                     if parsed.len() > 1 {
                         self.remote_entries = parsed;
                         self.raw_snapshot.clear();
+                        // Clamp selection so it stays within the new entry list.
+                        let max = self.remote_entries.len().saturating_sub(1);
+                        let cur = self.remote_sel.selected().unwrap_or(0);
+                        self.remote_sel.select(Some(cur.min(max)));
                     }
                     if self.remote_sel.selected().is_none() { self.remote_sel.select_first(); }
                     self.sftp.drain_raw();
@@ -612,6 +633,9 @@ impl FileBrowser {
                         t.done = true;
                         t.progress = "100%".to_string();
                     }
+                    // Reload local panel so downloaded files appear immediately.
+                    self.local_entries = read_local_dir(&self.local_path);
+                    log!(self.log, "SFTP transfer complete, refreshed local dir");
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
                     self.sftp.send_str("ls -la\r\n");
@@ -630,6 +654,8 @@ impl FileBrowser {
             SftpState::WaitingDelete => {
                 if prompt_ready {
                     self.prompt_stable = 0;
+                    let lines = self.sftp.raw_lines();
+                    log!(self.log, "SFTP WaitingDelete complete, raw output: {:?}", lines);
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
                     self.sftp.send_str("ls -la\r\n");
@@ -698,13 +724,14 @@ impl FileBrowser {
                 }
             }
             BrowserFocus::Remote => {
-                // Silently ignore while busy — never stack sftp commands.
                 if self.sftp_state != SftpState::Idle { return; }
                 if let Some(i) = self.remote_sel.selected() {
                     if let Some(entry) = self.remote_entries.get(i).cloned() {
                         if entry.is_dir {
-                            let cmd = format!("cd {}\r\npwd\r\nls -la\r\n", shell_quote(&entry.name));
-                            self.queue_ls(cmd);
+                            // Send cd as a single command; WaitingCd → WaitingPwd → WaitingLs.
+                            self.sftp.send_str(&format!("cd {}\r\n", shell_quote(&entry.name)));
+                            self.sftp_state = SftpState::WaitingCd;
+                            log!(self.log, "SFTP cd {}", entry.name);
                         } else {
                             self.download();
                         }
@@ -727,9 +754,10 @@ impl FileBrowser {
                 self.local_sel.select_first();
             }
             BrowserFocus::Remote => {
-                if self.sftp_state == SftpState::Idle {
-                    self.queue_ls("cd ..\r\npwd\r\nls -la\r\n".to_string());
-                }
+                if self.sftp_state != SftpState::Idle { return; }
+                self.sftp.send_str("cd ..\r\n");
+                self.sftp_state = SftpState::WaitingCd;
+                log!(self.log, "SFTP cd ..");
             }
         }
     }
@@ -748,7 +776,8 @@ impl FileBrowser {
                 done: false,
                 progress: "0%".to_string(),
             });
-            self.status_msg = format!("Downloading {}…", entry.name);
+            self.status_msg = format!("Downloading {}...", entry.name);
+            log!(self.log, "SFTP get {} -> {}", entry.name, local_dest);
             self.sftp.send_str(&cmd);
             self.sftp_state = SftpState::Transferring;
         }
@@ -767,30 +796,66 @@ impl FileBrowser {
                 done: false,
                 progress: "0%".to_string(),
             });
-            self.status_msg = format!("Uploading {}…", entry.name);
+            self.status_msg = format!("Uploading {}...", entry.name);
+            log!(self.log, "SFTP put {}", local_str);
             self.sftp.send_str(&cmd);
             self.sftp_state = SftpState::Transferring;
         }
     }
 
-    /// Stage a remote file for deletion — shows a confirmation prompt.
-    fn delete_remote(&mut self) {
-        if let Some(i) = self.remote_sel.selected() {
-            let entry = if let Some(e) = self.remote_entries.get(i).cloned() { e } else { return };
-            if entry.is_dir || entry.name == ".." { return; }
-            if self.sftp_state != SftpState::Idle { return; }
-            self.confirm_delete = Some(entry.name.clone());
-            self.needs_redraw = true;
+    /// Stage a file for deletion — shows a confirmation prompt.
+    /// Deletes from the local filesystem when the local panel is focused,
+    /// or from the remote server when the remote panel is focused.
+    fn delete_focused(&mut self) {
+        match self.focus {
+            BrowserFocus::Local => {
+                if let Some(i) = self.local_sel.selected() {
+                    let entry = if let Some(e) = self.local_entries.get(i).cloned() { e } else { return };
+                    if entry.name == ".." { return; }
+                    // Prefix with "local:" so confirm_delete_yes knows which side to delete.
+                    self.confirm_delete = Some(format!("local:{}", entry.name));
+                    self.needs_redraw = true;
+                }
+            }
+            BrowserFocus::Remote => {
+                if let Some(i) = self.remote_sel.selected() {
+                    let entry = if let Some(e) = self.remote_entries.get(i).cloned() { e } else {
+                        log!(self.log, "SFTP delete: no entry at index {:?}", self.remote_sel.selected());
+                        return;
+                    };
+                    log!(self.log, "SFTP delete candidate: '{}' is_dir={} state={:?}",
+                        entry.name, entry.is_dir, self.sftp_state == SftpState::Idle);
+                    if entry.name == ".." { return; }
+                    if self.sftp_state != SftpState::Idle { return; }
+                    self.confirm_delete = Some(format!("remote:{}", entry.name));
+                    self.needs_redraw = true;
+                }
+            }
         }
     }
 
     /// Execute the pending deletion after the user confirmed with `y`.
     fn confirm_delete_yes(&mut self) {
-        if let Some(name) = self.confirm_delete.take() {
-            self.sftp.send_str(&format!("remove {}\r\n", shell_quote(&name)));
-            self.sftp_state = SftpState::WaitingDelete;
-            self.status_msg = format!("Deleting {}...", name);
-            self.needs_redraw = true;
+        if let Some(tagged) = self.confirm_delete.take() {
+            if let Some(name) = tagged.strip_prefix("local:") {
+                let path = self.local_path.join(name);
+                log!(self.log, "Local delete: {:?}", path);
+                if let Err(e) = std::fs::remove_file(&path) {
+                    self.status_msg = format!("Delete failed: {}", e);
+                    log!(self.log, "Local delete error: {}", e);
+                } else {
+                    self.status_msg = format!("Deleted {}", name);
+                    self.local_entries = read_local_dir(&self.local_path);
+                }
+                self.needs_redraw = true;
+            } else if let Some(name) = tagged.strip_prefix("remote:") {
+                let cmd = format!("rm {}\r\n", shell_quote(name));
+                log!(self.log, "SFTP sending: {}", cmd.trim());
+                self.sftp.send_str(&cmd);
+                self.sftp_state = SftpState::WaitingDelete;
+                self.status_msg = format!("Deleting {}...", name);
+                self.needs_redraw = true;
+            }
         }
     }
 
@@ -815,21 +880,6 @@ impl FileBrowser {
     /// Triggers a download of the currently selected remote file.
     fn drag_remote_to_local(&mut self) {
         self.download();
-    }
-
-    // ---- helpers -----------------------------------------------------------
-
-    /// Queue an sftp command sequence that ends with `ls -la`.
-    /// If sftp is currently busy the command is deferred until it becomes idle.
-    fn queue_ls(&mut self, cmd: String) {
-        if self.sftp_state == SftpState::Idle {
-            self.sftp.send_str(&cmd);
-            self.sftp_state = SftpState::WaitingLs;
-        } else {
-            // Queue the command; it will be sent once the current operation
-            // completes.  Using a VecDeque means rapid keypresses are not lost.
-            self.pending_cmds.push_back(cmd);
-        }
     }
 
     // ---- render ------------------------------------------------------------
@@ -970,18 +1020,21 @@ impl FileBrowser {
 
     fn render_status(&self, area: Rect, buf: &mut Buffer) {
         // Confirmation prompt overrides the normal status bar.
-        if let Some(ref name) = self.confirm_delete {
-            let msg = format!("  Delete '{}'?  [y] Yes   [n] No", name);
+        if let Some(ref tagged) = self.confirm_delete {
+            let name = tagged.strip_prefix("local:").or_else(|| tagged.strip_prefix("remote:")).unwrap_or(tagged);
+            let side = if tagged.starts_with("local:") { "local" } else { "remote" };
+            let msg = format!("  Delete {} '{}'?  [y] Yes   [n] No", side, name);
             let span = Span::styled(msg, Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD));
             buf.set_span(area.x, area.y, &span, area.width);
             return;
         }
 
         let (state_label, state_col) = match self.sftp_state {
-            SftpState::Connecting   => ("[connecting]", Color::Yellow),
-            SftpState::WaitingPwd   => ("[pwd…]",       Color::Yellow),
-            SftpState::Idle         => ("[idle]",        Color::DarkGray),
-            SftpState::WaitingLs    => ("[ls…]",         Color::Yellow),
+            SftpState::Connecting    => ("[connecting]", Color::Yellow),
+            SftpState::WaitingCd     => ("[cd…]",        Color::Yellow),
+            SftpState::WaitingPwd    => ("[pwd…]",       Color::Yellow),
+            SftpState::Idle          => ("[idle]",       Color::DarkGray),
+            SftpState::WaitingLs     => ("[ls…]",        Color::Yellow),
             SftpState::WaitingDelete => ("[deleting…]",  Color::Red),
             SftpState::Transferring  => ("[xfer…]",      Color::Green),
         };
@@ -1991,7 +2044,7 @@ fn main() -> Result<()> {
                                     KeyCode::Backspace            => browser.go_up(),
                                     KeyCode::F(5)                 => browser.download(),
                                     KeyCode::F(6)                 => browser.upload(),
-                                    KeyCode::Delete               => browser.delete_remote(),
+                                    KeyCode::Delete               => browser.delete_focused(),
                                     KeyCode::Char('c') if ctrl    => {
                                         disable_raw_mode()?;
                                         execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture)?;
