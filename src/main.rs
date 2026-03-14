@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -405,10 +406,14 @@ fn parse_ssh_config() -> Vec<SshHost> {
 /// A single entry in a directory listing (local or remote).
 #[derive(Clone)]
 struct FsEntry {
-    name:   String,
-    is_dir: bool,
+    name:     String,
+    is_dir:   bool,
     /// Human-readable size string (e.g. "4.2 MB").  Empty for directories.
-    size:   String,
+    size:     String,
+    /// Permission string as returned by ls (e.g. `drwxr-xr-x`).
+    perms:    String,
+    /// Last-modified date string (e.g. `Mar 14 09:44` or `Oct  1  2021`).
+    modified: String,
 }
 
 /// Which panel of the file browser is active.
@@ -428,6 +433,8 @@ enum SftpState {
     WaitingPwd,
     /// An `ls -la` command was sent; waiting for the prompt to reappear.
     WaitingLs,
+    /// A `remove` command was sent; waiting for the prompt before issuing `ls -la`.
+    WaitingDelete,
     /// A `get` or `put` command was sent; watching for completion.
     Transferring,
 }
@@ -462,8 +469,10 @@ struct FileBrowser {
 
     /// Most recent transfer, shown in the status bar.
     last_transfer:    Option<TransferStatus>,
-    /// Pending command to be sent once the sftp prompt appears.
-    pending_cmd:      Option<String>,
+    /// Queue of commands waiting to be sent once the sftp subprocess is idle.
+    /// Using a queue rather than a single Option ensures that rapid navigation
+    /// (e.g. pressing Enter twice quickly) does not silently drop commands.
+    pending_cmds:     VecDeque<String>,
     /// Status / error message to display at the bottom of the pane.
     status_msg:       String,
     /// Snapshot of raw sftp output shown in the remote panel while connecting
@@ -478,6 +487,8 @@ struct FileBrowser {
     /// Set to `true` by tick() when a state transition requires a redraw even
     /// if the sftp PTY dirty flag is not set.
     needs_redraw:     bool,
+    /// When `Some(name)`, a confirmation prompt is shown before deleting.
+    confirm_delete:   Option<String>,
 }
 
 impl FileBrowser {
@@ -507,12 +518,13 @@ impl FileBrowser {
             remote_sel,
             focus: BrowserFocus::Local,
             last_transfer: None,
-            pending_cmd: None,
+            pending_cmds: VecDeque::new(),
             status_msg: String::from("Connecting…"),
             raw_snapshot: vec![],
             prompt_stable: 0,
             prev_raw_len:  0,
             needs_redraw:  false,
+            confirm_delete: None,
         })
     }
 
@@ -521,7 +533,7 @@ impl FileBrowser {
     fn tick(&mut self) {
         // Only update the snapshot while actively waiting — not during Idle,
         // which would overwrite a valid snapshot with an empty-drained buffer.
-        if self.sftp_state != SftpState::Idle {
+        if !matches!(self.sftp_state, SftpState::Idle) {
             self.raw_snapshot = self.sftp.raw_lines();
         }
 
@@ -562,6 +574,7 @@ impl FileBrowser {
                     let lines = self.sftp.raw_lines();
                     self.remote_path = parse_pwd(&lines)
                         .unwrap_or_else(|| self.remote_path.clone());
+                    self.local_entries = read_local_dir(&self.local_path);
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
                     self.sftp.send_str("ls -la\r\n");
@@ -585,7 +598,7 @@ impl FileBrowser {
                     self.prev_raw_len = 0;
                     self.sftp_state = SftpState::Idle;
                     self.needs_redraw = true;
-                    if let Some(cmd) = self.pending_cmd.take() {
+                    if let Some(cmd) = self.pending_cmds.pop_front() {
                         self.sftp.send_str(&cmd);
                         self.sftp_state = SftpState::WaitingLs;
                     }
@@ -608,13 +621,25 @@ impl FileBrowser {
                     if let Some(pct) = scrape_transfer_progress(&lines) {
                         if let Some(ref mut t) = self.last_transfer {
                             t.progress = pct;
+                            self.needs_redraw = true;
                         }
                     }
                 }
             }
 
+            SftpState::WaitingDelete => {
+                if prompt_ready {
+                    self.prompt_stable = 0;
+                    self.sftp.drain_raw();
+                    self.prev_raw_len = 0;
+                    self.sftp.send_str("ls -la\r\n");
+                    self.sftp_state = SftpState::WaitingLs;
+                    self.needs_redraw = true;
+                }
+            }
+
             SftpState::Idle => {
-                if let Some(cmd) = self.pending_cmd.take() {
+                if let Some(cmd) = self.pending_cmds.pop_front() {
                     self.prompt_stable = 0;
                     self.sftp.send_str(&cmd);
                     self.sftp_state = SftpState::WaitingLs;
@@ -650,7 +675,9 @@ impl FileBrowser {
         }
     }
 
-    /// Enter the selected directory (local or remote).
+    /// Enter the selected directory, or download the selected remote file.
+    /// Ignores keypresses while the sftp process is busy so rapid presses
+    /// cannot corrupt the command stream.
     fn enter(&mut self) {
         match self.focus {
             BrowserFocus::Local => {
@@ -659,20 +686,27 @@ impl FileBrowser {
                     if entry.name == ".." {
                         if let Some(p) = self.local_path.parent() {
                             self.local_path = p.to_path_buf();
+                        } else {
+                            self.local_path = PathBuf::from(local_root());
                         }
                     } else if entry.is_dir {
                         self.local_path.push(&entry.name);
                     }
                     self.local_entries = read_local_dir(&self.local_path);
                     self.local_sel.select_first();
+                    self.needs_redraw = true;
                 }
             }
             BrowserFocus::Remote => {
+                // Silently ignore while busy — never stack sftp commands.
+                if self.sftp_state != SftpState::Idle { return; }
                 if let Some(i) = self.remote_sel.selected() {
                     if let Some(entry) = self.remote_entries.get(i).cloned() {
                         if entry.is_dir {
                             let cmd = format!("cd {}\r\npwd\r\nls -la\r\n", shell_quote(&entry.name));
                             self.queue_ls(cmd);
+                        } else {
+                            self.download();
                         }
                     }
                 }
@@ -686,12 +720,16 @@ impl FileBrowser {
             BrowserFocus::Local => {
                 if let Some(p) = self.local_path.parent() {
                     self.local_path = p.to_path_buf();
-                    self.local_entries = read_local_dir(&self.local_path);
-                    self.local_sel.select_first();
+                } else {
+                    self.local_path = PathBuf::from(local_root());
                 }
+                self.local_entries = read_local_dir(&self.local_path);
+                self.local_sel.select_first();
             }
             BrowserFocus::Remote => {
-                self.queue_ls("cd ..\r\npwd\r\nls -la\r\n".to_string());
+                if self.sftp_state == SftpState::Idle {
+                    self.queue_ls("cd ..\r\npwd\r\nls -la\r\n".to_string());
+                }
             }
         }
     }
@@ -735,15 +773,32 @@ impl FileBrowser {
         }
     }
 
-    /// Delete the selected remote file (Delete key).
+    /// Stage a remote file for deletion — shows a confirmation prompt.
     fn delete_remote(&mut self) {
         if let Some(i) = self.remote_sel.selected() {
             let entry = if let Some(e) = self.remote_entries.get(i).cloned() { e } else { return };
             if entry.is_dir || entry.name == ".." { return; }
-            let cmd = format!("rm {}\r\nls -la\r\n", shell_quote(&entry.name));
-            self.status_msg = format!("Deleted {}", entry.name);
-            self.queue_ls(cmd);
+            if self.sftp_state != SftpState::Idle { return; }
+            self.confirm_delete = Some(entry.name.clone());
+            self.needs_redraw = true;
         }
+    }
+
+    /// Execute the pending deletion after the user confirmed with `y`.
+    fn confirm_delete_yes(&mut self) {
+        if let Some(name) = self.confirm_delete.take() {
+            self.sftp.send_str(&format!("remove {}\r\n", shell_quote(&name)));
+            self.sftp_state = SftpState::WaitingDelete;
+            self.status_msg = format!("Deleting {}...", name);
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Cancel the pending deletion.
+    fn confirm_delete_no(&mut self) {
+        self.confirm_delete = None;
+        self.status_msg = String::from("Deletion cancelled.");
+        self.needs_redraw = true;
     }
 
     // ---- drag-and-drop -----------------------------------------------------
@@ -771,7 +826,9 @@ impl FileBrowser {
             self.sftp.send_str(&cmd);
             self.sftp_state = SftpState::WaitingLs;
         } else {
-            self.pending_cmd = Some(cmd);
+            // Queue the command; it will be sent once the current operation
+            // completes.  Using a VecDeque means rapid keypresses are not lost.
+            self.pending_cmds.push_back(cmd);
         }
     }
 
@@ -869,18 +926,31 @@ impl FileBrowser {
             return;
         }
 
+        // Fixed column widths: size(9) + modified(16) + perms(10) + separators.
+        // Name gets the remaining space and is truncated to fit.
+        const W_SIZE:  usize =  9;
+        const W_MOD:   usize = 16;
+        const W_PERMS: usize = 10;
+        const W_GAPS:  usize =  3;
+        let w_name = (inner.width as usize).saturating_sub(W_SIZE + W_MOD + W_PERMS + W_GAPS);
+
         let items: Vec<ListItem> = entries.iter().map(|e| {
             let name_col = if e.is_dir { Color::Cyan } else { Color::White };
-            // Suffix dirs with / so type is visible without a separate icon.
-            let display_name = if e.is_dir {
-                format!("{}/", e.name)
-            } else {
-                e.name.clone()
-            };
+            let display_name = if e.is_dir { format!("{}/", e.name) } else { e.name.clone() };
+            let name_trunc: String = display_name.chars().take(w_name).collect();
+            let name_padded = format!("{:<width$}", name_trunc, width = w_name);
             let line = Line::from(vec![
-                Span::styled(display_name, Style::default().fg(name_col)),
+                Span::styled(name_padded, Style::default().fg(name_col)),
                 Span::styled(
-                    format!("  {:>10}", e.size),
+                    format!(" {:>W_SIZE$}", e.size),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!(" {:<W_MOD$}", e.modified),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!(" {:<W_PERMS$}", e.perms),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]);
@@ -899,13 +969,21 @@ impl FileBrowser {
     }
 
     fn render_status(&self, area: Rect, buf: &mut Buffer) {
-        // Show state machine label so connection issues are immediately visible.
-        let state_label = match self.sftp_state {
-            SftpState::Connecting   => "[connecting]",
-            SftpState::WaitingPwd   => "[pwd…]",
-            SftpState::Idle         => "[idle]",
-            SftpState::WaitingLs    => "[ls…]",
-            SftpState::Transferring => "[transferring]",
+        // Confirmation prompt overrides the normal status bar.
+        if let Some(ref name) = self.confirm_delete {
+            let msg = format!("  Delete '{}'?  [y] Yes   [n] No", name);
+            let span = Span::styled(msg, Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD));
+            buf.set_span(area.x, area.y, &span, area.width);
+            return;
+        }
+
+        let (state_label, state_col) = match self.sftp_state {
+            SftpState::Connecting   => ("[connecting]", Color::Yellow),
+            SftpState::WaitingPwd   => ("[pwd…]",       Color::Yellow),
+            SftpState::Idle         => ("[idle]",        Color::DarkGray),
+            SftpState::WaitingLs    => ("[ls…]",         Color::Yellow),
+            SftpState::WaitingDelete => ("[deleting…]",  Color::Red),
+            SftpState::Transferring  => ("[xfer…]",      Color::Green),
         };
 
         let transfer_str = if let Some(ref t) = self.last_transfer {
@@ -915,20 +993,20 @@ impl FileBrowser {
             String::new()
         };
 
-        // When entries are empty, show the last raw sftp line so parse failures
-        // are immediately visible without needing --debug.
         let parse_hint = if self.remote_entries.len() <= 1 && !self.raw_snapshot.is_empty() {
-            let last = self.raw_snapshot.iter().rev()
+            self.raw_snapshot.iter().rev()
                 .find(|l| !l.trim().is_empty())
-                .map(|l| format!(" | raw: {}", l.trim().chars().take(40).collect::<String>()))
-                .unwrap_or_default();
-            last
+                .map(|l| format!(" | {}", l.trim().chars().take(40).collect::<String>()))
+                .unwrap_or_default()
         } else { String::new() };
 
-        let help = "Tab:switch  Enter:cd  ↑↓:nav  F5:↓  F6:↑  Del:rm  Bksp:up";
-        let text = format!("{} {}{}  {}  {}", state_label, self.status_msg, parse_hint, transfer_str, help);
-        let span = Span::styled(text, Style::default().fg(Color::DarkGray));
-        buf.set_span(area.x, area.y, &span, area.width);
+        let help = "Tab:switch  Spc/Enter:cd  Bksp:up  F5:Download  F6:Upload  Del:rm";
+        let state_span = Span::styled(state_label, Style::default().fg(state_col));
+        let rest_span  = Span::styled(
+            format!(" {}{}  {}  {}", self.status_msg, parse_hint, transfer_str, help),
+            Style::default().fg(Color::DarkGray),
+        );
+        buf.set_line(area.x, area.y, &Line::from(vec![state_span, rest_span]), area.width);
     }
 }
 
@@ -1014,7 +1092,7 @@ fn parse_pwd(lines: &[String]) -> Option<String> {
 /// counting from 0 (perms=0, links=1, user=2, group=3, size=4,
 /// month=5, day=6, time-or-year=7, name=8+).
 fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
-    let mut entries = vec![FsEntry { name: "..".to_string(), is_dir: true, size: String::new() }];
+    let mut entries = vec![FsEntry { name: "..".to_string(), is_dir: true, size: String::new(), perms: String::new(), modified: String::new() }];
     for line in lines {
         let line = line.trim();
         if line.is_empty()
@@ -1052,10 +1130,13 @@ fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
             name
         };
 
+        let modified = format!("{} {} {}", tokens[5], tokens[6], tokens[7]);
         entries.push(FsEntry {
             name,
-            is_dir: is_dir || is_link,
-            size: if is_dir { String::new() } else { human_size(size_bytes) },
+            is_dir:   is_dir || is_link,
+            size:     if is_dir { String::new() } else { human_size(size_bytes) },
+            perms:    perms.to_string(),
+            modified,
         });
     }
     entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
@@ -1095,18 +1176,59 @@ fn scrape_transfer_progress(lines: &[String]) -> Option<String> {
 // Local filesystem helpers
 // ---------------------------------------------------------------------------
 
+/// Decompose a Unix timestamp into (year, month, day, hour, minute).
+fn epoch_to_ymd(secs: u64) -> (u32, u32, u32, u32, u32) {
+    let mi = (secs / 60) % 60;
+    let h  = (secs / 3600) % 24;
+    let days = secs / 86400;
+    let mut y = 1970u32;
+    let mut d = days as u32;
+    loop {
+        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let ydays = if leap { 366 } else { 365 };
+        if d < ydays { break; }
+        d -= ydays;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days: [u32; 12] = [31, if leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut mo = 0u32;
+    for mlen in month_days {
+        if d < mlen { break; }
+        d -= mlen;
+        mo += 1;
+    }
+    (y, mo + 1, d + 1, h as u32, mi as u32)
+}
+
+/// Return the top-level root to navigate to when Backspace is pressed at a
+/// filesystem root.  On Windows this is the root of all drives; on Unix `/`.
+fn local_root() -> &'static str {
+    if cfg!(windows) { "\\.\\" } else { "/" }
+}
+
 /// Read a local directory into a sorted `Vec<FsEntry>`.
 fn read_local_dir(path: &Path) -> Vec<FsEntry> {
-    let mut entries = vec![FsEntry { name: "..".to_string(), is_dir: true, size: String::new() }];
+    let mut entries = vec![FsEntry { name: "..".to_string(), is_dir: true, size: String::new(), perms: String::new(), modified: String::new() }];
     if let Ok(rd) = fs::read_dir(path) {
         for entry in rd.flatten() {
             let meta = entry.metadata().ok();
             let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
             let size   = meta.as_ref().and_then(|m| if is_dir { None } else { Some(human_size(m.len())) }).unwrap_or_default();
+            let modified = meta.as_ref()
+                .and_then(|m| m.modified().ok())
+                .map(|t| {
+                    let secs = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let (y, mo, d, h, mi) = epoch_to_ymd(secs);
+                    format!("{:04}-{:02}-{:02} {:02}:{:02}", y, mo, d, h, mi)
+                })
+                .unwrap_or_default();
             entries.push(FsEntry {
-                name: entry.file_name().to_string_lossy().to_string(),
+                name:     entry.file_name().to_string_lossy().to_string(),
                 is_dir,
                 size,
+                perms:    String::new(),
+                modified,
             });
         }
     }
@@ -1847,28 +1969,37 @@ fn main() -> Result<()> {
 
                     if focused_is_browser {
                         if let Some(Pane::FileBrowser { browser }) = app.tab_mut().focused_pane_mut() {
-                            match key.code {
-                                KeyCode::Tab                  => {
-                                    browser.focus = if browser.focus == BrowserFocus::Local {
-                                        BrowserFocus::Remote
-                                    } else {
-                                        BrowserFocus::Local
-                                    };
+                            // When a deletion confirmation is pending, only y/n/Esc are active.
+                            if browser.confirm_delete.is_some() {
+                                match key.code {
+                                    KeyCode::Char('y') | KeyCode::Char('Y') => browser.confirm_delete_yes(),
+                                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => browser.confirm_delete_no(),
+                                    _ => {}
                                 }
-                                KeyCode::Up                   => browser.nav_up(),
-                                KeyCode::Down                 => browser.nav_down(),
-                                KeyCode::Enter                => browser.enter(),
-                                KeyCode::Backspace            => browser.go_up(),
-                                KeyCode::F(5)                 => browser.download(),
-                                KeyCode::F(6)                 => browser.upload(),
-                                KeyCode::Delete               => browser.delete_remote(),
-                                KeyCode::Char('c') if ctrl    => {
-                                    disable_raw_mode()?;
-                                    execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture)?;
-                                    terminal.show_cursor()?;
-                                    return Ok(());
+                            } else {
+                                match key.code {
+                                    KeyCode::Tab                  => {
+                                        browser.focus = if browser.focus == BrowserFocus::Local {
+                                            BrowserFocus::Remote
+                                        } else {
+                                            BrowserFocus::Local
+                                        };
+                                    }
+                                    KeyCode::Up                   => browser.nav_up(),
+                                    KeyCode::Down                 => browser.nav_down(),
+                                    KeyCode::Char(' ') | KeyCode::Enter => browser.enter(),
+                                    KeyCode::Backspace            => browser.go_up(),
+                                    KeyCode::F(5)                 => browser.download(),
+                                    KeyCode::F(6)                 => browser.upload(),
+                                    KeyCode::Delete               => browser.delete_remote(),
+                                    KeyCode::Char('c') if ctrl    => {
+                                        disable_raw_mode()?;
+                                        execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture)?;
+                                        terminal.show_cursor()?;
+                                        return Ok(());
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
                         continue;
