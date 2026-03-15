@@ -94,3 +94,103 @@ impl Tab {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pane::{Pane, Split};
+    use ratatui::layout::Rect;
+
+    fn r(w: u16, h: u16) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width: w,
+            height: h,
+        }
+    }
+
+    #[test]
+    fn tab_initial_state() {
+        let t = Tab::new("1");
+        assert_eq!(t.leaf_count(), 1);
+        assert_eq!(t.focus_idx, 0);
+        assert!(matches!(t.root, Pane::Connect { .. }));
+        assert_eq!(t.display_name(), "<connect>");
+    }
+
+    #[test]
+    fn tab_display_name_connect_shows_connect() {
+        // a fresh tab with no session yet shows "<connect>"
+        let t = Tab::new("vps");
+        assert_eq!(t.display_name(), "<connect>");
+    }
+
+    #[test]
+    fn tab_display_name_multi_pane_shows_number() {
+        let mut t = Tab::new("myhost");
+        t.split(Split::Horizontal, r(200, 50));
+        // multi-pane tabs show the tab name (number), not the host
+        assert_eq!(t.display_name(), "myhost");
+    }
+
+    #[test]
+    fn tab_split_horizontal() {
+        let mut t = Tab::new("1");
+        t.split(Split::Horizontal, r(200, 50));
+        assert_eq!(t.leaf_count(), 2);
+    }
+
+    #[test]
+    fn tab_split_vertical() {
+        let mut t = Tab::new("1");
+        t.split(Split::Vertical, r(200, 50));
+        assert_eq!(t.leaf_count(), 2);
+    }
+
+    #[test]
+    fn tab_double_split_gives_three_panes() {
+        let mut t = Tab::new("1");
+        t.split(Split::Horizontal, r(200, 50));
+        t.focus_idx = 1;
+        t.split(Split::Vertical, r(200, 50));
+        assert_eq!(t.leaf_count(), 3);
+    }
+
+    #[test]
+    fn tab_focus_next_wraps() {
+        let mut t = Tab::new("1");
+        t.split(Split::Horizontal, r(200, 50));
+        t.focus_next();
+        assert_eq!(t.focus_idx, 1);
+        t.focus_next();
+        assert_eq!(t.focus_idx, 0);
+    }
+
+    #[test]
+    fn tab_focus_prev_wraps() {
+        let mut t = Tab::new("1");
+        t.split(Split::Horizontal, r(200, 50));
+        t.focus_prev();
+        assert_eq!(t.focus_idx, 1);
+        t.focus_prev();
+        assert_eq!(t.focus_idx, 0);
+    }
+
+    #[test]
+    fn tab_close_focused_reduces_count() {
+        let mut t = Tab::new("1");
+        t.split(Split::Horizontal, r(200, 50));
+        t.close_focused();
+        assert_eq!(t.leaf_count(), 1);
+    }
+
+    #[test]
+    fn tab_close_focused_clamps_focus_index() {
+        let mut t = Tab::new("1");
+        t.split(Split::Horizontal, r(200, 50));
+        t.focus_idx = 1;
+        t.close_focused();
+        assert_eq!(t.focus_idx, 0);
+    }
+}

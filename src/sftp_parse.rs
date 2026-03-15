@@ -284,3 +284,246 @@ pub fn shell_quote(s: &str) -> String {
 // ---------------------------------------------------------------------------
 // Re-export PathBuf for callers that need it via this module
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ls(raw: &str) -> Vec<String> {
+        raw.lines().map(|l| l.to_string()).collect()
+    }
+
+    // ---- parse_pwd ---------------------------------------------------------
+
+    #[test]
+    fn parse_pwd_label() {
+        assert_eq!(
+            parse_pwd(&["Remote working directory: /home/debian".to_string()]),
+            Some("/home/debian".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_pwd_root() {
+        assert_eq!(
+            parse_pwd(&["Remote working directory: /".to_string()]),
+            Some("/".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_pwd_bare_absolute_path() {
+        assert_eq!(
+            parse_pwd(&["/home/user".to_string()]),
+            Some("/home/user".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_pwd_tilde_path() {
+        assert_eq!(
+            parse_pwd(&["~/projects".to_string()]),
+            Some("~/projects".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_pwd_path_with_spaces_ignored() {
+        // paths with spaces are not valid bare pwd output
+        assert_eq!(parse_pwd(&["/home/my dir".to_string()]), None);
+    }
+
+    #[test]
+    fn parse_pwd_empty_input() {
+        assert_eq!(parse_pwd(&[]), None);
+    }
+
+    #[test]
+    fn parse_pwd_skips_noise_lines() {
+        let lines = ls("sftp> pwd\nRemote working directory: /var/www\nsftp>");
+        assert_eq!(parse_pwd(&lines), Some("/var/www".to_string()));
+    }
+
+    // ---- parse_ls ----------------------------------------------------------
+
+    #[test]
+    fn parse_ls_file_and_dir() {
+        let e = parse_ls(&ls(
+            "drwx------    ? debian  debian  4096 Mar 14 09:44 docs\n\
+             -rw-r--r--    ? debian  debian   220 Aug  4  2021 .bashrc\n\
+             sftp>",
+        ));
+        assert_eq!(e.len(), 3); // ".." + docs + .bashrc
+        assert!(e.iter().any(|x| x.name == "docs"));
+        assert!(e.iter().any(|x| x.name == ".bashrc"));
+    }
+
+    #[test]
+    fn parse_ls_dirs_sorted_before_files() {
+        let e = parse_ls(&ls("-rw-r--r--    ? u g   100 Jan  1  2020 aaa.txt\n\
+             drwxr-xr-x    ? u g  4096 Jan  1  2020 zzz_dir"));
+        assert_eq!(e[0].name, "..");
+        assert_eq!(e[1].name, "zzz_dir");
+        assert_eq!(e[2].name, "aaa.txt");
+    }
+
+    #[test]
+    fn parse_ls_skips_dot_and_dotdot() {
+        let e = parse_ls(&ls("drwx------    ? u g 4096 Mar 14 09:44 .\n\
+             drwx------    ? u g 4096 Jan  1  2020 .."));
+        // only the synthetic ".." entry remains
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0].name, "..");
+    }
+
+    #[test]
+    fn parse_ls_symlink_strips_arrow() {
+        let e = parse_ls(&ls(
+            "lrwxrwxrwx    ? u g 11 Jan  1  2020 mylink -> /etc/target",
+        ));
+        let link = e.iter().find(|x| x.name == "mylink");
+        assert!(link.is_some());
+        assert!(link.unwrap().is_dir); // symlinks treated as dirs for navigation
+    }
+
+    #[test]
+    fn parse_ls_skips_noise_lines() {
+        let e = parse_ls(&ls(
+            "sftp>\ntotal 42\n-rw-r--r--    ? u g 100 Jan  1  2020 file.txt",
+        ));
+        assert_eq!(e.len(), 2);
+    }
+
+    #[test]
+    fn parse_ls_masked_permissions() {
+        let e = parse_ls(&ls("drwx******    ? u g 4096 Mar 14 09:44 somedir"));
+        assert!(e.iter().find(|x| x.name == "somedir").unwrap().is_dir);
+    }
+
+    #[test]
+    fn parse_ls_records_perms_and_modified() {
+        let e = parse_ls(&ls("-rw-r--r--    ? u g 100 Jan  1 12:00 notes.txt"));
+        let f = e.iter().find(|x| x.name == "notes.txt").unwrap();
+        assert_eq!(f.perms, "-rw-r--r--");
+        assert_eq!(f.modified, "Jan 1 12:00");
+    }
+
+    #[test]
+    fn parse_ls_filename_with_spaces() {
+        let e = parse_ls(&ls(
+            "-rw-r--r--    ? u g 100 Jan  1  2020 my great file.txt",
+        ));
+        assert!(e.iter().any(|x| x.name == "my great file.txt"));
+    }
+
+    // ---- strip_ansi --------------------------------------------------------
+
+    #[test]
+    fn strip_ansi_plain_text_unchanged() {
+        assert_eq!(strip_ansi(b"hello"), "hello");
+    }
+
+    #[test]
+    fn strip_ansi_removes_csi_colour() {
+        assert_eq!(strip_ansi(b"\x1b[32mhi\x1b[0m"), "hi");
+    }
+
+    #[test]
+    fn strip_ansi_removes_osc_title() {
+        assert_eq!(strip_ansi(b"\x1b]0;title\x07x"), "x");
+    }
+
+    #[test]
+    fn strip_ansi_removes_bare_escape() {
+        assert_eq!(strip_ansi(b"\x1bMtext"), "text");
+    }
+
+    #[test]
+    fn strip_ansi_empty_input() {
+        assert_eq!(strip_ansi(b""), "");
+    }
+
+    // ---- human_size --------------------------------------------------------
+
+    #[test]
+    fn hs_bytes() {
+        assert_eq!(human_size(500), "500 B");
+    }
+    #[test]
+    fn hs_kb() {
+        assert_eq!(human_size(1024), "1.0 KB");
+    }
+    #[test]
+    fn hs_mb() {
+        assert_eq!(human_size(1024 * 1024), "1.0 MB");
+    }
+    #[test]
+    fn hs_gb() {
+        assert_eq!(human_size(1024 * 1024 * 1024), "1.0 GB");
+    }
+    #[test]
+    fn hs_zero() {
+        assert_eq!(human_size(0), "0 B");
+    }
+
+    // ---- shell_quote -------------------------------------------------------
+
+    #[test]
+    fn sq_plain() {
+        assert_eq!(shell_quote("hello"), "'hello'");
+    }
+    #[test]
+    fn sq_spaces() {
+        assert_eq!(shell_quote("my file"), "'my file'");
+    }
+    #[test]
+    fn sq_single_quote() {
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+    #[test]
+    fn sq_empty() {
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    // ---- skip_n_tokens -----------------------------------------------------
+
+    #[test]
+    fn snt_zero() {
+        assert_eq!(skip_n_tokens("a b c", 0), "a b c");
+    }
+    #[test]
+    fn snt_one() {
+        assert_eq!(skip_n_tokens("a b c", 1), "b c");
+    }
+    #[test]
+    fn snt_all() {
+        assert_eq!(skip_n_tokens("a b c", 3), "");
+    }
+    #[test]
+    fn snt_preserves_spaces_in_filename() {
+        assert_eq!(
+            skip_n_tokens("-rw-r--r-- 1 u g 100 Jan 1 12:00 my great file.txt", 8),
+            "my great file.txt"
+        );
+    }
+
+    // ---- epoch_to_ymd ------------------------------------------------------
+
+    #[test]
+    fn epoch_unix_origin() {
+        assert_eq!(epoch_to_ymd(0), (1970, 1, 1, 0, 0));
+    }
+
+    #[test]
+    fn epoch_known_date() {
+        let (y, mo, d, _, _) = epoch_to_ymd(1710374400); // 2024-03-14
+        assert_eq!((y, mo, d), (2024, 3, 14));
+    }
+
+    #[test]
+    fn epoch_leap_year() {
+        // 2000-02-29 00:00:00 UTC
+        let (y, mo, d, _, _) = epoch_to_ymd(951782400);
+        assert_eq!((y, mo, d), (2000, 2, 29));
+    }
+}

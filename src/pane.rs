@@ -381,3 +381,213 @@ pub fn pane_inner(area: Rect) -> Rect {
         height: area.height.saturating_sub(2),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+
+    fn r(w: u16, h: u16) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width: w,
+            height: h,
+        }
+    }
+    fn connect() -> Pane {
+        Pane::new_connect()
+    }
+    fn hsplit() -> Pane {
+        Pane::Split {
+            kind: Split::Horizontal,
+            children: vec![connect(), connect()],
+        }
+    }
+    fn vsplit() -> Pane {
+        Pane::Split {
+            kind: Split::Vertical,
+            children: vec![connect(), connect()],
+        }
+    }
+
+    // ---- split_areas -------------------------------------------------------
+
+    #[test]
+    fn split_areas_horizontal_even() {
+        let a = split_areas(r(100, 20), &Split::Horizontal, 2);
+        assert_eq!(
+            a[0],
+            Rect {
+                x: 0,
+                y: 0,
+                width: 50,
+                height: 20
+            }
+        );
+        assert_eq!(
+            a[1],
+            Rect {
+                x: 50,
+                y: 0,
+                width: 50,
+                height: 20
+            }
+        );
+    }
+
+    #[test]
+    fn split_areas_horizontal_remainder_to_last() {
+        let a = split_areas(r(101, 20), &Split::Horizontal, 2);
+        assert_eq!(a[0].width + a[1].width, 101);
+        assert_eq!(a[1].width, 51);
+    }
+
+    #[test]
+    fn split_areas_vertical_even() {
+        let a = split_areas(r(80, 40), &Split::Vertical, 2);
+        assert_eq!(
+            a[0],
+            Rect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 20
+            }
+        );
+        assert_eq!(
+            a[1],
+            Rect {
+                x: 0,
+                y: 20,
+                width: 80,
+                height: 20
+            }
+        );
+    }
+
+    #[test]
+    fn split_areas_vertical_three() {
+        let a = split_areas(r(80, 30), &Split::Vertical, 3);
+        assert_eq!(a.len(), 3);
+        assert_eq!(a.iter().map(|x| x.height).sum::<u16>(), 30);
+    }
+
+    #[test]
+    fn split_areas_empty() {
+        assert!(split_areas(r(80, 40), &Split::Horizontal, 0).is_empty());
+    }
+
+    // ---- leaf_count --------------------------------------------------------
+
+    #[test]
+    fn leaf_count_single() {
+        assert_eq!(connect().leaf_count(), 1);
+    }
+
+    #[test]
+    fn leaf_count_split() {
+        assert_eq!(hsplit().leaf_count(), 2);
+    }
+
+    #[test]
+    fn leaf_count_nested() {
+        let p = Pane::Split {
+            kind: Split::Horizontal,
+            children: vec![connect(), vsplit()],
+        };
+        assert_eq!(p.leaf_count(), 3);
+    }
+
+    // ---- leaf / leaf_areas -------------------------------------------------
+
+    #[test]
+    fn leaf_single_bounds() {
+        let p = connect();
+        assert!(p.leaf(0).is_some());
+        assert!(p.leaf(1).is_none());
+    }
+
+    #[test]
+    fn leaf_split_dfs_order() {
+        let p = hsplit();
+        assert!(matches!(p.leaf(0), Some(Pane::Connect { .. })));
+        assert!(p.leaf(2).is_none());
+    }
+
+    #[test]
+    fn leaf_areas_covers_full() {
+        assert_eq!(connect().leaf_areas(r(100, 50)), vec![r(100, 50)]);
+    }
+
+    #[test]
+    fn leaf_areas_sum_equals_parent() {
+        let a = hsplit().leaf_areas(r(100, 50));
+        assert_eq!(a[0].width + a[1].width, 100);
+    }
+
+    #[test]
+    fn leaf_areas_count_matches_leaf_count() {
+        let p = Pane::Split {
+            kind: Split::Horizontal,
+            children: vec![connect(), vsplit()],
+        };
+        assert_eq!(p.leaf_areas(r(120, 60)).len(), p.leaf_count());
+    }
+
+    // ---- remove_leaf -------------------------------------------------------
+
+    #[test]
+    fn remove_leaf_first() {
+        let mut p = hsplit();
+        remove_leaf(&mut p, 0);
+        assert_eq!(p.leaf_count(), 1);
+    }
+
+    #[test]
+    fn remove_leaf_second() {
+        let mut p = hsplit();
+        remove_leaf(&mut p, 1);
+        assert_eq!(p.leaf_count(), 1);
+    }
+
+    #[test]
+    fn remove_leaf_nested() {
+        let mut p = Pane::Split {
+            kind: Split::Horizontal,
+            children: vec![connect(), vsplit()],
+        };
+        remove_leaf(&mut p, 1);
+        assert_eq!(p.leaf_count(), 2);
+    }
+
+    #[test]
+    fn remove_leaf_noop_on_single() {
+        let mut p = connect();
+        remove_leaf(&mut p, 0); // must not panic
+        assert_eq!(p.leaf_count(), 1);
+    }
+
+    // ---- pane_inner --------------------------------------------------------
+
+    #[test]
+    fn pane_inner_shrinks_by_one() {
+        let inner = pane_inner(r(10, 8));
+        assert_eq!(inner.x, 1);
+        assert_eq!(inner.y, 1);
+        assert_eq!(inner.width, 8);
+        assert_eq!(inner.height, 6);
+    }
+
+    #[test]
+    fn pane_inner_saturates_at_zero() {
+        let inner = pane_inner(Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        });
+        assert_eq!(inner.width, 0);
+        assert_eq!(inner.height, 0);
+    }
+}
