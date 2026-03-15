@@ -389,7 +389,7 @@ mod tests {
     use super::*;
     use pane::{Pane, Split, remove_leaf, split_areas};
     use sftp_parse::{
-        FsEntry, epoch_to_ymd, human_size, parse_ls, parse_pwd, shell_quote,
+        epoch_to_ymd, human_size, parse_ls, parse_pwd, shell_quote,
         skip_n_tokens, strip_ansi,
     };
     use tab::Tab;
