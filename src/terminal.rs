@@ -1,0 +1,251 @@
+use std::{
+    io::{Read, Write},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+};
+
+use anyhow::Result;
+use crate::log;
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Modifier, Style},
+};
+
+/// Count the number of Device Status Report sequences (`ESC [ 6 n`) in `data`.
+pub fn count_dsr(data: &[u8]) -> usize {
+    const DSR: &[u8] = b"\x1b[6n";
+    let mut count = 0;
+    let mut i = 0;
+    while i + DSR.len() <= data.len() {
+        if data[i..].starts_with(DSR) {
+            count += 1;
+            i += DSR.len();
+        } else {
+            i += 1;
+        }
+    }
+    count
+}
+
+/// A single pseudo-terminal session driven by an arbitrary command.
+pub struct EmbeddedTerminal {
+    pub parser:         Arc<Mutex<vt100::Parser>>,
+    pub master:         Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    pub writer:         Arc<Mutex<Box<dyn Write + Send>>>,
+    pub dirty:          Arc<AtomicBool>,
+    pub mouse_active:   Arc<AtomicBool>,
+    pub cursor_visible: Arc<AtomicBool>,
+    pub rows:           u16,
+    pub cols:           u16,
+    pub raw_output:     Arc<Mutex<Vec<u8>>>,
+}
+
+impl EmbeddedTerminal {
+    pub fn new(
+        rows: u16,
+        cols: u16,
+        cmd: CommandBuilder,
+        log: Option<Arc<Mutex<std::fs::File>>>,
+    ) -> Result<Self> {
+        let pty_system = native_pty_system();
+        let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
+
+        let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
+        let mut reader = pair.master.try_clone_reader()?;
+
+        pair.slave.spawn_command(cmd)?;
+
+        let parser        = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let dirty         = Arc::new(AtomicBool::new(false));
+        let mouse_active  = Arc::new(AtomicBool::new(false));
+        let cursor_visible = Arc::new(AtomicBool::new(true));
+        let raw_output    = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+        let parser_c        = Arc::clone(&parser);
+        let writer_c        = Arc::clone(&writer);
+        let dirty_c         = Arc::clone(&dirty);
+        let mouse_active_c  = Arc::clone(&mouse_active);
+        let cursor_visible_c = Arc::clone(&cursor_visible);
+        let raw_output_c    = Arc::clone(&raw_output);
+        let log_c           = log.clone();
+
+        thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => { log!(log_c, "PTY EOF"); break; }
+                    Ok(n) => {
+                        let data = &buf[..n];
+
+                        if let Ok(mut p) = parser_c.lock() { p.process(data); }
+                        if let Ok(mut rb) = raw_output_c.lock() { rb.extend_from_slice(data); }
+                        dirty_c.store(true, Ordering::Release);
+
+                        // Scan for DEC private mode set/reset sequences
+                        let mut i = 0;
+                        while i + 2 < data.len() {
+                            if data[i] == 0x1b && data[i+1] == b'[' && data[i+2] == b'?' {
+                                let start = i + 3;
+                                let mut end = start;
+                                while end < data.len() && data[end] != b'h' && data[end] != b'l' { end += 1; }
+                                if end < data.len() {
+                                    if let Ok(params) = std::str::from_utf8(&data[start..end]) {
+                                        let set = data[end] == b'h';
+                                        for param in params.split(';') {
+                                            match param.trim() {
+                                                "1000" | "1002" | "1003" | "1006" => {
+                                                    mouse_active_c.store(set, Ordering::Release);
+                                                }
+                                                "25" => {
+                                                    cursor_visible_c.store(set, Ordering::Release);
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                    i = end + 1;
+                                    continue;
+                                }
+                            }
+                            i += 1;
+                        }
+
+                        // Reply to DSR probes
+                        let dsr_count = count_dsr(data);
+                        if dsr_count > 0 {
+                            let (row, col) = if let Ok(p) = parser_c.lock() {
+                                let pos = p.screen().cursor_position();
+                                (pos.0 + 1, pos.1 + 1)
+                            } else { (1, 1) };
+                            let reply = format!("\x1b[{};{}R", row, col);
+                            if let Ok(mut w) = writer_c.lock() {
+                                for _ in 0..dsr_count { let _ = w.write_all(reply.as_bytes()); }
+                            }
+                        }
+                    }
+                    Err(e) => { log!(log_c, "PTY error: {}", e); break; }
+                }
+            }
+        });
+
+        let master = Arc::new(Mutex::new(pair.master));
+        Ok(Self { parser, master, writer, dirty, mouse_active, cursor_visible, rows, cols, raw_output })
+    }
+
+    /// Spawn an SSH interactive session to `host`.
+    pub fn ssh(rows: u16, cols: u16, host: &str, log: Option<Arc<Mutex<std::fs::File>>>) -> Result<Self> {
+        let mut cmd = CommandBuilder::new("ssh");
+        cmd.arg(host);
+        cmd.arg("-t");
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        log!(log, "SSH spawned {}x{} host={}", cols, rows, host);
+        Self::new(rows, cols, cmd, log)
+    }
+
+    /// Spawn an SFTP subsession to `host` (small fixed size, never rendered).
+    pub fn sftp(host: &str, log: Option<Arc<Mutex<std::fs::File>>>) -> Result<Self> {
+        let mut cmd = CommandBuilder::new("sftp");
+        cmd.arg(host);
+        cmd.env("TERM", "dumb");
+        log!(log, "SFTP spawned host={}", host);
+        Self::new(200, 220, cmd, log)
+    }
+
+    pub fn send_str(&mut self, s: &str) {
+        if let Ok(mut w) = self.writer.lock() { let _ = w.write_all(s.as_bytes()); }
+    }
+
+    pub fn send_char(&mut self, c: char) {
+        let mut buf = [0u8; 4];
+        self.send_str(c.encode_utf8(&mut buf));
+    }
+
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        if rows == self.rows && cols == self.cols { return; }
+        if let Ok(m) = self.master.lock() {
+            let _ = m.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        }
+        if let Ok(mut p) = self.parser.lock() {
+            let snapshot = p.screen().contents_formatted();
+            let mut np = vt100::Parser::new(rows, cols, 0);
+            np.process(&snapshot);
+            *p = np;
+        }
+        self.rows = rows;
+        self.cols = cols;
+    }
+
+    pub fn render_into(&self, area: Rect, buf: &mut Buffer) {
+        let Ok(parser) = self.parser.try_lock() else { return };
+        let screen = parser.screen();
+
+        fn vc(c: vt100::Color) -> Color {
+            match c {
+                vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+                vt100::Color::Idx(i)       => Color::Indexed(i),
+                _                          => Color::Reset,
+            }
+        }
+
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(cell) = screen.cell(y, x) {
+                    let s = cell.contents();
+                    let sym = if s.is_empty() { " " } else { s };
+                    if let Some(bc) = buf.cell_mut((area.x + x, area.y + y)) {
+                        bc.set_symbol(sym);
+                        let mut style = Style::default()
+                            .fg(vc(cell.fgcolor()))
+                            .bg(vc(cell.bgcolor()));
+                        if cell.bold()      { style = style.add_modifier(Modifier::BOLD); }
+                        if cell.italic()    { style = style.add_modifier(Modifier::ITALIC); }
+                        if cell.underline() { style = style.add_modifier(Modifier::UNDERLINED); }
+                        if cell.inverse()   { style = style.add_modifier(Modifier::REVERSED); }
+                        bc.set_style(style);
+                    }
+                }
+            }
+        }
+
+        if self.cursor_visible.load(Ordering::Acquire) {
+            let (cy, cx) = screen.cursor_position();
+            let sx = area.x + cx;
+            let sy = area.y + cy;
+            if sx < area.x + area.width && sy < area.y + area.height {
+                if let Some(bc) = buf.cell_mut((sx, sy)) {
+                    let style = bc.style().add_modifier(Modifier::REVERSED);
+                    bc.set_style(style);
+                }
+            }
+        }
+    }
+
+    pub fn cursor_pos(&self) -> Option<(u16, u16)> {
+        if !self.cursor_visible.load(Ordering::Acquire) { return None; }
+        let Ok(parser) = self.parser.try_lock() else { return None };
+        let (cy, cx) = parser.screen().cursor_position();
+        Some((cx, cy))
+    }
+
+    pub fn raw_lines(&self) -> Vec<String> {
+        let Ok(rb) = self.raw_output.lock() else { return vec![]; };
+        crate::sftp_parse::strip_ansi(&rb)
+            .lines()
+            .map(|l| l.trim_end().to_string())
+            .collect()
+    }
+
+    pub fn drain_raw(&self) {
+        if let Ok(mut rb) = self.raw_output.lock() { rb.clear(); }
+    }
+
+    pub fn raw_len(&self) -> usize {
+        self.raw_output.lock().map(|rb| rb.len()).unwrap_or(0)
+    }
+}
