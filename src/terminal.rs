@@ -7,8 +7,8 @@ use std::{
     thread,
 };
 
-use anyhow::Result;
 use crate::log;
+use anyhow::Result;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::{
     buffer::Buffer,
@@ -34,15 +34,15 @@ pub fn count_dsr(data: &[u8]) -> usize {
 
 /// A single pseudo-terminal session driven by an arbitrary command.
 pub struct EmbeddedTerminal {
-    pub parser:         Arc<Mutex<vt100::Parser>>,
-    pub master:         Arc<Mutex<Box<dyn MasterPty + Send>>>,
-    pub writer:         Arc<Mutex<Box<dyn Write + Send>>>,
-    pub dirty:          Arc<AtomicBool>,
-    pub mouse_active:   Arc<AtomicBool>,
+    pub parser: Arc<Mutex<vt100::Parser>>,
+    pub master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    pub dirty: Arc<AtomicBool>,
+    pub mouse_active: Arc<AtomicBool>,
     pub cursor_visible: Arc<AtomicBool>,
-    pub rows:           u16,
-    pub cols:           u16,
-    pub raw_output:     Arc<Mutex<Vec<u8>>>,
+    pub rows: u16,
+    pub cols: u16,
+    pub raw_output: Arc<Mutex<Vec<u8>>>,
 }
 
 impl EmbeddedTerminal {
@@ -53,46 +53,60 @@ impl EmbeddedTerminal {
         log: Option<Arc<Mutex<std::fs::File>>>,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
-        let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
+        let pair = pty_system.openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
 
         let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
         let mut reader = pair.master.try_clone_reader()?;
 
         pair.slave.spawn_command(cmd)?;
 
-        let parser        = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
-        let dirty         = Arc::new(AtomicBool::new(false));
-        let mouse_active  = Arc::new(AtomicBool::new(false));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let dirty = Arc::new(AtomicBool::new(false));
+        let mouse_active = Arc::new(AtomicBool::new(false));
         let cursor_visible = Arc::new(AtomicBool::new(true));
-        let raw_output    = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let raw_output = Arc::new(Mutex::new(Vec::<u8>::new()));
 
-        let parser_c        = Arc::clone(&parser);
-        let writer_c        = Arc::clone(&writer);
-        let dirty_c         = Arc::clone(&dirty);
-        let mouse_active_c  = Arc::clone(&mouse_active);
+        let parser_c = Arc::clone(&parser);
+        let writer_c = Arc::clone(&writer);
+        let dirty_c = Arc::clone(&dirty);
+        let mouse_active_c = Arc::clone(&mouse_active);
         let cursor_visible_c = Arc::clone(&cursor_visible);
-        let raw_output_c    = Arc::clone(&raw_output);
-        let log_c           = log.clone();
+        let raw_output_c = Arc::clone(&raw_output);
+        let log_c = log.clone();
 
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) => { log!(log_c, "PTY EOF"); break; }
+                    Ok(0) => {
+                        log!(log_c, "PTY EOF");
+                        break;
+                    }
                     Ok(n) => {
                         let data = &buf[..n];
 
-                        if let Ok(mut p) = parser_c.lock() { p.process(data); }
-                        if let Ok(mut rb) = raw_output_c.lock() { rb.extend_from_slice(data); }
+                        if let Ok(mut p) = parser_c.lock() {
+                            p.process(data);
+                        }
+                        if let Ok(mut rb) = raw_output_c.lock() {
+                            rb.extend_from_slice(data);
+                        }
                         dirty_c.store(true, Ordering::Release);
 
                         // Scan for DEC private mode set/reset sequences
                         let mut i = 0;
                         while i + 2 < data.len() {
-                            if data[i] == 0x1b && data[i+1] == b'[' && data[i+2] == b'?' {
+                            if data[i] == 0x1b && data[i + 1] == b'[' && data[i + 2] == b'?' {
                                 let start = i + 3;
                                 let mut end = start;
-                                while end < data.len() && data[end] != b'h' && data[end] != b'l' { end += 1; }
+                                while end < data.len() && data[end] != b'h' && data[end] != b'l' {
+                                    end += 1;
+                                }
                                 if end < data.len() {
                                     if let Ok(params) = std::str::from_utf8(&data[start..end]) {
                                         let set = data[end] == b'h';
@@ -121,24 +135,46 @@ impl EmbeddedTerminal {
                             let (row, col) = if let Ok(p) = parser_c.lock() {
                                 let pos = p.screen().cursor_position();
                                 (pos.0 + 1, pos.1 + 1)
-                            } else { (1, 1) };
+                            } else {
+                                (1, 1)
+                            };
                             let reply = format!("\x1b[{};{}R", row, col);
                             if let Ok(mut w) = writer_c.lock() {
-                                for _ in 0..dsr_count { let _ = w.write_all(reply.as_bytes()); }
+                                for _ in 0..dsr_count {
+                                    let _ = w.write_all(reply.as_bytes());
+                                }
                             }
                         }
                     }
-                    Err(e) => { log!(log_c, "PTY error: {}", e); break; }
+                    Err(e) => {
+                        log!(log_c, "PTY error: {}", e);
+                        break;
+                    }
                 }
             }
         });
 
         let master = Arc::new(Mutex::new(pair.master));
-        Ok(Self { parser, master, writer, dirty, mouse_active, cursor_visible, rows, cols, raw_output })
+        Ok(Self {
+            parser,
+            master,
+            writer,
+            dirty,
+            mouse_active,
+            cursor_visible,
+            rows,
+            cols,
+            raw_output,
+        })
     }
 
     /// Spawn an SSH interactive session to `host`.
-    pub fn ssh(rows: u16, cols: u16, host: &str, log: Option<Arc<Mutex<std::fs::File>>>) -> Result<Self> {
+    pub fn ssh(
+        rows: u16,
+        cols: u16,
+        host: &str,
+        log: Option<Arc<Mutex<std::fs::File>>>,
+    ) -> Result<Self> {
         let mut cmd = CommandBuilder::new("ssh");
         cmd.arg(host);
         cmd.arg("-t");
@@ -158,7 +194,9 @@ impl EmbeddedTerminal {
     }
 
     pub fn send_str(&mut self, s: &str) {
-        if let Ok(mut w) = self.writer.lock() { let _ = w.write_all(s.as_bytes()); }
+        if let Ok(mut w) = self.writer.lock() {
+            let _ = w.write_all(s.as_bytes());
+        }
     }
 
     pub fn send_char(&mut self, c: char) {
@@ -167,9 +205,16 @@ impl EmbeddedTerminal {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
-        if rows == self.rows && cols == self.cols { return; }
+        if rows == self.rows && cols == self.cols {
+            return;
+        }
         if let Ok(m) = self.master.lock() {
-            let _ = m.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            let _ = m.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
         }
         if let Ok(mut p) = self.parser.lock() {
             let snapshot = p.screen().contents_formatted();
@@ -182,14 +227,16 @@ impl EmbeddedTerminal {
     }
 
     pub fn render_into(&self, area: Rect, buf: &mut Buffer) {
-        let Ok(parser) = self.parser.try_lock() else { return };
+        let Ok(parser) = self.parser.try_lock() else {
+            return;
+        };
         let screen = parser.screen();
 
         fn vc(c: vt100::Color) -> Color {
             match c {
                 vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
-                vt100::Color::Idx(i)       => Color::Indexed(i),
-                _                          => Color::Reset,
+                vt100::Color::Idx(i) => Color::Indexed(i),
+                _ => Color::Reset,
             }
         }
 
@@ -203,10 +250,18 @@ impl EmbeddedTerminal {
                         let mut style = Style::default()
                             .fg(vc(cell.fgcolor()))
                             .bg(vc(cell.bgcolor()));
-                        if cell.bold()      { style = style.add_modifier(Modifier::BOLD); }
-                        if cell.italic()    { style = style.add_modifier(Modifier::ITALIC); }
-                        if cell.underline() { style = style.add_modifier(Modifier::UNDERLINED); }
-                        if cell.inverse()   { style = style.add_modifier(Modifier::REVERSED); }
+                        if cell.bold() {
+                            style = style.add_modifier(Modifier::BOLD);
+                        }
+                        if cell.italic() {
+                            style = style.add_modifier(Modifier::ITALIC);
+                        }
+                        if cell.underline() {
+                            style = style.add_modifier(Modifier::UNDERLINED);
+                        }
+                        if cell.inverse() {
+                            style = style.add_modifier(Modifier::REVERSED);
+                        }
                         bc.set_style(style);
                     }
                 }
@@ -227,14 +282,20 @@ impl EmbeddedTerminal {
     }
 
     pub fn cursor_pos(&self) -> Option<(u16, u16)> {
-        if !self.cursor_visible.load(Ordering::Acquire) { return None; }
-        let Ok(parser) = self.parser.try_lock() else { return None };
+        if !self.cursor_visible.load(Ordering::Acquire) {
+            return None;
+        }
+        let Ok(parser) = self.parser.try_lock() else {
+            return None;
+        };
         let (cy, cx) = parser.screen().cursor_position();
         Some((cx, cy))
     }
 
     pub fn raw_lines(&self) -> Vec<String> {
-        let Ok(rb) = self.raw_output.lock() else { return vec![]; };
+        let Ok(rb) = self.raw_output.lock() else {
+            return vec![];
+        };
         crate::sftp_parse::strip_ansi(&rb)
             .lines()
             .map(|l| l.trim_end().to_string())
@@ -242,7 +303,9 @@ impl EmbeddedTerminal {
     }
 
     pub fn drain_raw(&self) {
-        if let Ok(mut rb) = self.raw_output.lock() { rb.clear(); }
+        if let Ok(mut rb) = self.raw_output.lock() {
+            rb.clear();
+        }
     }
 
     pub fn raw_len(&self) -> usize {

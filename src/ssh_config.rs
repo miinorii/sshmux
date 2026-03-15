@@ -8,10 +8,10 @@ pub struct SshHost {
 pub fn parse_ssh_config() -> Vec<SshHost> {
     let config_path = match dirs::home_dir() {
         Some(h) => h.join(".ssh").join("config"),
-        None    => return vec![],
+        None => return vec![],
     };
     let content = match std::fs::read_to_string(&config_path) {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(_) => return vec![],
     };
     let mut hosts = Vec::new();
@@ -23,7 +23,9 @@ pub fn parse_ssh_config() -> Vec<SshHost> {
             if kw.eq_ignore_ascii_case("host") {
                 let name = rest.trim();
                 if !name.is_empty() && !name.contains('*') && !name.contains('?') {
-                    hosts.push(SshHost { label: name.to_string() });
+                    hosts.push(SshHost {
+                        label: name.to_string(),
+                    });
                 }
             }
         }

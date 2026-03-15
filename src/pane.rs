@@ -16,17 +16,20 @@ use crate::terminal::EmbeddedTerminal;
 // Split direction
 // ---------------------------------------------------------------------------
 
-pub enum Split { Horizontal, Vertical }
+pub enum Split {
+    Horizontal,
+    Vertical,
+}
 
 // ---------------------------------------------------------------------------
 // Pane
 // ---------------------------------------------------------------------------
 
 pub enum Pane {
-    Connect     { list_state: ListState },
-    Session     { terminal: EmbeddedTerminal },
+    Connect { list_state: ListState },
+    Session { terminal: EmbeddedTerminal },
     FileBrowser { browser: FileBrowser },
-    Split       { kind: Split, children: Vec<Pane> },
+    Split { kind: Split, children: Vec<Pane> },
 }
 
 impl Pane {
@@ -41,7 +44,11 @@ impl Pane {
             Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } => vec![area],
             Pane::Split { kind, children } => {
                 let areas = split_areas(area, kind, children.len());
-                children.iter().zip(areas).flat_map(|(c, a)| c.leaf_areas(a)).collect()
+                children
+                    .iter()
+                    .zip(areas)
+                    .flat_map(|(c, a)| c.leaf_areas(a))
+                    .collect()
             }
         }
     }
@@ -56,13 +63,19 @@ impl Pane {
     pub fn leaf_mut(&mut self, n: usize) -> Option<&mut Pane> {
         match self {
             Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } => {
-                if n == 0 { Some(self) } else { None }
+                if n == 0 {
+                    Some(self)
+                } else {
+                    None
+                }
             }
             Pane::Split { children, .. } => {
                 let mut offset = 0;
                 for child in children {
                     let count = child.leaf_count();
-                    if n < offset + count { return child.leaf_mut(n - offset); }
+                    if n < offset + count {
+                        return child.leaf_mut(n - offset);
+                    }
                     offset += count;
                 }
                 None
@@ -73,13 +86,19 @@ impl Pane {
     pub fn leaf(&self, n: usize) -> Option<&Pane> {
         match self {
             Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } => {
-                if n == 0 { Some(self) } else { None }
+                if n == 0 {
+                    Some(self)
+                } else {
+                    None
+                }
             }
             Pane::Split { children, .. } => {
                 let mut offset = 0;
                 for child in children {
                     let count = child.leaf_count();
-                    if n < offset + count { return child.leaf(n - offset); }
+                    if n < offset + count {
+                        return child.leaf(n - offset);
+                    }
                     offset += count;
                 }
                 None
@@ -97,7 +116,10 @@ impl Pane {
                     if n < offset + count {
                         if count == 1 {
                             let old = std::mem::replace(child, Pane::new_connect());
-                            *child = Pane::Split { kind, children: vec![old, Pane::new_connect()] };
+                            *child = Pane::Split {
+                                kind,
+                                children: vec![old, Pane::new_connect()],
+                            };
                         } else {
                             child.split_leaf(n - offset, kind);
                         }
@@ -114,7 +136,7 @@ impl Pane {
         match self {
             Pane::Session { terminal } => terminal.dirty.swap(false, Ordering::AcqRel),
             Pane::FileBrowser { browser } => {
-                let pty_dirty   = browser.sftp.dirty.swap(false, Ordering::AcqRel);
+                let pty_dirty = browser.sftp.dirty.swap(false, Ordering::AcqRel);
                 let state_dirty = browser.needs_redraw;
                 browser.needs_redraw = false;
                 pty_dirty || state_dirty
@@ -168,41 +190,72 @@ impl Pane {
                 *my_idx += 1;
 
                 let inner = if leaf_count > 1 {
-                    let border_style = if is_focus { Style::default().fg(Color::Blue) } else { Style::default().fg(Color::DarkGray) };
-                    let block = Block::default().borders(Borders::ALL).border_style(border_style).title(" connect ");
+                    let border_style = if is_focus {
+                        Style::default().fg(Color::Blue)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(border_style)
+                        .title(" connect ");
                     let inner = block.inner(area);
                     block.render(area, buf);
                     inner
-                } else { area };
+                } else {
+                    area
+                };
 
                 const HELP_LINES: u16 = 8;
-                let list_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: inner.height.saturating_sub(HELP_LINES + 1) };
-                let help_area = Rect { x: inner.x, y: inner.y + inner.height.saturating_sub(HELP_LINES), width: inner.width, height: HELP_LINES };
+                let list_area = Rect {
+                    x: inner.x,
+                    y: inner.y,
+                    width: inner.width,
+                    height: inner.height.saturating_sub(HELP_LINES + 1),
+                };
+                let help_area = Rect {
+                    x: inner.x,
+                    y: inner.y + inner.height.saturating_sub(HELP_LINES),
+                    width: inner.width,
+                    height: HELP_LINES,
+                };
 
                 let items: Vec<&str> = hosts.iter().map(|h| h.label.as_str()).collect();
                 let list = List::new(items)
                     .style(Style::default().fg(Color::White))
-                    .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                    .highlight_style(
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )
                     .highlight_symbol("> ");
                 StatefulWidget::render(list, list_area, buf, list_state);
 
                 let shortcuts = [
-                    ("Alt+T",  "new tab"),
-                    ("Alt+W",  "close pane / tab"),
-                    ("Alt+-",  "split vertical"),
-                    ("Alt++",  "split horizontal"),
-                    ("Alt+B",  "open file browser"),
+                    ("Alt+T", "new tab"),
+                    ("Alt+W", "close pane / tab"),
+                    ("Alt+-", "split vertical"),
+                    ("Alt++", "split horizontal"),
+                    ("Alt+B", "open file browser"),
                     ("Alt+↑↓", "cycle pane focus"),
                     ("Alt+←→", "switch tab"),
                     ("Ctrl+C", "quit"),
                 ];
                 for (i, (key, desc)) in shortcuts.iter().enumerate() {
                     let y = help_area.y + i as u16;
-                    if y >= help_area.y + help_area.height { break; }
-                    buf.set_line(help_area.x, y, &Line::from(vec![
-                        Span::raw(format!("  {:10}", key)).style(Style::default().fg(Color::Yellow)),
-                        Span::raw(*desc).style(Style::default().fg(Color::DarkGray)),
-                    ]), help_area.width);
+                    if y >= help_area.y + help_area.height {
+                        break;
+                    }
+                    buf.set_line(
+                        help_area.x,
+                        y,
+                        &Line::from(vec![
+                            Span::raw(format!("  {:10}", key))
+                                .style(Style::default().fg(Color::Yellow)),
+                            Span::raw(*desc).style(Style::default().fg(Color::DarkGray)),
+                        ]),
+                        help_area.width,
+                    );
                 }
             }
 
@@ -211,12 +264,20 @@ impl Pane {
                 *my_idx += 1;
 
                 let inner = if leaf_count > 1 {
-                    let border_style = if is_focus { Style::default().fg(Color::Blue) } else { Style::default().fg(Color::DarkGray) };
-                    let block = Block::default().borders(Borders::ALL).border_style(border_style);
+                    let border_style = if is_focus {
+                        Style::default().fg(Color::Blue)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(border_style);
                     let inner = block.inner(area);
                     block.render(area, buf);
                     inner
-                } else { area };
+                } else {
+                    area
+                };
                 terminal.render_into(inner, buf);
             }
 
@@ -241,25 +302,39 @@ impl Pane {
 // ---------------------------------------------------------------------------
 
 pub fn split_areas(area: Rect, kind: &Split, count: usize) -> Vec<Rect> {
-    if count == 0 { return vec![]; }
+    if count == 0 {
+        return vec![];
+    }
     match kind {
         Split::Horizontal => {
             let w = area.width / count as u16;
-            (0..count).map(|i| Rect {
-                x:      area.x + i as u16 * w,
-                y:      area.y,
-                width:  if i == count - 1 { area.width - i as u16 * w } else { w },
-                height: area.height,
-            }).collect()
+            (0..count)
+                .map(|i| Rect {
+                    x: area.x + i as u16 * w,
+                    y: area.y,
+                    width: if i == count - 1 {
+                        area.width - i as u16 * w
+                    } else {
+                        w
+                    },
+                    height: area.height,
+                })
+                .collect()
         }
         Split::Vertical => {
             let h = area.height / count as u16;
-            (0..count).map(|i| Rect {
-                x:      area.x,
-                y:      area.y + i as u16 * h,
-                width:  area.width,
-                height: if i == count - 1 { area.height - i as u16 * h } else { h },
-            }).collect()
+            (0..count)
+                .map(|i| Rect {
+                    x: area.x,
+                    y: area.y + i as u16 * h,
+                    width: area.width,
+                    height: if i == count - 1 {
+                        area.height - i as u16 * h
+                    } else {
+                        h
+                    },
+                })
+                .collect()
         }
     }
 }
@@ -277,12 +352,18 @@ pub fn remove_leaf(pane: &mut Pane, n: usize) {
             for (i, child) in children.iter_mut().enumerate() {
                 let count = child.leaf_count();
                 if n < offset + count {
-                    if count == 1 { to_remove = Some(i); } else { remove_leaf(child, n - offset); }
+                    if count == 1 {
+                        to_remove = Some(i);
+                    } else {
+                        remove_leaf(child, n - offset);
+                    }
                     break;
                 }
                 offset += count;
             }
-            if let Some(i) = to_remove { children.remove(i); }
+            if let Some(i) = to_remove {
+                children.remove(i);
+            }
         }
     }
 }
@@ -294,9 +375,9 @@ pub fn remove_leaf(pane: &mut Pane, n: usize) {
 /// The drawable area inside a pane's own border (1-cell inset on all sides).
 pub fn pane_inner(area: Rect) -> Rect {
     Rect {
-        x:      area.x + 1,
-        y:      area.y + 1,
-        width:  area.width.saturating_sub(2),
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
         height: area.height.saturating_sub(2),
     }
 }
