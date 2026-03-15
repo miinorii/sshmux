@@ -1,8 +1,16 @@
 # sshmux
 
-Terminal multiplexer that runs inside your local terminal and connects to SSH hosts. Tabs, split panes, and a two-panel SFTP file browser, all driven by the system `ssh` and `sftp` binaries — no additional SSH library dependency.
+![sshmux demo](demo.png)
+
+SSH session multiplexer that runs inside your local terminal. Tabs, split panes, and a two-panel SFTP file browser, all driven by the system `ssh` and `sftp` binaries — no additional SSH library dependency.
+
+> This project started as a personal vibecoded tool to manage an ever-growing list of SSH connections at work. It solved the problem well enough that it felt worth sharing. It is not a polished product — use it as a starting point, adapt it freely, and contribute back if you find it useful.
 
 ---
+
+## SSH config
+
+Hosts are read from `~/.ssh/config` at startup. Any non-wildcard `Host` entry is listed in the connect pane. The `ssh` and `sftp` binaries inherit the full system environment including SSH agent, `~/.ssh/config` options, and jump hosts.
 
 ## Keybindings
 
@@ -54,22 +62,6 @@ Mouse events forwarded as SGR sequences when the remote app enables mouse report
 | `Delete` | Delete focused file (confirmation required) |
 | `y` | Confirm deletion |
 | `n` / `Esc` | Cancel deletion |
-
----
-
-## Build
-
-```
-cargo build --release
-```
-
-Binary: `target/release/sshmux`
-
-Optional debug logging to `debug.log`:
-
-```
-sshmux --debug
-```
 
 ---
 
@@ -181,18 +173,16 @@ Idle <────────────────────────�
 
 ---
 
-## SSH config
+## Build
 
-Hosts are read from `~/.ssh/config` at startup. Any non-wildcard `Host` entry is listed in the connect pane. The `ssh` and `sftp` binaries inherit the full system environment including SSH agent, `~/.ssh/config` options, and jump hosts.
+```
+cargo build --release
+```
 
----
+Binary: `target/release/sshmux`
 
-## File parsing
+Optional debug logging to `debug.log`:
 
-SFTP directory listings are scraped from the output of `sftp ls -la`. The parser handles:
-
-- Variable-width columns padded with spaces
-- Permission bits masked with `*` (e.g. `drwx******`)
-- Link count field showing `?`
-- Symlinks with ` -> target` suffix (stripped from display name)
-- Filenames with embedded spaces
+```
+sshmux --debug
+```
