@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{Ordering}};
 
 use anyhow::Result;
 use ratatui::{
@@ -104,6 +104,14 @@ impl App {
             *pane = Pane::FileBrowser { browser };
         }
         Ok(())
+    }
+
+    pub fn focused_pane_mouse_active(&self) -> bool {
+        if let Some(Pane::Session { terminal }) = self.tab().focused_pane() {
+            terminal.mouse_active.load(Ordering::Relaxed)
+        } else {
+            false
+        }
     }
 
     pub fn focused_pane_area(&self, full: Rect) -> Rect {
