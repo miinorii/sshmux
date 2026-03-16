@@ -50,6 +50,10 @@ impl Tab {
         self.root.leaf_mut(self.focus_idx)
     }
 
+    pub fn focused_pane(&self) -> Option<&Pane> {
+        self.root.leaf(self.focus_idx)
+    }
+
     pub fn split(&mut self, kind: Split, area: Rect) {
         let n = self.focus_idx;
         let count = self.leaf_count();
