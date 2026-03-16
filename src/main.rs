@@ -309,32 +309,32 @@ fn main() -> Result<()> {
                         KeyCode::BackTab => app.send_str("\x1b[Z"),
                         KeyCode::Left => {
                             if app.focused_pane_mouse_active() {
-                                app.send_str("\x1bOD");  
+                                app.send_str("\x1bOD");
                             } else {
                                 app.send_str("\x1b[D");
                             }
                         }
                         KeyCode::Right => {
                             if app.focused_pane_mouse_active() {
-                                app.send_str("\x1bOC");  
+                                app.send_str("\x1bOC");
                             } else {
                                 app.send_str("\x1b[C");
                             }
                         }
                         KeyCode::Up => {
                             if app.focused_pane_mouse_active() {
-                                app.send_str("\x1bOA");  
+                                app.send_str("\x1bOA");
                             } else {
                                 app.send_str("\x1b[A");
                             }
-                        },
+                        }
                         KeyCode::Down => {
                             if app.focused_pane_mouse_active() {
-                                app.send_str("\x1bOB");  
+                                app.send_str("\x1bOB");
                             } else {
                                 app.send_str("\x1b[B");
                             }
-                        },
+                        }
                         KeyCode::Home => app.send_str("\x1b[H"),
                         KeyCode::End => app.send_str("\x1b[F"),
                         KeyCode::Esc => app.send_str("\x1b"),

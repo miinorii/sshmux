@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, atomic::{Ordering}};
+use std::sync::{Arc, Mutex, atomic::Ordering};
 
 use anyhow::Result;
 use ratatui::{
