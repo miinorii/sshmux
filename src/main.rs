@@ -313,6 +313,7 @@ fn main() -> Result<()> {
                         KeyCode::Down => app.send_str("\x1b[B"),
                         KeyCode::Home => app.send_str("\x1b[H"),
                         KeyCode::End => app.send_str("\x1b[F"),
+                        KeyCode::Esc => app.send_str("\x1b"),
                         KeyCode::PageUp => app.send_str("\x1b[5~"),
                         KeyCode::PageDown => app.send_str("\x1b[6~"),
                         KeyCode::F(n) => {
