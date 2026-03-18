@@ -105,6 +105,7 @@ fn main() -> Result<()> {
 
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                     let alt = key.modifiers.contains(KeyModifiers::ALT);
+                    let focused_pane_has_mouse_active = app.focused_pane_mouse_active();
 
                     // ---- Global shortcuts (Alt+...) ----
                     if alt && !ctrl {
@@ -308,28 +309,28 @@ fn main() -> Result<()> {
                         KeyCode::Tab => app.send_str("\t"),
                         KeyCode::BackTab => app.send_str("\x1b[Z"),
                         KeyCode::Left => {
-                            if app.focused_pane_mouse_active() {
+                            if focused_pane_has_mouse_active {
                                 app.send_str("\x1bOD");
                             } else {
                                 app.send_str("\x1b[D");
                             }
                         }
                         KeyCode::Right => {
-                            if app.focused_pane_mouse_active() {
+                            if focused_pane_has_mouse_active {
                                 app.send_str("\x1bOC");
                             } else {
                                 app.send_str("\x1b[C");
                             }
                         }
                         KeyCode::Up => {
-                            if app.focused_pane_mouse_active() {
+                            if focused_pane_has_mouse_active {
                                 app.send_str("\x1bOA");
                             } else {
                                 app.send_str("\x1b[A");
                             }
                         }
                         KeyCode::Down => {
-                            if app.focused_pane_mouse_active() {
+                            if focused_pane_has_mouse_active {
                                 app.send_str("\x1bOB");
                             } else {
                                 app.send_str("\x1b[B");
