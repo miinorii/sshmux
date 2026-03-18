@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{fs, path::{Path, PathBuf}};
 
 // ---------------------------------------------------------------------------
 // ANSI stripping
@@ -211,8 +211,20 @@ pub fn epoch_to_ymd(secs: u64) -> (u32, u32, u32, u32, u32) {
     (y, mo + 1, d + 1, h as u32, mi as u32)
 }
 
-pub fn local_root() -> &'static str {
-    if cfg!(windows) { "\\.\\" } else { "/" }
+/// Returns a list of available root paths to browse.
+/// On Windows this is all accessible drive letters; on Unix it is just `/`.
+pub fn list_drives() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        ('A'..='Z')
+            .map(|c| PathBuf::from(format!("{}:\\", c)))
+            .filter(|p| p.exists())
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        vec![PathBuf::from("/")]
+    }
 }
 
 pub fn read_local_dir(path: &Path) -> Vec<FsEntry> {

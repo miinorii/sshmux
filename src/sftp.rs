@@ -15,7 +15,7 @@ use ratatui::{
 use std::io::Write;
 
 use crate::sftp_parse::{
-    FsEntry, local_root, parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress,
+    FsEntry, list_drives, parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress,
     shell_quote, strip_ansi,
 };
 use crate::terminal::EmbeddedTerminal;
@@ -74,6 +74,7 @@ pub struct FileBrowser {
     pub needs_redraw: bool,
     pub confirm_delete: Option<String>,
     pub pending_delete_name: Option<String>,
+    pub drive_picker: Option<(Vec<PathBuf>, ListState)>,
     pub log: Option<Arc<Mutex<std::fs::File>>>,
 }
 
@@ -106,6 +107,7 @@ impl FileBrowser {
             needs_redraw: false,
             confirm_delete: None,
             pending_delete_name: None,
+            drive_picker: None,
             log: log.clone(),
         })
     }
@@ -245,6 +247,11 @@ impl FileBrowser {
     // ---- navigation --------------------------------------------------------
 
     pub fn nav_up(&mut self) {
+        if let Some((_, sel)) = &mut self.drive_picker {
+            sel.select_previous();
+            self.needs_redraw = true;
+            return;
+        }
         match self.focus {
             BrowserFocus::Local => self.local_sel.select_previous(),
             BrowserFocus::Remote => self.remote_sel.select_previous(),
@@ -252,15 +259,41 @@ impl FileBrowser {
     }
 
     pub fn nav_down(&mut self) {
+        if let Some((_, sel)) = &mut self.drive_picker {
+            sel.select_next();
+            self.needs_redraw = true;
+            return;
+        }
         match self.focus {
             BrowserFocus::Local => self.local_sel.select_next(),
             BrowserFocus::Remote => self.remote_sel.select_next(),
         }
     }
 
+    pub fn dismiss_drive_picker(&mut self) {
+        if self.drive_picker.take().is_some() {
+            self.needs_redraw = true;
+        }
+    }
+
     pub fn enter(&mut self) {
         match self.focus {
             BrowserFocus::Local => {
+                // Drive picker active: Enter confirms the selected drive.
+                if self.drive_picker.is_some() {
+                    if let Some((drives, sel)) = self.drive_picker.take() {
+                        if let Some(i) = sel.selected() {
+                            if let Some(drive) = drives.get(i).cloned() {
+                                self.local_path = drive;
+                                self.local_entries = read_local_dir(&self.local_path);
+                                self.local_sel.select_first();
+                            }
+                        }
+                    }
+                    self.needs_redraw = true;
+                    return;
+                }
+
                 if let Some(i) = self.local_sel.selected() {
                     let entry = if let Some(e) = self.local_entries.get(i).cloned() {
                         e
@@ -271,7 +304,13 @@ impl FileBrowser {
                         if let Some(p) = self.local_path.parent() {
                             self.local_path = p.to_path_buf();
                         } else {
-                            self.local_path = PathBuf::from(local_root());
+                            // At a filesystem root: show drive picker.
+                            let drives = list_drives();
+                            let mut drive_sel = ListState::default();
+                            drive_sel.select_first();
+                            self.drive_picker = Some((drives, drive_sel));
+                            self.needs_redraw = true;
+                            return;
                         }
                     } else if entry.is_dir {
                         self.local_path.push(&entry.name);
@@ -306,13 +345,22 @@ impl FileBrowser {
     pub fn go_up(&mut self) {
         match self.focus {
             BrowserFocus::Local => {
+                if self.drive_picker.is_some() {
+                    self.dismiss_drive_picker();
+                    return;
+                }
                 if let Some(p) = self.local_path.parent() {
                     self.local_path = p.to_path_buf();
+                    self.local_entries = read_local_dir(&self.local_path);
+                    self.local_sel.select_first();
                 } else {
-                    self.local_path = PathBuf::from(local_root());
+                    // At a filesystem root: show drive picker.
+                    let drives = list_drives();
+                    let mut drive_sel = ListState::default();
+                    drive_sel.select_first();
+                    self.drive_picker = Some((drives, drive_sel));
+                    self.needs_redraw = true;
                 }
-                self.local_entries = read_local_dir(&self.local_path);
-                self.local_sel.select_first();
             }
             BrowserFocus::Remote => {
                 if self.sftp_state != SftpState::Idle {
@@ -501,6 +549,13 @@ impl FileBrowser {
                 self.remote_sel.select(Some(idx));
                 self.needs_redraw = true;
             }
+        } else if let Some((drives, drive_sel)) = &mut self.drive_picker {
+            let offset = drive_sel.offset();
+            let idx = offset + click_row;
+            if idx < drives.len() {
+                drive_sel.select(Some(idx));
+                self.needs_redraw = true;
+            }
         } else {
             let offset = self.local_sel.offset();
             let idx = offset + click_row;
@@ -567,19 +622,17 @@ impl FileBrowser {
         pane_focused: bool,
     ) {
         let is_active = self.focus == side && pane_focused;
-        let (title, path_str, entries, list_state) = match side {
-            BrowserFocus::Local => (
-                " local ",
-                self.local_path.to_string_lossy().to_string(),
-                &self.local_entries,
-                &mut self.local_sel,
-            ),
-            BrowserFocus::Remote => (
-                " remote ",
-                self.remote_path.clone(),
-                &self.remote_entries,
-                &mut self.remote_sel,
-            ),
+
+        // Title and path are computed separately so we can check drive_picker
+        // before borrowing entries/list_state.
+        let title = match side {
+            BrowserFocus::Local if self.drive_picker.is_some() => " select drive ",
+            BrowserFocus::Local => " local ",
+            BrowserFocus::Remote => " remote ",
+        };
+        let path_str = match side {
+            BrowserFocus::Local => self.local_path.to_string_lossy().to_string(),
+            BrowserFocus::Remote => self.remote_path.clone(),
         };
 
         let border_col = if is_active {
@@ -597,6 +650,31 @@ impl FileBrowser {
             ));
         let inner = block.inner(area);
         block.render(area, buf);
+
+        // Drive picker: shown in local panel instead of the normal file list.
+        if side == BrowserFocus::Local {
+            if let Some((drives, drive_sel)) = &mut self.drive_picker {
+                let items: Vec<String> = drives
+                    .iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect();
+                let list = List::new(items)
+                    .highlight_style(
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .highlight_symbol("> ");
+                StatefulWidget::render(list, inner, buf, drive_sel);
+                return;
+            }
+        }
+
+        let (entries, list_state) = match side {
+            BrowserFocus::Local => (&self.local_entries, &mut self.local_sel),
+            BrowserFocus::Remote => (&self.remote_entries, &mut self.remote_sel),
+        };
 
         let only_dotdot =
             entries.len() <= 1 && entries.first().map(|e| e.name == "..").unwrap_or(true);

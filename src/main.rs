@@ -243,12 +243,14 @@ fn main() -> Result<()> {
                             } else {
                                 match key.code {
                                     KeyCode::Tab => {
+                                        browser.dismiss_drive_picker();
                                         browser.focus = if browser.focus == BrowserFocus::Local {
                                             BrowserFocus::Remote
                                         } else {
                                             BrowserFocus::Local
                                         };
                                     }
+                                    KeyCode::Esc => browser.dismiss_drive_picker(),
                                     KeyCode::Up => browser.nav_up(),
                                     KeyCode::Down => browser.nav_down(),
                                     KeyCode::Char(' ') | KeyCode::Enter => browser.enter(),
