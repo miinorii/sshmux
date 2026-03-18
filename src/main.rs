@@ -385,7 +385,6 @@ fn main() -> Result<()> {
 
                         if matches!(mouse.kind, MouseEventKind::Down(_)) {
                             app.tabs[app.selected_tab].focus_idx = pane_idx;
-                            app.drag_origin = Some(pane_idx);
                         }
 
                         // ---- FileBrowser mouse ----
@@ -394,31 +393,9 @@ fn main() -> Result<()> {
                             Some(Pane::FileBrowser { .. })
                         );
                         if is_browser {
-                            if let MouseEventKind::Up(_) = mouse.kind {
-                                let origin = app.drag_origin.take();
-                                let _origin_is_other_browser = origin
-                                    .map(|o| {
-                                        o != pane_idx
-                                            && matches!(
-                                                app.tabs[app.selected_tab].root.leaf(o),
-                                                Some(Pane::FileBrowser { .. })
-                                            )
-                                    })
-                                    .unwrap_or(false);
-                                if let Some(Pane::FileBrowser { browser }) =
-                                    app.tab_mut().focused_pane_mut()
-                                {
-                                    let inner = pane_inner(pane_area);
-                                    let half = inner.width / 2;
-                                    let in_remote = mouse.column >= inner.x + half;
-                                    browser.focus = if in_remote {
-                                        BrowserFocus::Remote
-                                    } else {
-                                        BrowserFocus::Local
-                                    };
-                                }
-                            }
                             if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                                let leaf_count =
+                                    app.tabs[app.selected_tab].root.leaf_count();
                                 if let Some(Pane::FileBrowser { browser }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
@@ -429,6 +406,12 @@ fn main() -> Result<()> {
                                     } else {
                                         BrowserFocus::Local
                                     };
+                                    browser.click_select(
+                                        mouse.column,
+                                        mouse.row,
+                                        pane_area,
+                                        leaf_count,
+                                    );
                                 }
                             }
                             if let MouseEventKind::Up(MouseButton::Left) = mouse.kind {
@@ -438,19 +421,21 @@ fn main() -> Result<()> {
                                     let inner = pane_inner(pane_area);
                                     let half = inner.width / 2;
                                     let in_remote = mouse.column >= inner.x + half;
-                                    let prev_focus_panel = browser.focus;
-                                    if in_remote && prev_focus_panel == BrowserFocus::Local {
+                                    let drag_from = browser.focus;
+                                    if in_remote && drag_from == BrowserFocus::Local {
                                         browser.drag_local_to_remote();
-                                    } else if !in_remote && prev_focus_panel == BrowserFocus::Remote
-                                    {
+                                    } else if !in_remote && drag_from == BrowserFocus::Remote {
                                         browser.drag_remote_to_local();
                                     }
+                                    browser.focus = if in_remote {
+                                        BrowserFocus::Remote
+                                    } else {
+                                        BrowserFocus::Local
+                                    };
                                 }
                             }
                             continue;
                         }
-
-                        app.drag_origin = None;
 
                         // ---- Session mouse forwarding ----
                         let same_pane = pane_idx == prev_focus;

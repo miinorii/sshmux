@@ -20,7 +20,6 @@ pub struct App {
     pub selected_tab: usize,
     pub hosts: Vec<SshHost>,
     pub log: Option<Arc<Mutex<std::fs::File>>>,
-    pub drag_origin: Option<usize>,
 }
 
 impl App {
@@ -30,7 +29,6 @@ impl App {
             selected_tab: 0,
             hosts: crate::ssh_config::parse_ssh_config(),
             log,
-            drag_origin: None,
         }
     }
 

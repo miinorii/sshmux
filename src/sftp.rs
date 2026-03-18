@@ -450,6 +450,67 @@ impl FileBrowser {
         self.download();
     }
 
+    /// Select the list item under the mouse click, mirroring the render layout.
+    pub fn click_select(&mut self, col: u16, row: u16, pane_area: Rect, leaf_count: usize) {
+        // Replicate the outer block from render()
+        let outer_inner = if leaf_count > 1 {
+            Rect {
+                x: pane_area.x + 1,
+                y: pane_area.y + 1,
+                width: pane_area.width.saturating_sub(2),
+                height: pane_area.height.saturating_sub(2),
+            }
+        } else {
+            pane_area
+        };
+
+        let panels_area = Rect {
+            height: outer_inner.height.saturating_sub(2), // status bar + gap
+            ..outer_inner
+        };
+
+        let half = panels_area.width / 2;
+        let in_remote = col >= panels_area.x + half;
+        let panel_area = if in_remote {
+            Rect {
+                x: panels_area.x + half,
+                width: panels_area.width - half,
+                ..panels_area
+            }
+        } else {
+            Rect {
+                width: half,
+                ..panels_area
+            }
+        };
+
+        // Each panel has its own block border (1-cell inset)
+        let list_y = panel_area.y + 1;
+        let list_height = panel_area.height.saturating_sub(2);
+
+        if row < list_y || row >= list_y + list_height {
+            return;
+        }
+
+        let click_row = (row - list_y) as usize;
+
+        if in_remote {
+            let offset = self.remote_sel.offset();
+            let idx = offset + click_row;
+            if idx < self.remote_entries.len() {
+                self.remote_sel.select(Some(idx));
+                self.needs_redraw = true;
+            }
+        } else {
+            let offset = self.local_sel.offset();
+            let idx = offset + click_row;
+            if idx < self.local_entries.len() {
+                self.local_sel.select(Some(idx));
+                self.needs_redraw = true;
+            }
+        }
+    }
+
     // ---- render ------------------------------------------------------------
 
     pub fn render(&mut self, area: Rect, buf: &mut Buffer, is_focus: bool, leaf_count: usize) {
