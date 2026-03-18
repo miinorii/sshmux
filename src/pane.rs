@@ -111,7 +111,7 @@ impl Pane {
             Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } => {}
             Pane::Split { children, .. } => {
                 let mut offset = 0;
-                for (i, child) in children.iter_mut().enumerate() {
+                for child in children.iter_mut() {
                     let count = child.leaf_count();
                     if n < offset + count {
                         if count == 1 {
@@ -126,7 +126,6 @@ impl Pane {
                         break;
                     }
                     offset += count;
-                    let _ = i;
                 }
             }
         }
