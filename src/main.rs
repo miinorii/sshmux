@@ -83,7 +83,7 @@ fn main() -> Result<()> {
     let mut host_mouse_captured = false;
 
     loop {
-        event::poll(Duration::from_millis(5))?;
+        std::thread::sleep(Duration::from_millis(5));
 
         app.tick_browsers();
 
