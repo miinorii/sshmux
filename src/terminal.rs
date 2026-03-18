@@ -81,6 +81,7 @@ impl EmbeddedTerminal {
 
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
+            let mut carry: Vec<u8> = Vec::new();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
@@ -98,35 +99,60 @@ impl EmbeddedTerminal {
                         }
                         dirty_c.store(true, Ordering::Release);
 
-                        // Scan for DEC private mode set/reset sequences
+                        // Build scan buffer: leftover incomplete sequence from the
+                        // previous read (if any) prepended to the new data.
+                        let mut scan = std::mem::take(&mut carry);
+                        scan.extend_from_slice(data);
+
+                        // Scan for DEC private mode set/reset sequences (ESC [ ? ... h/l).
+                        // Incomplete sequences at the end of the buffer are saved in
+                        // `carry` and prepended to the next read so nothing is missed.
                         let mut i = 0;
-                        while i + 2 < data.len() {
-                            if data[i] == 0x1b && data[i + 1] == b'[' && data[i + 2] == b'?' {
-                                let start = i + 3;
-                                let mut end = start;
-                                while end < data.len() && data[end] != b'h' && data[end] != b'l' {
-                                    end += 1;
-                                }
-                                if end < data.len() {
-                                    if let Ok(params) = std::str::from_utf8(&data[start..end]) {
-                                        let set = data[end] == b'h';
-                                        for param in params.split(';') {
-                                            match param.trim() {
-                                                "1000" | "1002" | "1003" | "1006" => {
-                                                    mouse_active_c.store(set, Ordering::Release);
-                                                }
-                                                "25" => {
-                                                    cursor_visible_c.store(set, Ordering::Release);
-                                                }
-                                                _ => {}
-                                            }
+                        while i < scan.len() {
+                            if scan[i] != 0x1b {
+                                i += 1;
+                                continue;
+                            }
+                            if i + 1 >= scan.len() {
+                                carry = scan[i..].to_vec();
+                                break;
+                            }
+                            if scan[i + 1] != b'[' {
+                                i += 2;
+                                continue;
+                            }
+                            if i + 2 >= scan.len() {
+                                carry = scan[i..].to_vec();
+                                break;
+                            }
+                            if scan[i + 2] != b'?' {
+                                i += 3;
+                                continue;
+                            }
+                            let start = i + 3;
+                            let mut end = start;
+                            while end < scan.len() && scan[end] != b'h' && scan[end] != b'l' {
+                                end += 1;
+                            }
+                            if end >= scan.len() {
+                                carry = scan[i..].to_vec();
+                                break;
+                            }
+                            if let Ok(params) = std::str::from_utf8(&scan[start..end]) {
+                                let set = scan[end] == b'h';
+                                for param in params.split(';') {
+                                    match param.trim() {
+                                        "1000" | "1002" | "1003" | "1006" => {
+                                            mouse_active_c.store(set, Ordering::Release);
                                         }
+                                        "25" => {
+                                            cursor_visible_c.store(set, Ordering::Release);
+                                        }
+                                        _ => {}
                                     }
-                                    i = end + 1;
-                                    continue;
                                 }
                             }
-                            i += 1;
+                            i = end + 1;
                         }
 
                         // Reply to DSR probes
