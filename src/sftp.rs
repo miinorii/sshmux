@@ -1,5 +1,4 @@
 use std::{
-    collections::VecDeque,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -68,7 +67,6 @@ pub struct FileBrowser {
 
     pub focus: BrowserFocus,
     pub last_transfer: Option<TransferStatus>,
-    pub pending_cmds: VecDeque<String>,
     pub status_msg: String,
     pub raw_snapshot: Vec<String>,
     pub prompt_stable: u8,
@@ -101,7 +99,6 @@ impl FileBrowser {
             remote_sel,
             focus: BrowserFocus::Local,
             last_transfer: None,
-            pending_cmds: VecDeque::new(),
             status_msg: String::from("Connecting…"),
             raw_snapshot: vec![],
             prompt_stable: 0,
@@ -190,10 +187,6 @@ impl FileBrowser {
                     self.prev_raw_len = 0;
                     self.sftp_state = SftpState::Idle;
                     self.needs_redraw = true;
-                    if let Some(cmd) = self.pending_cmds.pop_front() {
-                        self.sftp.send_str(&cmd);
-                        self.sftp_state = SftpState::WaitingLs;
-                    }
                 }
             }
             SftpState::Transferring => {
@@ -233,13 +226,7 @@ impl FileBrowser {
                     self.needs_redraw = true;
                 }
             }
-            SftpState::Idle => {
-                if let Some(cmd) = self.pending_cmds.pop_front() {
-                    self.prompt_stable = 0;
-                    self.sftp.send_str(&cmd);
-                    self.sftp_state = SftpState::WaitingLs;
-                }
-            }
+            SftpState::Idle => {}
         }
     }
 
