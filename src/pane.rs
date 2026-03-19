@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use crate::sftp::FileBrowser;
+use crate::ssh_browser::SshBrowser;
 use crate::ssh_config::SshHost;
 use crate::terminal::EmbeddedTerminal;
 
@@ -29,6 +30,7 @@ pub enum Pane {
     Connect { list_state: ListState },
     Session { terminal: EmbeddedTerminal },
     FileBrowser { browser: FileBrowser },
+    SshBrowser { browser: SshBrowser },
     Split { kind: Split, children: Vec<Pane> },
 }
 
@@ -41,7 +43,7 @@ impl Pane {
 
     pub fn leaf_areas(&self, area: Rect) -> Vec<Rect> {
         match self {
-            Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } => vec![area],
+            Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } | Pane::SshBrowser { .. } => vec![area],
             Pane::Split { kind, children } => {
                 let areas = split_areas(area, kind, children.len());
                 children
@@ -55,14 +57,14 @@ impl Pane {
 
     pub fn leaf_count(&self) -> usize {
         match self {
-            Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } => 1,
+            Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } | Pane::SshBrowser { .. } => 1,
             Pane::Split { children, .. } => children.iter().map(|c| c.leaf_count()).sum(),
         }
     }
 
     pub fn leaf_mut(&mut self, n: usize) -> Option<&mut Pane> {
         match self {
-            Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } => {
+            Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } | Pane::SshBrowser { .. } => {
                 if n == 0 {
                     Some(self)
                 } else {
@@ -85,7 +87,7 @@ impl Pane {
 
     pub fn leaf(&self, n: usize) -> Option<&Pane> {
         match self {
-            Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } => {
+            Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } | Pane::SshBrowser { .. } => {
                 if n == 0 {
                     Some(self)
                 } else {
@@ -108,7 +110,7 @@ impl Pane {
 
     pub fn split_leaf(&mut self, n: usize, kind: Split) {
         match self {
-            Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } => {}
+            Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } | Pane::SshBrowser { .. } => {}
             Pane::Split { children, .. } => {
                 let mut offset = 0;
                 for child in children.iter_mut() {
@@ -140,6 +142,17 @@ impl Pane {
                 browser.needs_redraw = false;
                 pty_dirty || state_dirty
             }
+            Pane::SshBrowser { browser } => {
+                let pty_dirty = browser.ssh.dirty.swap(false, Ordering::AcqRel);
+                let scp_dirty = browser
+                    .scp_pty
+                    .as_ref()
+                    .map(|s| s.dirty.swap(false, Ordering::AcqRel))
+                    .unwrap_or(false);
+                let state_dirty = browser.needs_redraw;
+                browser.needs_redraw = false;
+                pty_dirty || scp_dirty || state_dirty
+            }
             Pane::Split { children, .. } => children.iter_mut().any(|c| c.any_dirty()),
             _ => false,
         }
@@ -148,6 +161,7 @@ impl Pane {
     pub fn tick_browsers(&mut self) {
         match self {
             Pane::FileBrowser { browser } => browser.tick(),
+            Pane::SshBrowser { browser } => browser.tick(),
             Pane::Split { children, .. } => children.iter_mut().for_each(|c| c.tick_browsers()),
             _ => {}
         }
@@ -163,7 +177,7 @@ impl Pane {
                 };
                 terminal.resize(h, w);
             }
-            Pane::FileBrowser { .. } => {}
+            Pane::FileBrowser { .. } | Pane::SshBrowser { .. } => {}
             Pane::Split { kind, children } => {
                 let areas = split_areas(area, kind, children.len());
                 for (child, a) in children.iter_mut().zip(areas) {
@@ -205,7 +219,7 @@ impl Pane {
                     area
                 };
 
-                const HELP_LINES: u16 = 8;
+                const HELP_LINES: u16 = 9;
                 let list_area = Rect {
                     x: inner.x,
                     y: inner.y,
@@ -235,7 +249,8 @@ impl Pane {
                     ("Alt+W", "close pane / tab"),
                     ("Alt+-", "split vertical"),
                     ("Alt++", "split horizontal"),
-                    ("B", "open file browser"),
+                    ("B", "sftp browser"),
+                    ("Shift+B", "ssh browser"),
                     ("Alt+↑↓", "cycle pane focus"),
                     ("Alt+←→", "switch tab"),
                     ("Ctrl+C", "quit"),
@@ -281,6 +296,12 @@ impl Pane {
             }
 
             Pane::FileBrowser { browser } => {
+                let is_focus = *my_idx == focus_idx;
+                *my_idx += 1;
+                browser.render(area, buf, is_focus, leaf_count);
+            }
+
+            Pane::SshBrowser { browser } => {
                 let is_focus = *my_idx == focus_idx;
                 *my_idx += 1;
                 browser.render(area, buf, is_focus, leaf_count);
@@ -344,7 +365,7 @@ pub fn split_areas(area: Rect, kind: &Split, count: usize) -> Vec<Rect> {
 
 pub fn remove_leaf(pane: &mut Pane, n: usize) {
     match pane {
-        Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } => {}
+        Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } | Pane::SshBrowser { .. } => {}
         Pane::Split { children, .. } => {
             let mut offset = 0;
             let mut to_remove = None;

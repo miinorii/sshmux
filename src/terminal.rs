@@ -43,6 +43,7 @@ pub struct EmbeddedTerminal {
     pub rows: u16,
     pub cols: u16,
     pub raw_output: Arc<Mutex<Vec<u8>>>,
+    pub exited: Arc<AtomicBool>,
 }
 
 impl EmbeddedTerminal {
@@ -70,6 +71,7 @@ impl EmbeddedTerminal {
         let mouse_active = Arc::new(AtomicBool::new(false));
         let cursor_visible = Arc::new(AtomicBool::new(true));
         let raw_output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let exited = Arc::new(AtomicBool::new(false));
 
         let parser_c = Arc::clone(&parser);
         let writer_c = Arc::clone(&writer);
@@ -77,6 +79,7 @@ impl EmbeddedTerminal {
         let mouse_active_c = Arc::clone(&mouse_active);
         let cursor_visible_c = Arc::clone(&cursor_visible);
         let raw_output_c = Arc::clone(&raw_output);
+        let exited_c = Arc::clone(&exited);
         let log_c = log.clone();
 
         thread::spawn(move || {
@@ -86,6 +89,7 @@ impl EmbeddedTerminal {
                 match reader.read(&mut buf) {
                     Ok(0) => {
                         log!(log_c, "PTY EOF");
+                        exited_c.store(true, Ordering::Release);
                         break;
                     }
                     Ok(n) => {
@@ -174,6 +178,7 @@ impl EmbeddedTerminal {
                     }
                     Err(e) => {
                         log!(log_c, "PTY error: {}", e);
+                        exited_c.store(true, Ordering::Release);
                         break;
                     }
                 }
@@ -191,6 +196,7 @@ impl EmbeddedTerminal {
             rows,
             cols,
             raw_output,
+            exited,
         })
     }
 
@@ -216,6 +222,16 @@ impl EmbeddedTerminal {
         cmd.arg(host);
         cmd.env("TERM", "dumb");
         log!(log, "SFTP spawned host={}", host);
+        Self::new(200, 220, cmd, log)
+    }
+
+    /// Spawn an SSH shell to `host` for browsing (fixed size, parsed not rendered).
+    pub fn ssh_shell(host: &str, log: Option<Arc<Mutex<std::fs::File>>>) -> Result<Self> {
+        let mut cmd = CommandBuilder::new("ssh");
+        cmd.arg(host);
+        cmd.arg("-t");
+        cmd.env("TERM", "dumb");
+        log!(log, "SSH shell spawned host={}", host);
         Self::new(200, 220, cmd, log)
     }
 

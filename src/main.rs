@@ -22,6 +22,7 @@ mod app;
 mod pane;
 mod sftp;
 mod sftp_parse;
+mod ssh_browser;
 mod ssh_config;
 mod tab;
 mod terminal;
@@ -29,6 +30,7 @@ mod terminal;
 use app::{App, content_area};
 use pane::{Pane, Split, pane_inner};
 use sftp::{BrowserFocus, SftpState};
+use ssh_browser::SshBrowserState;
 
 // ---------------------------------------------------------------------------
 // Logging macro (available to all modules via #[macro_use] or re-export)
@@ -207,6 +209,20 @@ fn main() -> Result<()> {
                                     }
                                 }
                             }
+                            KeyCode::Char('B') => {
+                                let selected = if let Some(Pane::Connect { list_state }) =
+                                    app.tab_mut().focused_pane_mut()
+                                {
+                                    list_state.selected()
+                                } else {
+                                    None
+                                };
+                                if let Some(idx) = selected {
+                                    if let Err(e) = app.open_ssh_browser(idx) {
+                                        log!(log_file, "open_ssh_browser error: {}", e);
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                         continue;
@@ -231,6 +247,80 @@ fn main() -> Result<()> {
                                     KeyCode::Char(c) => browser.sftp.send_char(c),
                                     KeyCode::Enter => browser.sftp.send_str("\r\n"),
                                     KeyCode::Backspace => browser.sftp.send_str("\x7f"),
+                                    _ => {}
+                                }
+                                continue;
+                            }
+
+                            if browser.confirm_delete.is_some() {
+                                match key.code {
+                                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                        browser.confirm_delete_yes()
+                                    }
+                                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                                        browser.confirm_delete_no()
+                                    }
+                                    _ => {}
+                                }
+                            } else {
+                                match key.code {
+                                    KeyCode::Tab => {
+                                        browser.dismiss_drive_picker();
+                                        browser.focus = if browser.focus == BrowserFocus::Local {
+                                            BrowserFocus::Remote
+                                        } else {
+                                            BrowserFocus::Local
+                                        };
+                                    }
+                                    KeyCode::Esc => browser.dismiss_drive_picker(),
+                                    KeyCode::Up => browser.nav_up(),
+                                    KeyCode::Down => browser.nav_down(),
+                                    KeyCode::Left => browser.scroll_left(),
+                                    KeyCode::Right => browser.scroll_right(),
+                                    KeyCode::Char(' ') | KeyCode::Enter => browser.enter(),
+                                    KeyCode::Backspace => browser.go_up(),
+                                    KeyCode::Char('t') => match browser.focus {
+                                        BrowserFocus::Remote => browser.download(),
+                                        BrowserFocus::Local => browser.upload(),
+                                    },
+                                    KeyCode::Delete => browser.delete_focused(),
+                                    KeyCode::Char('c') if ctrl => {
+                                        disable_raw_mode()?;
+                                        execute!(
+                                            terminal.backend_mut(),
+                                            LeaveAlternateScreen,
+                                            crossterm::event::DisableMouseCapture
+                                        )?;
+                                        terminal.show_cursor()?;
+                                        return Ok(());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // ---- SshBrowser pane ----
+                    let focus_idx = app.tabs[app.selected_tab].focus_idx;
+                    let focused_is_ssh_browser = matches!(
+                        app.tabs[app.selected_tab].root.leaf(focus_idx),
+                        Some(Pane::SshBrowser { .. })
+                    );
+
+                    if focused_is_ssh_browser {
+                        if let Some(Pane::SshBrowser { browser }) =
+                            app.tab_mut().focused_pane_mut()
+                        {
+                            // During connecting/setting prompt, forward keystrokes to SSH PTY
+                            if matches!(
+                                browser.ssh_state,
+                                SshBrowserState::Connecting | SshBrowserState::SettingPrompt
+                            ) {
+                                match key.code {
+                                    KeyCode::Char(c) => browser.ssh.send_char(c),
+                                    KeyCode::Enter => browser.ssh.send_str("\r\n"),
+                                    KeyCode::Backspace => browser.ssh.send_str("\x7f"),
                                     _ => {}
                                 }
                                 continue;
@@ -428,6 +518,56 @@ fn main() -> Result<()> {
                             }
                             if let MouseEventKind::Up(MouseButton::Left) = mouse.kind {
                                 if let Some(Pane::FileBrowser { browser }) =
+                                    app.tab_mut().focused_pane_mut()
+                                {
+                                    let inner = pane_inner(pane_area);
+                                    let half = inner.width / 2;
+                                    let in_remote = mouse.column >= inner.x + half;
+                                    let drag_from = browser.focus;
+                                    if in_remote && drag_from == BrowserFocus::Local {
+                                        browser.drag_local_to_remote();
+                                    } else if !in_remote && drag_from == BrowserFocus::Remote {
+                                        browser.drag_remote_to_local();
+                                    }
+                                    browser.focus = if in_remote {
+                                        BrowserFocus::Remote
+                                    } else {
+                                        BrowserFocus::Local
+                                    };
+                                }
+                            }
+                            continue;
+                        }
+
+                        // ---- SshBrowser mouse ----
+                        let is_ssh_browser = matches!(
+                            app.tabs[app.selected_tab].root.leaf(pane_idx),
+                            Some(Pane::SshBrowser { .. })
+                        );
+                        if is_ssh_browser {
+                            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                                let leaf_count =
+                                    app.tabs[app.selected_tab].root.leaf_count();
+                                if let Some(Pane::SshBrowser { browser }) =
+                                    app.tab_mut().focused_pane_mut()
+                                {
+                                    let inner = pane_inner(pane_area);
+                                    let half = inner.width / 2;
+                                    browser.focus = if mouse.column >= inner.x + half {
+                                        BrowserFocus::Remote
+                                    } else {
+                                        BrowserFocus::Local
+                                    };
+                                    browser.click_select(
+                                        mouse.column,
+                                        mouse.row,
+                                        pane_area,
+                                        leaf_count,
+                                    );
+                                }
+                            }
+                            if let MouseEventKind::Up(MouseButton::Left) = mouse.kind {
+                                if let Some(Pane::SshBrowser { browser }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
                                     let inner = pane_inner(pane_area);

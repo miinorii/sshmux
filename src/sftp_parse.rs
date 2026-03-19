@@ -93,6 +93,7 @@ pub fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
         let line = line.trim();
         if line.is_empty()
             || line.starts_with("sftp>")
+            || line.starts_with("SSHMUX>")
             || line.starts_with("Remote")
             || line.starts_with("Changing")
             || line.starts_with("total")
