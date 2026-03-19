@@ -235,7 +235,7 @@ impl Pane {
                     ("Alt+W", "close pane / tab"),
                     ("Alt+-", "split vertical"),
                     ("Alt++", "split horizontal"),
-                    ("Alt+B", "open file browser"),
+                    ("B", "open file browser"),
                     ("Alt+↑↓", "cycle pane focus"),
                     ("Alt+←→", "switch tab"),
                     ("Ctrl+C", "quit"),

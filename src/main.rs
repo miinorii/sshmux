@@ -140,27 +140,6 @@ fn main() -> Result<()> {
                                 let area = last_area;
                                 app.tab_mut().split(Split::Horizontal, content_area(area));
                             }
-                            KeyCode::Char('b') => {
-                                let focus_idx = app.tabs[app.selected_tab].focus_idx;
-                                let focused_is_connect = matches!(
-                                    app.tabs[app.selected_tab].root.leaf(focus_idx),
-                                    Some(Pane::Connect { .. })
-                                );
-                                if focused_is_connect {
-                                    let selected = if let Some(Pane::Connect { list_state }) =
-                                        app.tab_mut().focused_pane_mut()
-                                    {
-                                        list_state.selected()
-                                    } else {
-                                        None
-                                    };
-                                    if let Some(idx) = selected {
-                                        if let Err(e) = app.open_browser(idx) {
-                                            log!(log_file, "open_browser error: {}", e);
-                                        }
-                                    }
-                                }
-                            }
                             _ => {}
                         }
                         continue;
@@ -212,6 +191,20 @@ fn main() -> Result<()> {
                                         log!(log_file, "open_session error: {}", e);
                                     }
                                     app.resize_all(last_area);
+                                }
+                            }
+                            KeyCode::Char('b') => {
+                                let selected = if let Some(Pane::Connect { list_state }) =
+                                    app.tab_mut().focused_pane_mut()
+                                {
+                                    list_state.selected()
+                                } else {
+                                    None
+                                };
+                                if let Some(idx) = selected {
+                                    if let Err(e) = app.open_browser(idx) {
+                                        log!(log_file, "open_browser error: {}", e);
+                                    }
                                 }
                             }
                             _ => {}
