@@ -858,8 +858,8 @@ impl FileBrowser {
             if e.is_dir { e.name.len() + 1 } else { e.name.len() }
         }).max().unwrap_or(0);
 
-        // Virtual row width: name column + 1 gap + metadata
-        let virtual_width = max_name_len + 1 + meta_width;
+        // Virtual row width: at least panel width so metadata is right-aligned
+        let virtual_width = (max_name_len + 1 + meta_width).max(w);
 
         // Clamp scroll so the end of metadata aligns with the right edge
         let scroll_x = match side {
@@ -884,7 +884,7 @@ impl FileBrowser {
 
                 let meta = format!("{:>9} {:<16} {:<10}", e.size, e.modified, e.perms);
                 let name_len = display_name.chars().count();
-                let gap = max_name_len + 1 - name_len;
+                let gap = virtual_width - meta_width - name_len;
                 let full = format!(
                     "{}{:gap$}{}",
                     display_name,
