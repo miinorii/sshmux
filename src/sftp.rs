@@ -36,16 +36,24 @@ pub enum SftpState {
     Idle,
     WaitingPwd,
     WaitingLs,
-    WaitingCd,
     WaitingDelete,
     Transferring,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TransferDirection {
+    Download,
+    Upload,
 }
 
 #[derive(Clone)]
 pub struct TransferStatus {
     pub filename: String,
+    pub direction: TransferDirection,
+    pub is_dir: bool,
     pub done: bool,
     pub progress: String,
+    pub file_count: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +84,7 @@ pub struct FileBrowser {
     pub pending_delete_name: Option<String>,
     pub drive_picker: Option<(Vec<PathBuf>, ListState)>,
     pub log: Option<Arc<Mutex<std::fs::File>>>,
+    pub status_color: Color,
 }
 
 impl FileBrowser {
@@ -109,14 +118,11 @@ impl FileBrowser {
             pending_delete_name: None,
             drive_picker: None,
             log: log.clone(),
+            status_color: Color::Yellow,
         })
     }
 
     pub fn tick(&mut self) {
-        if !matches!(self.sftp_state, SftpState::Idle) {
-            self.raw_snapshot = self.sftp.raw_lines();
-        }
-
         let cur_len = self.sftp.raw_len();
         if cur_len != self.prev_raw_len {
             self.prompt_stable = 0;
@@ -127,8 +133,13 @@ impl FileBrowser {
             self.prompt_stable = 0;
         }
 
-        const STABLE_NEEDED: u8 = 3;
+        const STABLE_NEEDED: u8 = 2;
         let prompt_ready = self.prompt_stable >= STABLE_NEEDED;
+
+        // Only snapshot raw output for display during connecting
+        if matches!(self.sftp_state, SftpState::Connecting) {
+            self.raw_snapshot = self.sftp.raw_lines();
+        }
 
         match self.sftp_state {
             SftpState::Connecting => {
@@ -139,17 +150,9 @@ impl FileBrowser {
                     self.sftp.send_str("pwd\r\n");
                     self.sftp_state = SftpState::WaitingPwd;
                     self.status_msg = format!("Connected to {}", self.host);
+                    self.status_color = Color::Green;
                     log!(self.log, "SFTP connected to {}, sent pwd", self.host);
                     self.needs_redraw = true;
-                }
-            }
-            SftpState::WaitingCd => {
-                if prompt_ready {
-                    self.prompt_stable = 0;
-                    self.sftp.drain_raw();
-                    self.prev_raw_len = 0;
-                    self.sftp.send_str("pwd\r\n");
-                    self.sftp_state = SftpState::WaitingPwd;
                 }
             }
             SftpState::WaitingPwd => {
@@ -161,7 +164,7 @@ impl FileBrowser {
                     log!(self.log, "SFTP pwd => {}, sending ls -la", self.remote_path);
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
-                    self.sftp.send_str("ls -la\r\n");
+                    self.send_ls();
                     self.sftp_state = SftpState::WaitingLs;
                     self.needs_redraw = true;
                 }
@@ -175,39 +178,54 @@ impl FileBrowser {
                     }
                     let parsed = parse_ls(&lines);
                     log!(self.log, "SFTP ls done: {} entries", parsed.len());
-                    if parsed.len() > 1 {
-                        self.remote_entries = parsed;
-                        self.raw_snapshot.clear();
-                        let max = self.remote_entries.len().saturating_sub(1);
-                        let cur = self.remote_sel.selected().unwrap_or(0);
-                        self.remote_sel.select(Some(cur.min(max)));
-                    }
-                    if self.remote_sel.selected().is_none() {
-                        self.remote_sel.select_first();
-                    }
+                    self.remote_entries = parsed;
+                    self.raw_snapshot.clear();
+                    let max = self.remote_entries.len().saturating_sub(1);
+                    let cur = self.remote_sel.selected().unwrap_or(0);
+                    self.remote_sel.select(Some(cur.min(max)));
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
                     self.sftp_state = SftpState::Idle;
+                    if self.status_color == Color::Yellow {
+                        self.status_color = Color::Green;
+                    }
                     self.needs_redraw = true;
                 }
             }
             SftpState::Transferring => {
                 if prompt_ready {
                     self.prompt_stable = 0;
-                    if let Some(ref mut t) = self.last_transfer {
+                    let completion_msg = self.last_transfer.as_mut().map(|t| {
                         t.done = true;
                         t.progress = "100%".to_string();
+                        let verb = match t.direction {
+                            TransferDirection::Download => "Downloaded",
+                            TransferDirection::Upload => "Uploaded",
+                        };
+                        format!("{}: {}", verb, t.filename)
+                    });
+                    if let Some(msg) = completion_msg {
+                        self.status_msg = msg;
+                        self.status_color = Color::Green;
                     }
                     self.local_entries = read_local_dir(&self.local_path);
                     log!(self.log, "SFTP transfer complete");
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
-                    self.sftp.send_str("ls -la\r\n");
+                    self.send_ls();
                     self.sftp_state = SftpState::WaitingLs;
                 } else {
                     let lines = self.sftp.raw_lines();
-                    if let Some(pct) = scrape_transfer_progress(&lines) {
-                        if let Some(ref mut t) = self.last_transfer {
+                    if let Some(ref mut t) = self.last_transfer {
+                        if t.is_dir {
+                            let count = lines.iter().filter(|l| {
+                                l.contains("Fetching ") || l.contains("Uploading ")
+                            }).count();
+                            if count != t.file_count {
+                                t.file_count = count;
+                                self.needs_redraw = true;
+                            }
+                        } else if let Some(pct) = scrape_transfer_progress(&lines) {
                             t.progress = pct;
                             self.needs_redraw = true;
                         }
@@ -217,13 +235,24 @@ impl FileBrowser {
             SftpState::WaitingDelete => {
                 if prompt_ready {
                     self.prompt_stable = 0;
-                    log!(self.log, "SFTP WaitingDelete complete");
+                    let lines = self.sftp.raw_lines();
+                    let has_error = lines.iter().any(|l| {
+                        let t = l.to_lowercase();
+                        t.contains("failure") || t.contains("couldn't") || t.contains("not empty") || t.contains("permission denied")
+                    });
+                    log!(self.log, "SFTP WaitingDelete complete, error={}", has_error);
                     if let Some(name) = self.pending_delete_name.take() {
-                        self.status_msg = format!("Deleted remote: {}", name);
+                        if has_error {
+                            self.status_msg = format!("Delete failed: {}", name);
+                            self.status_color = Color::Red;
+                        } else {
+                            self.status_msg = format!("Deleted remote: {}", name);
+                            self.status_color = Color::Green;
+                        }
                     }
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
-                    self.sftp.send_str("ls -la\r\n");
+                    self.send_ls();
                     self.sftp_state = SftpState::WaitingLs;
                     self.needs_redraw = true;
                 }
@@ -236,8 +265,10 @@ impl FileBrowser {
         let Ok(rb) = self.sftp.raw_output.lock() else {
             return false;
         };
-        let text = strip_ansi(&rb);
-        text.lines()
+        // Only check the last 64 bytes instead of stripping ANSI from the entire buffer
+        let start = rb.len().saturating_sub(64);
+        let tail = strip_ansi(&rb[start..]);
+        tail.lines()
             .rev()
             .find(|l| !l.trim().is_empty())
             .map(|l| l.contains("sftp>"))
@@ -319,6 +350,8 @@ impl FileBrowser {
                     }
                     self.local_entries = read_local_dir(&self.local_path);
                     self.local_sel.select_first();
+                    self.status_msg = format!("Local: {}", self.local_path.to_string_lossy());
+                    self.status_color = Color::Green;
                     self.needs_redraw = true;
                 }
             }
@@ -329,16 +362,42 @@ impl FileBrowser {
                 if let Some(i) = self.remote_sel.selected() {
                     if let Some(entry) = self.remote_entries.get(i).cloned() {
                         if entry.is_dir {
-                            self.sftp
-                                .send_str(&format!("cd {}\r\n", shell_quote(&entry.name)));
-                            self.sftp_state = SftpState::WaitingCd;
-                            log!(self.log, "SFTP cd {}", entry.name);
+                            self.apply_cd(&entry.name);
+                            self.status_msg = format!("Remote: {}", self.remote_path);
+                            self.status_color = Color::Yellow;
+                            self.sftp.drain_raw();
+                            self.prev_raw_len = 0;
+                            self.prompt_stable = 0;
+                            self.send_ls();
+                            self.sftp_state = SftpState::WaitingLs;
+                            log!(self.log, "SFTP ls {}", self.remote_path);
                         } else {
                             self.download();
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Send `ls -la <remote_path>` using the client-tracked absolute path.
+    fn send_ls(&mut self) {
+        let cmd = format!("ls -la {}\r\n", shell_quote(&self.remote_path));
+        self.sftp.send_str(&cmd);
+    }
+
+    fn apply_cd(&mut self, name: &str) {
+        if name == ".." {
+            if let Some(pos) = self.remote_path.rfind('/') {
+                self.remote_path = if pos == 0 {
+                    "/".to_string()
+                } else {
+                    self.remote_path[..pos].to_string()
+                };
+            }
+        } else {
+            let base = self.remote_path.trim_end_matches('/');
+            self.remote_path = format!("{}/{}", base, name);
         }
     }
 
@@ -353,6 +412,9 @@ impl FileBrowser {
                     self.local_path = p.to_path_buf();
                     self.local_entries = read_local_dir(&self.local_path);
                     self.local_sel.select_first();
+                    self.status_msg = format!("Local: {}", self.local_path.to_string_lossy());
+                    self.status_color = Color::Green;
+                    self.needs_redraw = true;
                 } else {
                     // At a filesystem root: show drive picker.
                     let drives = list_drives();
@@ -366,9 +428,15 @@ impl FileBrowser {
                 if self.sftp_state != SftpState::Idle {
                     return;
                 }
-                self.sftp.send_str("cd ..\r\n");
-                self.sftp_state = SftpState::WaitingCd;
-                log!(self.log, "SFTP cd ..");
+                self.apply_cd("..");
+                self.status_msg = format!("Remote: {}", self.remote_path);
+                self.status_color = Color::Yellow;
+                self.sftp.drain_raw();
+                self.prev_raw_len = 0;
+                self.prompt_stable = 0;
+                self.send_ls();
+                self.sftp_state = SftpState::WaitingLs;
+                log!(self.log, "SFTP ls {}", self.remote_path);
             }
         }
     }
@@ -385,17 +453,20 @@ impl FileBrowser {
             } else {
                 return;
             };
-            if entry.is_dir {
-                return;
-            }
             let local_dest = self.local_path.to_string_lossy().replace('\\', "/");
-            let cmd = format!("get {} {}/\r\n", shell_quote(&entry.name), local_dest);
+            let flag = if entry.is_dir { "-r " } else { "" };
+            let remote_file = format!("{}/{}", self.remote_path.trim_end_matches('/'), entry.name);
+            let cmd = format!("get {}{} {}/\r\n", flag, shell_quote(&remote_file), local_dest);
             self.last_transfer = Some(TransferStatus {
                 filename: entry.name.clone(),
+                direction: TransferDirection::Download,
+                is_dir: entry.is_dir,
                 done: false,
                 progress: "0%".to_string(),
+                file_count: 0,
             });
             self.status_msg = format!("Downloading {}...", entry.name);
+            self.status_color = Color::Yellow;
             log!(self.log, "SFTP get {} -> {}", entry.name, local_dest);
             self.sftp.send_str(&cmd);
             self.sftp_state = SftpState::Transferring;
@@ -412,18 +483,20 @@ impl FileBrowser {
             } else {
                 return;
             };
-            if entry.is_dir {
-                return;
-            }
             let local_path = self.local_path.join(&entry.name);
             let local_str = local_path.to_string_lossy().replace('\\', "/");
-            let cmd = format!("put {}\r\n", shell_quote(&local_str));
+            let flag = if entry.is_dir { "-r " } else { "" };
+            let cmd = format!("put {}{} {}/\r\n", flag, shell_quote(&local_str), shell_quote(&self.remote_path));
             self.last_transfer = Some(TransferStatus {
                 filename: entry.name.clone(),
+                direction: TransferDirection::Upload,
+                is_dir: entry.is_dir,
                 done: false,
                 progress: "0%".to_string(),
+                file_count: 0,
             });
             self.status_msg = format!("Uploading {}...", entry.name);
+            self.status_color = Color::Yellow;
             log!(self.log, "SFTP put {}", local_str);
             self.sftp.send_str(&cmd);
             self.sftp_state = SftpState::Transferring;
@@ -442,7 +515,8 @@ impl FileBrowser {
                     if entry.name == ".." {
                         return;
                     }
-                    self.confirm_delete = Some(format!("local:{}", entry.name));
+                    let kind = if entry.is_dir { "dir" } else { "file" };
+                    self.confirm_delete = Some(format!("local:{}:{}", kind, entry.name));
                     self.needs_redraw = true;
                 }
             }
@@ -456,7 +530,8 @@ impl FileBrowser {
                     if entry.name == ".." || self.sftp_state != SftpState::Idle {
                         return;
                     }
-                    self.confirm_delete = Some(format!("remote:{}", entry.name));
+                    let kind = if entry.is_dir { "dir" } else { "file" };
+                    self.confirm_delete = Some(format!("remote:{}:{}", kind, entry.name));
                     self.needs_redraw = true;
                 }
             }
@@ -465,20 +540,37 @@ impl FileBrowser {
 
     pub fn confirm_delete_yes(&mut self) {
         if let Some(tagged) = self.confirm_delete.take() {
-            if let Some(name) = tagged.strip_prefix("local:") {
+            if let Some(rest) = tagged.strip_prefix("local:") {
+                let is_dir = rest.starts_with("dir:");
+                let name = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
                 let path = self.local_path.join(name);
-                if let Err(e) = std::fs::remove_file(&path) {
+                let result = if is_dir {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+                if let Err(e) = result {
                     self.status_msg = format!("Delete failed: {}", e);
+                    self.status_color = Color::Red;
                 } else {
                     self.status_msg = format!("Deleted local: {}", name);
+                    self.status_color = Color::Green;
                     self.local_entries = read_local_dir(&self.local_path);
                 }
                 self.needs_redraw = true;
-            } else if let Some(name) = tagged.strip_prefix("remote:") {
-                let cmd = format!("rm {}\r\n", shell_quote(name));
+            } else if let Some(rest) = tagged.strip_prefix("remote:") {
+                let is_dir = rest.starts_with("dir:");
+                let name = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
+                let remote_file = format!("{}/{}", self.remote_path.trim_end_matches('/'), name);
+                let cmd = if is_dir {
+                    format!("rmdir {}\r\n", shell_quote(&remote_file))
+                } else {
+                    format!("rm {}\r\n", shell_quote(&remote_file))
+                };
                 self.sftp.send_str(&cmd);
                 self.sftp_state = SftpState::WaitingDelete;
                 self.status_msg = format!("Deleting {}...", name);
+                self.status_color = Color::Yellow;
                 self.pending_delete_name = Some(name.to_string());
                 self.needs_redraw = true;
             }
@@ -488,6 +580,7 @@ impl FileBrowser {
     pub fn confirm_delete_no(&mut self) {
         self.confirm_delete = None;
         self.status_msg = String::from("Deletion cancelled.");
+        self.status_color = Color::Yellow;
         self.needs_redraw = true;
     }
 
@@ -589,7 +682,7 @@ impl FileBrowser {
 
         let status_h = 1u16;
         let panels_area = Rect {
-            height: inner.height.saturating_sub(status_h + 1),
+            height: inner.height.saturating_sub(status_h),
             ..inner
         };
         let status_area = Rect {
@@ -635,19 +728,21 @@ impl FileBrowser {
             BrowserFocus::Remote => self.remote_path.clone(),
         };
 
-        let border_col = if is_active {
-            Color::Cyan
-        } else {
-            Color::DarkGray
-        };
+        let border_col = if is_active { Color::Cyan } else { Color::DarkGray };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_col))
-            .title(Span::styled(title, Style::default().fg(Color::Yellow)))
-            .title_bottom(Span::styled(
+            .title_top(Line::from(Span::styled(
                 format!(" {} ", path_str),
                 Style::default().fg(Color::DarkGray),
-            ));
+            )))
+            .title_top(
+                Line::from(Span::styled(
+                    format!(" {} ", title),
+                    Style::default().fg(Color::Yellow),
+                ))
+                .right_aligned(),
+            );
         let inner = block.inner(area);
         block.render(area, buf);
 
@@ -664,8 +759,7 @@ impl FileBrowser {
                             .fg(Color::Black)
                             .bg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
-                    )
-                    .highlight_symbol("> ");
+                    );
                 StatefulWidget::render(list, inner, buf, drive_sel);
                 return;
             }
@@ -739,28 +833,22 @@ impl FileBrowser {
             .highlight_style(
                 Style::default()
                     .fg(Color::Black)
-                    .bg(if is_active {
-                        Color::Cyan
-                    } else {
-                        Color::DarkGray
-                    })
+                    .bg(if is_active { Color::Cyan } else { Color::DarkGray })
                     .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("> ");
+            );
         StatefulWidget::render(list, inner, buf, list_state);
     }
 
     fn render_status(&self, area: Rect, buf: &mut Buffer) {
         if let Some(ref tagged) = self.confirm_delete {
-            let name = tagged
-                .strip_prefix("local:")
-                .or_else(|| tagged.strip_prefix("remote:"))
-                .unwrap_or(tagged);
-            let side = if tagged.starts_with("local:") {
-                "local"
+            let (side, rest) = if let Some(r) = tagged.strip_prefix("local:") {
+                ("local", r)
+            } else if let Some(r) = tagged.strip_prefix("remote:") {
+                ("remote", r)
             } else {
-                "remote"
+                ("", tagged.as_str())
             };
+            let name = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
             let msg = format!("  Delete {} '{}'?  [y] Yes   [n] No", side, name);
             let span = Span::styled(
                 msg,
@@ -775,50 +863,59 @@ impl FileBrowser {
 
         let (state_label, state_col) = match self.sftp_state {
             SftpState::Connecting => ("[connecting]", Color::Yellow),
-            SftpState::WaitingCd => ("[cd…]", Color::Yellow),
-            SftpState::WaitingPwd => ("[pwd…]", Color::Yellow),
-            SftpState::Idle => ("[idle]", Color::DarkGray),
-            SftpState::WaitingLs => ("[ls…]", Color::Yellow),
-            SftpState::WaitingDelete => ("[deleting…]", Color::Red),
-            SftpState::Transferring => ("[xfer…]", Color::Green),
+            SftpState::WaitingPwd | SftpState::WaitingLs => {
+                ("[loading]", Color::Yellow)
+            }
+            SftpState::Idle => ("[idle]", self.status_color),
+            SftpState::WaitingDelete => ("[deleting]", Color::Yellow),
+            SftpState::Transferring => ("[transfer]", Color::Green),
         };
 
-        let transfer_str = if let Some(ref t) = self.last_transfer {
-            if t.done {
-                format!("✓ {}  ", t.filename)
+        let progress_suffix = if let Some(ref t) = self.last_transfer {
+            if !t.done {
+                if t.is_dir {
+                    format!(" ({} files)", t.file_count)
+                } else {
+                    format!(" {}", t.progress)
+                }
             } else {
-                format!("⟳ {} {}  ", t.filename, t.progress)
+                if t.is_dir {
+                    format!(" ({} files)", t.file_count)
+                } else {
+                    String::new()
+                }
             }
         } else {
             String::new()
         };
 
-        let parse_hint = if self.remote_entries.len() <= 1 && !self.raw_snapshot.is_empty() {
-            self.raw_snapshot
-                .iter()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .map(|l| format!(" | {}", l.trim().chars().take(40).collect::<String>()))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let help = " Tab:switch pane  Space/Enter:navigate  Backspace:go up  T:transfer  Delete:remove ";
+        let help_len = help.chars().count() as u16;
+        let help_x = area.x + area.width.saturating_sub(help_len);
 
-        let help = "Tab:switch  Spc/Enter:cd  Bksp:up  F5:Download  F6:Upload  Del:rm";
-        buf.set_line(
-            area.x,
+        // When busy, message color follows the state badge.
+        // When idle, both use status_color to reflect the last operation result.
+        let msg_color = state_col;
+
+        // Left: [state] message
+        let left_line = Line::from(vec![
+            Span::styled(
+                format!("[{}]", state_label.trim_matches(|c| c == '[' || c == ']')),
+                Style::default().fg(state_col).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {}{}", self.status_msg, progress_suffix),
+                Style::default().fg(msg_color),
+            ),
+        ]);
+        buf.set_line(area.x, area.y, &left_line, help_x.saturating_sub(area.x));
+
+        // Right: shortcuts
+        buf.set_span(
+            help_x,
             area.y,
-            &Line::from(vec![
-                Span::styled(state_label, Style::default().fg(state_col)),
-                Span::styled(
-                    format!(
-                        " {}{}  {}  {}",
-                        self.status_msg, parse_hint, transfer_str, help
-                    ),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]),
-            area.width,
+            &Span::styled(help, Style::default().fg(Color::DarkGray)),
+            area.width.saturating_sub(help_x.saturating_sub(area.x)),
         );
     }
 }

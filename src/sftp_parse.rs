@@ -115,7 +115,7 @@ pub fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
 
         let size_bytes: u64 = tokens[4].parse().unwrap_or(0);
         let name = skip_n_tokens(line, 8).trim_end().to_string();
-        if name.is_empty() || name == "." || name == ".." {
+        if name.is_empty() {
             continue;
         }
 
@@ -124,6 +124,12 @@ pub fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
         } else {
             name
         };
+
+        // Strip directory prefix (from `ls -la /path` output)
+        let name = name.rsplit('/').next().unwrap_or(&name).to_string();
+        if name.is_empty() || name == "." || name == ".." {
+            continue;
+        }
 
         let modified = format!("{} {} {}", tokens[5], tokens[6], tokens[7]);
         entries.push(FsEntry {

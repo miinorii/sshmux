@@ -28,7 +28,7 @@ mod terminal;
 
 use app::{App, content_area};
 use pane::{Pane, Split, pane_inner};
-use sftp::BrowserFocus;
+use sftp::{BrowserFocus, SftpState};
 
 // ---------------------------------------------------------------------------
 // Logging macro (available to all modules via #[macro_use] or re-export)
@@ -230,6 +230,19 @@ fn main() -> Result<()> {
                         if let Some(Pane::FileBrowser { browser }) =
                             app.tab_mut().focused_pane_mut()
                         {
+                            // While connecting (e.g. waiting for a password prompt from sftp),
+                            // forward keystrokes directly to the underlying terminal so the
+                            // user can interact with the ssh/sftp authentication dialogue.
+                            if browser.sftp_state == SftpState::Connecting {
+                                match key.code {
+                                    KeyCode::Char(c) => browser.sftp.send_char(c),
+                                    KeyCode::Enter => browser.sftp.send_str("\r\n"),
+                                    KeyCode::Backspace => browser.sftp.send_str("\x7f"),
+                                    _ => {}
+                                }
+                                continue;
+                            }
+
                             if browser.confirm_delete.is_some() {
                                 match key.code {
                                     KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -255,8 +268,10 @@ fn main() -> Result<()> {
                                     KeyCode::Down => browser.nav_down(),
                                     KeyCode::Char(' ') | KeyCode::Enter => browser.enter(),
                                     KeyCode::Backspace => browser.go_up(),
-                                    KeyCode::F(5) => browser.download(),
-                                    KeyCode::F(6) => browser.upload(),
+                                    KeyCode::Char('t') => match browser.focus {
+                                        BrowserFocus::Remote => browser.download(),
+                                        BrowserFocus::Local => browser.upload(),
+                                    },
                                     KeyCode::Delete => browser.delete_focused(),
                                     KeyCode::Char('c') if ctrl => {
                                         disable_raw_mode()?;
