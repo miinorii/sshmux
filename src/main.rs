@@ -266,6 +266,8 @@ fn main() -> Result<()> {
                                     KeyCode::Esc => browser.dismiss_drive_picker(),
                                     KeyCode::Up => browser.nav_up(),
                                     KeyCode::Down => browser.nav_down(),
+                                    KeyCode::Left => browser.scroll_left(),
+                                    KeyCode::Right => browser.scroll_right(),
                                     KeyCode::Char(' ') | KeyCode::Enter => browser.enter(),
                                     KeyCode::Backspace => browser.go_up(),
                                     KeyCode::Char('t') => match browser.focus {

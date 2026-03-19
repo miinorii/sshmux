@@ -88,6 +88,8 @@ pub struct FileBrowser {
     pub status_color: Color,
     pub cmd_start: Option<Instant>,
     pub last_duration: Option<std::time::Duration>,
+    pub local_scroll_x: usize,
+    pub remote_scroll_x: usize,
 }
 
 impl FileBrowser {
@@ -124,6 +126,8 @@ impl FileBrowser {
             status_color: Color::Yellow,
             cmd_start: None,
             last_duration: None,
+            local_scroll_x: 0,
+            remote_scroll_x: 0,
         })
     }
 
@@ -283,6 +287,26 @@ impl FileBrowser {
     }
 
     // ---- navigation --------------------------------------------------------
+
+    pub fn scroll_left(&mut self) {
+        let sx = match self.focus {
+            BrowserFocus::Local => &mut self.local_scroll_x,
+            BrowserFocus::Remote => &mut self.remote_scroll_x,
+        };
+        if *sx > 0 {
+            *sx = sx.saturating_sub(4);
+            self.needs_redraw = true;
+        }
+    }
+
+    pub fn scroll_right(&mut self) {
+        let sx = match self.focus {
+            BrowserFocus::Local => &mut self.local_scroll_x,
+            BrowserFocus::Remote => &mut self.remote_scroll_x,
+        };
+        *sx += 4;
+        self.needs_redraw = true;
+    }
 
     pub fn nav_up(&mut self) {
         if let Some((_, sel)) = &mut self.drive_picker {
@@ -826,11 +850,27 @@ impl FileBrowser {
             return;
         }
 
-        const W_SIZE: usize = 9;
-        const W_MOD: usize = 16;
-        const W_PERMS: usize = 10;
-        const W_GAPS: usize = 3;
-        let w_name = (inner.width as usize).saturating_sub(W_SIZE + W_MOD + W_PERMS + W_GAPS);
+        let w = inner.width as usize;
+        let meta_width: usize = 9 + 1 + 16 + 1 + 10; // size + gap + modified + gap + perms
+
+        // Find the longest display name to align metadata columns
+        let max_name_len = entries.iter().map(|e| {
+            if e.is_dir { e.name.len() + 1 } else { e.name.len() }
+        }).max().unwrap_or(0);
+
+        // Virtual row width: name column + 1 gap + metadata
+        let virtual_width = max_name_len + 1 + meta_width;
+
+        // Clamp scroll so the end of metadata aligns with the right edge
+        let scroll_x = match side {
+            BrowserFocus::Local => &mut self.local_scroll_x,
+            BrowserFocus::Remote => &mut self.remote_scroll_x,
+        };
+        let max_scroll = virtual_width.saturating_sub(w);
+        if *scroll_x > max_scroll {
+            *scroll_x = max_scroll;
+        }
+        let sx = *scroll_x;
 
         let items: Vec<ListItem> = entries
             .iter()
@@ -841,24 +881,40 @@ impl FileBrowser {
                 } else {
                     e.name.clone()
                 };
-                let name_trunc: String = display_name.chars().take(w_name).collect();
-                let name_padded = format!("{:<width$}", name_trunc, width = w_name);
-                let line = Line::from(vec![
-                    Span::styled(name_padded, Style::default().fg(name_col)),
-                    Span::styled(
-                        format!(" {:>W_SIZE$}", e.size),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        format!(" {:<W_MOD$}", e.modified),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        format!(" {:<W_PERMS$}", e.perms),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]);
-                ListItem::new(line)
+
+                let meta = format!("{:>9} {:<16} {:<10}", e.size, e.modified, e.perms);
+                let name_len = display_name.chars().count();
+                let gap = max_name_len + 1 - name_len;
+                let full = format!(
+                    "{}{:gap$}{}",
+                    display_name,
+                    "",
+                    meta,
+                    gap = gap,
+                );
+
+                let scrolled: String = full.chars().skip(sx).take(w).collect();
+                let padded = format!("{:<width$}", scrolled, width = w);
+
+                // Color: name portion vs metadata
+                let visible_name_chars = if sx < name_len {
+                    (name_len - sx).min(w)
+                } else {
+                    0
+                };
+
+                if visible_name_chars == 0 {
+                    let line = Line::from(Span::styled(padded, Style::default().fg(Color::DarkGray)));
+                    ListItem::new(line)
+                } else {
+                    let name_part: String = padded.chars().take(visible_name_chars).collect();
+                    let rest: String = padded.chars().skip(visible_name_chars).collect();
+                    let line = Line::from(vec![
+                        Span::styled(name_part, Style::default().fg(name_col)),
+                        Span::styled(rest, Style::default().fg(Color::DarkGray)),
+                    ]);
+                    ListItem::new(line)
+                }
             })
             .collect();
 
