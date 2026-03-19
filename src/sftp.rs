@@ -922,7 +922,7 @@ impl FileBrowser {
             String::new()
         };
 
-        let help = " Tab:switch pane  Space/Enter:navigate  Backspace:go up  T:transfer  Delete:remove ";
+        let help = " [T]xfer [Del]rm ";
         let help_len = help.chars().count() as u16;
         let help_x = area.x + area.width.saturating_sub(help_len);
 
