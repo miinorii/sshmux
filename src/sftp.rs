@@ -1,6 +1,7 @@
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use crate::log;
@@ -85,6 +86,8 @@ pub struct FileBrowser {
     pub drive_picker: Option<(Vec<PathBuf>, ListState)>,
     pub log: Option<Arc<Mutex<std::fs::File>>>,
     pub status_color: Color,
+    pub cmd_start: Option<Instant>,
+    pub last_duration: Option<std::time::Duration>,
 }
 
 impl FileBrowser {
@@ -119,6 +122,8 @@ impl FileBrowser {
             drive_picker: None,
             log: log.clone(),
             status_color: Color::Yellow,
+            cmd_start: None,
+            last_duration: None,
         })
     }
 
@@ -147,6 +152,7 @@ impl FileBrowser {
                     self.prompt_stable = 0;
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
+                    self.cmd_start = Some(Instant::now());
                     self.sftp.send_str("pwd\r\n");
                     self.sftp_state = SftpState::WaitingPwd;
                     self.status_msg = format!("Connected to {}", self.host);
@@ -186,6 +192,7 @@ impl FileBrowser {
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
                     self.sftp_state = SftpState::Idle;
+                    self.stop_timer();
                     if self.status_color == Color::Yellow {
                         self.status_color = Color::Green;
                     }
@@ -352,6 +359,7 @@ impl FileBrowser {
                     self.local_sel.select_first();
                     self.status_msg = format!("Local: {}", self.local_path.to_string_lossy());
                     self.status_color = Color::Green;
+                    self.last_duration = None;
                     self.needs_redraw = true;
                 }
             }
@@ -383,7 +391,30 @@ impl FileBrowser {
     /// Send `ls -la <remote_path>` using the client-tracked absolute path.
     fn send_ls(&mut self) {
         let cmd = format!("ls -la {}\r\n", shell_quote(&self.remote_path));
+        self.cmd_start = Some(Instant::now());
         self.sftp.send_str(&cmd);
+    }
+
+    fn stop_timer(&mut self) {
+        if let Some(start) = self.cmd_start.take() {
+            self.last_duration = Some(start.elapsed());
+        }
+    }
+
+    fn format_duration(d: std::time::Duration) -> String {
+        let ms = d.as_millis();
+        if ms < 1000 {
+            format!("{}ms", ms)
+        } else {
+            let secs = d.as_secs();
+            if secs < 60 {
+                format!("{}s", secs)
+            } else if secs < 3600 {
+                format!("{}m", secs / 60)
+            } else {
+                format!("{}h", secs / 3600)
+            }
+        }
     }
 
     fn apply_cd(&mut self, name: &str) {
@@ -414,6 +445,7 @@ impl FileBrowser {
                     self.local_sel.select_first();
                     self.status_msg = format!("Local: {}", self.local_path.to_string_lossy());
                     self.status_color = Color::Green;
+                    self.last_duration = None;
                     self.needs_redraw = true;
                 } else {
                     // At a filesystem root: show drive picker.
@@ -557,6 +589,7 @@ impl FileBrowser {
                     self.status_color = Color::Green;
                     self.local_entries = read_local_dir(&self.local_path);
                 }
+                self.last_duration = None;
                 self.needs_redraw = true;
             } else if let Some(rest) = tagged.strip_prefix("remote:") {
                 let is_dir = rest.starts_with("dir:");
@@ -897,7 +930,13 @@ impl FileBrowser {
         // When idle, both use status_color to reflect the last operation result.
         let msg_color = state_col;
 
-        // Left: [state] message
+        let duration_suffix = if let Some(d) = self.last_duration {
+            format!(" ({})", Self::format_duration(d))
+        } else {
+            String::new()
+        };
+
+        // Left: [state] message (duration)
         let left_line = Line::from(vec![
             Span::styled(
                 format!("[{}]", state_label.trim_matches(|c| c == '[' || c == ']')),
@@ -906,6 +945,10 @@ impl FileBrowser {
             Span::styled(
                 format!(" {}{}", self.status_msg, progress_suffix),
                 Style::default().fg(msg_color),
+            ),
+            Span::styled(
+                duration_suffix,
+                Style::default().fg(Color::DarkGray),
             ),
         ]);
         buf.set_line(area.x, area.y, &left_line, help_x.saturating_sub(area.x));
