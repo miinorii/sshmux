@@ -190,7 +190,7 @@ impl Pane {
 
                 let inner = if leaf_count > 1 {
                     let border_style = if is_focus {
-                        Style::default().fg(Color::Blue)
+                        Style::default().fg(Color::Cyan)
                     } else {
                         Style::default().fg(Color::DarkGray)
                     };
@@ -264,7 +264,7 @@ impl Pane {
 
                 let inner = if leaf_count > 1 {
                     let border_style = if is_focus {
-                        Style::default().fg(Color::Blue)
+                        Style::default().fg(Color::Cyan)
                     } else {
                         Style::default().fg(Color::DarkGray)
                     };
