@@ -104,7 +104,7 @@ fn main() -> Result<()> {
 
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                     let alt = key.modifiers.contains(KeyModifiers::ALT);
-                    let focused_pane_has_mouse_active = app.focused_pane_mouse_active();
+                    let focused_pane_has_app_cursor = app.focused_pane_app_cursor();
 
                     // ---- Global shortcuts (Alt+...) ----
                     if alt && !ctrl {
@@ -482,28 +482,28 @@ fn main() -> Result<()> {
                         KeyCode::Tab => app.send_str("\t"),
                         KeyCode::BackTab => app.send_str("\x1b[Z"),
                         KeyCode::Left => {
-                            if focused_pane_has_mouse_active {
+                            if focused_pane_has_app_cursor {
                                 app.send_str("\x1bOD");
                             } else {
                                 app.send_str("\x1b[D");
                             }
                         }
                         KeyCode::Right => {
-                            if focused_pane_has_mouse_active {
+                            if focused_pane_has_app_cursor {
                                 app.send_str("\x1bOC");
                             } else {
                                 app.send_str("\x1b[C");
                             }
                         }
                         KeyCode::Up => {
-                            if focused_pane_has_mouse_active {
+                            if focused_pane_has_app_cursor {
                                 app.send_str("\x1bOA");
                             } else {
                                 app.send_str("\x1b[A");
                             }
                         }
                         KeyCode::Down => {
-                            if focused_pane_has_mouse_active {
+                            if focused_pane_has_app_cursor {
                                 app.send_str("\x1bOB");
                             } else {
                                 app.send_str("\x1b[B");
@@ -668,6 +668,7 @@ fn main() -> Result<()> {
                             .map(|p| {
                                 if let Pane::Session { terminal } = p {
                                     terminal.mouse_active.load(Ordering::Acquire)
+                                        && !terminal.process_exited()
                                 } else {
                                     false
                                 }

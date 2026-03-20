@@ -117,9 +117,9 @@ impl App {
         Ok(())
     }
 
-    pub fn focused_pane_mouse_active(&self) -> bool {
+    pub fn focused_pane_app_cursor(&self) -> bool {
         if let Some(Pane::Session { terminal }) = self.tab().focused_pane() {
-            terminal.mouse_active.load(Ordering::Relaxed)
+            terminal.app_cursor.load(Ordering::Relaxed)
         } else {
             false
         }

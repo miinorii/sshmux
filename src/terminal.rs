@@ -39,6 +39,7 @@ pub struct EmbeddedTerminal {
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pub dirty: Arc<AtomicBool>,
     pub mouse_active: Arc<AtomicBool>,
+    pub app_cursor: Arc<AtomicBool>,
     pub cursor_visible: Arc<AtomicBool>,
     pub rows: u16,
     pub cols: u16,
@@ -70,6 +71,7 @@ impl EmbeddedTerminal {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let dirty = Arc::new(AtomicBool::new(false));
         let mouse_active = Arc::new(AtomicBool::new(false));
+        let app_cursor = Arc::new(AtomicBool::new(false));
         let cursor_visible = Arc::new(AtomicBool::new(true));
         let raw_output = Arc::new(Mutex::new(Vec::<u8>::new()));
         let exited = Arc::new(AtomicBool::new(false));
@@ -78,6 +80,7 @@ impl EmbeddedTerminal {
         let writer_c = Arc::clone(&writer);
         let dirty_c = Arc::clone(&dirty);
         let mouse_active_c = Arc::clone(&mouse_active);
+        let app_cursor_c = Arc::clone(&app_cursor);
         let cursor_visible_c = Arc::clone(&cursor_visible);
         let raw_output_c = Arc::clone(&raw_output);
         let exited_c = Arc::clone(&exited);
@@ -146,6 +149,9 @@ impl EmbeddedTerminal {
                                 let set = scan[end] == b'h';
                                 for param in params.split(';') {
                                     match param.trim() {
+                                        "1" => {
+                                            app_cursor_c.store(set, Ordering::Release);
+                                        }
                                         "1000" | "1002" | "1003" | "1006" => {
                                             mouse_active_c.store(set, Ordering::Release);
                                         }
@@ -192,6 +198,7 @@ impl EmbeddedTerminal {
             writer,
             dirty,
             mouse_active,
+            app_cursor,
             cursor_visible,
             rows,
             cols,

@@ -157,7 +157,7 @@ mod tests {
     fn tab_double_split_gives_three_panes() {
         let mut t = Tab::new("1");
         t.split(Split::Horizontal, r(200, 50));
-        t.focus_idx = 1;
+        // focus is already on the new pane (idx 1)
         t.split(Split::Vertical, r(200, 50));
         assert_eq!(t.leaf_count(), 3);
     }
@@ -166,20 +166,24 @@ mod tests {
     fn tab_focus_next_wraps() {
         let mut t = Tab::new("1");
         t.split(Split::Horizontal, r(200, 50));
-        t.focus_next();
+        // split moves focus to the new pane (idx 1)
         assert_eq!(t.focus_idx, 1);
         t.focus_next();
         assert_eq!(t.focus_idx, 0);
+        t.focus_next();
+        assert_eq!(t.focus_idx, 1);
     }
 
     #[test]
     fn tab_focus_prev_wraps() {
         let mut t = Tab::new("1");
         t.split(Split::Horizontal, r(200, 50));
-        t.focus_prev();
+        // split moves focus to the new pane (idx 1)
         assert_eq!(t.focus_idx, 1);
         t.focus_prev();
         assert_eq!(t.focus_idx, 0);
+        t.focus_prev();
+        assert_eq!(t.focus_idx, 1);
     }
 
     #[test]
