@@ -2,7 +2,7 @@
 
 ![sshmux demo](demo.png)
 
-SSH session multiplexer that runs inside your local terminal. Tabs, split panes, and a two-panel SFTP file browser, all driven by the system `ssh` and `sftp` binaries — no additional SSH library dependency.
+SSH session multiplexer that runs inside your local terminal. Tabs, split panes, and two-panel file browsers (SFTP and SCP), all driven by the system `ssh`, `sftp`, and `scp` binaries — no additional SSH library dependency.
 
 > This project started as a personal vibecoded tool to manage an ever-growing list of SSH connections at work. It solved the problem well enough that it felt worth sharing. It is not a polished product — use it as a starting point, adapt it freely, and contribute back if you find it useful.
 
@@ -22,10 +22,8 @@ Hosts are read from `~/.ssh/config` at startup. Any non-wildcard `Host` entry is
 | `Alt+W` | Close focused pane (closes tab if last pane) |
 | `Alt+-` | Split pane vertically (top / bottom) |
 | `Alt++` | Split pane horizontally (left / right) |
-| `Alt+B` | Open SFTP file browser for selected host |
 | `Alt+↑` / `Alt+↓` | Cycle focus between panes |
 | `Alt+←` / `Alt+→` | Switch tabs |
-| `Ctrl+C` | Quit |
 
 ### Connect pane
 
@@ -34,7 +32,8 @@ Hosts are read from `~/.ssh/config` at startup. Any non-wildcard `Host` entry is
 | `↑` / `k` | Select previous host |
 | `↓` / `j` | Select next host |
 | `Enter` | Open SSH session |
-| `Alt+B` | Open SFTP browser |
+| `b` | Open file browser menu (SFTP or SCP) |
+| `Ctrl+C` | Quit |
 
 ### Session pane (SSH)
 
@@ -49,19 +48,26 @@ Standard terminal input. Notable mappings:
 
 Mouse events forwarded as SGR sequences when the remote app enables mouse reporting.
 
-### File browser pane
+### File browser pane (SFTP & SCP)
+
+Two browser backends are available from the connect pane menu (`b`):
+
+- **SFTP** — uses the `sftp` subsystem. Works on most servers out of the box.
+- **SCP** — uses a persistent `ssh` shell for browsing (`ls`, `rm`) and spawns `scp` processes for transfers. Works on servers without the SFTP subsystem and supports recursive directory deletion (`rm -rf`).
 
 | Key | Action |
 |---|---|
 | `Tab` | Toggle local / remote panel focus |
 | `↑` / `↓` | Navigate entries |
-| `Space` / `Enter` | Enter directory; download if file (remote) |
+| `←` / `→` | Scroll long file names |
+| `Space` / `Enter` | Enter directory |
 | `Backspace` | Go up one directory |
-| `F5` | Download selected remote file to local directory |
-| `F6` | Upload selected local file to remote directory |
+| `t` | Transfer: download (remote focus) or upload (local focus) |
 | `Delete` | Delete focused file (confirmation required) |
 | `y` | Confirm deletion |
 | `n` / `Esc` | Cancel deletion |
+
+Drag-and-drop: click on one panel and release on the other to transfer.
 
 ---
 
@@ -79,8 +85,9 @@ Mouse events forwarded as SGR sequences when the remote app enables mouse report
 │                      │      Pane (tree)             │   │
 │  ┌──────────────┐    │        Connect               │   │
 │  │ ratatui      │<───│        Session               │   │
-│  │ draw buffer  │    │        FileBrowser           │   │
-│  └──────────────┘    │        Split{H|V, children}  │   │
+│  │ draw buffer  │    │        FileBrowser (SFTP)    │   │
+│  └──────────────┘    │        SshBrowser  (SCP)     │   │
+│                      │        Split{H|V, children}  │   │
 │                      └──────────────────────────────┘   │
 │                                                         │
 │  Per Session / FileBrowser:                             │
@@ -106,13 +113,18 @@ Mouse events forwarded as SGR sequences when the remote app enables mouse report
 │                              │  spawn                   │
 └──────────────────────────────┼──────────────────────────┘
                                │
-               ┌───────────────┴────────────────┐
-               │                                │
-         ┌─────v──────┐                  ┌──────v─────┐
-         │  ssh host  │                  │ sftp host  │
-         │  (Session) │                  │(FileBrowser│
-         │            │                  │ hidden PTY)│
-         └────────────┘                  └────────────┘
+               ┌───────────────┼────────────────┐
+               │               │                │
+         ┌─────v──────┐  ┌────v───────┐  ┌──────v─────┐
+         │  ssh host  │  │ sftp host  │  │  ssh host  │
+         │  (Session) │  │(FileBrowser│  │(SshBrowser │
+         │            │  │ hidden PTY)│  │ hidden PTY)│
+         └────────────┘  └────────────┘  └─────┬──────┘
+                                               │ transfers
+                                         ┌─────v──────┐
+                                         │  scp host  │
+                                         │ (temp PTY) │
+                                         └────────────┘
 ```
 
 ### PTY data flow (Session pane)
@@ -139,11 +151,12 @@ PTY master reader <────────────────────�
     ├─> vt100::Parser::process(bytes)
     │        └─> screen grid updated
     │
-    ├─> raw_output.extend(bytes)      (SFTP only)
+    ├─> raw_output.extend(bytes)      (SFTP/SCP browsers)
     │
     ├─> dirty.store(true)            ──> triggers ratatui redraw
     │
-    ├─> scan ESC[?...h/l             ──> mouse_active / cursor_visible
+    ├─> scan ESC[?...h/l             ──> mouse_active / app_cursor /
+    │                                    cursor_visible
     │
     └─> reply to DSR (ESC[6n)        ──> neovim/htop cursor probe
 ```
@@ -171,6 +184,32 @@ Idle <────────────────────────�
 
 "Stable" means the raw PTY buffer byte count has not changed for 3 consecutive ticks (~15 ms) and the last non-empty line contains `sftp>`. This prevents acting on a prompt that appears mid-output before all data has been flushed.
 
+### SCP state machine (SshBrowser)
+
+```
+Connecting ── user authenticates via SSH PTY
+    │  shell prompt detected ($ / # / %)
+    v
+SettingPrompt ── send PS1='SSHMUX> '
+    │  SSHMUX> prompt appears
+    v
+WaitingPwd ── send "pwd\r\n"
+    │  prompt stable
+    v
+WaitingLs ── send "ls -la\r\n"
+    │  prompt stable, parse_ls()
+    v
+Idle <──────────────────────────────────────────────┐
+    │                                               │
+    ├── cd dir ──> WaitingLs ──────────────────────┘
+    │
+    ├── transfer ──> Transferring (scp process) ───┘
+    │
+    └── rm ──> WaitingDelete ──> WaitingLs ────────┘
+```
+
+Transfers spawn a separate `scp` process (new SSH connection). Password prompts during SCP are detected and forwarded to the user.
+
 ---
 
 ## Build
@@ -181,8 +220,15 @@ cargo build --release
 
 Binary: `target/release/sshmux`
 
-Optional debug logging to `debug.log`:
+## Logging
 
 ```
 sshmux --debug
 ```
+
+Creates a timestamped log file (`sshmux-debug-YYYYMMDD_HHMMSS.log`) in the current directory. Log levels:
+
+- **info** — session lifecycle (connect, disconnect, transfers, deletes)
+- **warn** — recoverable issues (password rejected, delete failed)
+- **error** — failures (PTY errors, spawn failures)
+- **debug** — internal diagnostics (resize events, state machine details)
