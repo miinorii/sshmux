@@ -80,6 +80,7 @@ fn main() -> Result<()> {
         }
     };
     let mut host_mouse_captured = false;
+    let mut first_frame = true;
 
     loop {
         std::thread::sleep(Duration::from_millis(5));
@@ -736,7 +737,8 @@ fn main() -> Result<()> {
             }
         }
 
-        if needs_draw || had_event {
+        if needs_draw || had_event || first_frame {
+            first_frame = false;
             terminal.draw(|f| {
                 last_area = f.area();
                 if needs_draw {
