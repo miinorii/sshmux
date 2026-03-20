@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use crate::pane::{Pane, pane_inner};
-use crate::sftp::FileBrowser;
+use crate::browser::{FileBrowser, SshBrowser};
 use crate::ssh_config::SshHost;
 use crate::tab::Tab;
 use crate::terminal::EmbeddedTerminal;
@@ -100,6 +100,22 @@ impl App {
         }
         if let Some(pane) = self.tab_mut().focused_pane_mut() {
             *pane = Pane::FileBrowser { browser };
+        }
+        Ok(())
+    }
+
+    pub fn open_ssh_browser(&mut self, host_idx: usize) -> Result<()> {
+        let host = self
+            .hosts
+            .get(host_idx)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("invalid host"))?;
+        let browser = SshBrowser::new(&host.label, self.log.clone())?;
+        if self.tab().leaf_count() == 1 {
+            self.tab_mut().name = format!("scp:{}", host.label);
+        }
+        if let Some(pane) = self.tab_mut().focused_pane_mut() {
+            *pane = Pane::SshBrowser { browser };
         }
         Ok(())
     }

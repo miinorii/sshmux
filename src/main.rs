@@ -9,7 +9,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, widgets::ListState};
 
 use std::io::Write;
 use std::sync::atomic::Ordering;
@@ -20,15 +20,14 @@ use std::sync::atomic::Ordering;
 
 mod app;
 mod pane;
-mod sftp;
-mod sftp_parse;
+mod browser;
 mod ssh_config;
 mod tab;
 mod terminal;
 
 use app::{App, content_area};
 use pane::{Pane, Split, pane_inner};
-use sftp::{BrowserFocus, SftpState};
+use browser::{BrowserFocus, SftpState, SshBrowserState};
 
 // ---------------------------------------------------------------------------
 // Logging macro (available to all modules via #[macro_use] or re-export)
@@ -153,6 +152,72 @@ fn main() -> Result<()> {
                     );
 
                     if focused_is_connect {
+                        // Check if browser menu is open
+                        let menu_open = matches!(
+                            app.tab().focused_pane(),
+                            Some(Pane::Connect { browser_menu: Some(_), .. })
+                        );
+
+                        if menu_open {
+                            match key.code {
+                                KeyCode::Up => {
+                                    if let Some(Pane::Connect { browser_menu: Some(ms), .. }) =
+                                        app.tab_mut().focused_pane_mut()
+                                    {
+                                        ms.select_previous();
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    if let Some(Pane::Connect { browser_menu: Some(ms), .. }) =
+                                        app.tab_mut().focused_pane_mut()
+                                    {
+                                        ms.select_next();
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    let (host_idx, menu_idx) = if let Some(Pane::Connect {
+                                        list_state,
+                                        browser_menu: Some(ms),
+                                    }) = app.tab().focused_pane()
+                                    {
+                                        (list_state.selected(), ms.selected())
+                                    } else {
+                                        (None, None)
+                                    };
+                                    // Close menu first
+                                    if let Some(Pane::Connect { browser_menu, .. }) =
+                                        app.tab_mut().focused_pane_mut()
+                                    {
+                                        *browser_menu = None;
+                                    }
+                                    if let (Some(idx), Some(mi)) = (host_idx, menu_idx) {
+                                        match mi {
+                                            0 => {
+                                                if let Err(e) = app.open_browser(idx) {
+                                                    log!(log_file, "open_browser error: {}", e);
+                                                }
+                                            }
+                                            1 => {
+                                                if let Err(e) = app.open_ssh_browser(idx) {
+                                                    log!(log_file, "open_ssh_browser error: {}", e);
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                KeyCode::Esc => {
+                                    if let Some(Pane::Connect { browser_menu, .. }) =
+                                        app.tab_mut().focused_pane_mut()
+                                    {
+                                        *browser_menu = None;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
                         match key.code {
                             KeyCode::Char('c') if ctrl && !alt => {
                                 disable_raw_mode()?;
@@ -165,21 +230,21 @@ fn main() -> Result<()> {
                                 return Ok(());
                             }
                             KeyCode::Up | KeyCode::Char('k') => {
-                                if let Some(Pane::Connect { list_state }) =
+                                if let Some(Pane::Connect { list_state, .. }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
                                     list_state.select_previous();
                                 }
                             }
                             KeyCode::Down | KeyCode::Char('j') => {
-                                if let Some(Pane::Connect { list_state }) =
+                                if let Some(Pane::Connect { list_state, .. }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
                                     list_state.select_next();
                                 }
                             }
                             KeyCode::Enter => {
-                                let selected = if let Some(Pane::Connect { list_state }) =
+                                let selected = if let Some(Pane::Connect { list_state, .. }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
                                     list_state.selected()
@@ -193,18 +258,13 @@ fn main() -> Result<()> {
                                     app.resize_all(last_area);
                                 }
                             }
-                            KeyCode::Char('b') => {
-                                let selected = if let Some(Pane::Connect { list_state }) =
+                            KeyCode::Char('b') | KeyCode::Char('B') => {
+                                if let Some(Pane::Connect { browser_menu, .. }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
-                                    list_state.selected()
-                                } else {
-                                    None
-                                };
-                                if let Some(idx) = selected {
-                                    if let Err(e) = app.open_browser(idx) {
-                                        log!(log_file, "open_browser error: {}", e);
-                                    }
+                                    let mut ms = ListState::default();
+                                    ms.select(Some(0));
+                                    *browser_menu = Some(ms);
                                 }
                             }
                             _ => {}
@@ -231,6 +291,107 @@ fn main() -> Result<()> {
                                     KeyCode::Char(c) => browser.sftp.send_char(c),
                                     KeyCode::Enter => browser.sftp.send_str("\r\n"),
                                     KeyCode::Backspace => browser.sftp.send_str("\x7f"),
+                                    _ => {}
+                                }
+                                continue;
+                            }
+
+                            if browser.confirm_delete.is_some() {
+                                match key.code {
+                                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                        browser.confirm_delete_yes()
+                                    }
+                                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                                        browser.confirm_delete_no()
+                                    }
+                                    _ => {}
+                                }
+                            } else {
+                                match key.code {
+                                    KeyCode::Tab => {
+                                        browser.dismiss_drive_picker();
+                                        browser.focus = if browser.focus == BrowserFocus::Local {
+                                            BrowserFocus::Remote
+                                        } else {
+                                            BrowserFocus::Local
+                                        };
+                                    }
+                                    KeyCode::Esc => browser.dismiss_drive_picker(),
+                                    KeyCode::Up => browser.nav_up(),
+                                    KeyCode::Down => browser.nav_down(),
+                                    KeyCode::Left => browser.scroll_left(),
+                                    KeyCode::Right => browser.scroll_right(),
+                                    KeyCode::Char(' ') | KeyCode::Enter => browser.enter(),
+                                    KeyCode::Backspace => browser.go_up(),
+                                    KeyCode::Char('t') => match browser.focus {
+                                        BrowserFocus::Remote => browser.download(),
+                                        BrowserFocus::Local => browser.upload(),
+                                    },
+                                    KeyCode::Delete => browser.delete_focused(),
+                                    KeyCode::Char('c') if ctrl => {
+                                        disable_raw_mode()?;
+                                        execute!(
+                                            terminal.backend_mut(),
+                                            LeaveAlternateScreen,
+                                            crossterm::event::DisableMouseCapture
+                                        )?;
+                                        terminal.show_cursor()?;
+                                        return Ok(());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // ---- SshBrowser pane ----
+                    let focus_idx = app.tabs[app.selected_tab].focus_idx;
+                    let focused_is_ssh_browser = matches!(
+                        app.tabs[app.selected_tab].root.leaf(focus_idx),
+                        Some(Pane::SshBrowser { .. })
+                    );
+
+                    if focused_is_ssh_browser {
+                        if let Some(Pane::SshBrowser { browser }) =
+                            app.tab_mut().focused_pane_mut()
+                        {
+                            // Password prompt (both during connection and transfer)
+                            if browser.waiting_password {
+                                match key.code {
+                                    KeyCode::Char(c) => browser.password_char(c),
+                                    KeyCode::Backspace => browser.password_backspace(),
+                                    KeyCode::Enter => browser.submit_password(),
+                                    KeyCode::Esc => {
+                                        browser.waiting_password = false;
+                                        browser.password_buf.clear();
+                                        browser.needs_redraw = true;
+                                        if browser.ssh_state == SshBrowserState::Transferring {
+                                            browser.scp_pty = None;
+                                            browser.ssh_state = SshBrowserState::Idle;
+                                            browser.status_msg =
+                                                "Transfer cancelled".to_string();
+                                        } else {
+                                            browser.status_msg =
+                                                "Password cancelled".to_string();
+                                        }
+                                        browser.status_color =
+                                            ratatui::style::Color::Yellow;
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+
+                            // During connecting/setting prompt, forward keystrokes to SSH PTY
+                            if matches!(
+                                browser.ssh_state,
+                                SshBrowserState::Connecting | SshBrowserState::SettingPrompt
+                            ) {
+                                match key.code {
+                                    KeyCode::Char(c) => browser.ssh.send_char(c),
+                                    KeyCode::Enter => browser.ssh.send_str("\r\n"),
+                                    KeyCode::Backspace => browser.ssh.send_str("\x7f"),
                                     _ => {}
                                 }
                                 continue;
@@ -428,6 +589,56 @@ fn main() -> Result<()> {
                             }
                             if let MouseEventKind::Up(MouseButton::Left) = mouse.kind {
                                 if let Some(Pane::FileBrowser { browser }) =
+                                    app.tab_mut().focused_pane_mut()
+                                {
+                                    let inner = pane_inner(pane_area);
+                                    let half = inner.width / 2;
+                                    let in_remote = mouse.column >= inner.x + half;
+                                    let drag_from = browser.focus;
+                                    if in_remote && drag_from == BrowserFocus::Local {
+                                        browser.drag_local_to_remote();
+                                    } else if !in_remote && drag_from == BrowserFocus::Remote {
+                                        browser.drag_remote_to_local();
+                                    }
+                                    browser.focus = if in_remote {
+                                        BrowserFocus::Remote
+                                    } else {
+                                        BrowserFocus::Local
+                                    };
+                                }
+                            }
+                            continue;
+                        }
+
+                        // ---- SshBrowser mouse ----
+                        let is_ssh_browser = matches!(
+                            app.tabs[app.selected_tab].root.leaf(pane_idx),
+                            Some(Pane::SshBrowser { .. })
+                        );
+                        if is_ssh_browser {
+                            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                                let leaf_count =
+                                    app.tabs[app.selected_tab].root.leaf_count();
+                                if let Some(Pane::SshBrowser { browser }) =
+                                    app.tab_mut().focused_pane_mut()
+                                {
+                                    let inner = pane_inner(pane_area);
+                                    let half = inner.width / 2;
+                                    browser.focus = if mouse.column >= inner.x + half {
+                                        BrowserFocus::Remote
+                                    } else {
+                                        BrowserFocus::Local
+                                    };
+                                    browser.click_select(
+                                        mouse.column,
+                                        mouse.row,
+                                        pane_area,
+                                        leaf_count,
+                                    );
+                                }
+                            }
+                            if let MouseEventKind::Up(MouseButton::Left) = mouse.kind {
+                                if let Some(Pane::SshBrowser { browser }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
                                     let inner = pane_inner(pane_area);
