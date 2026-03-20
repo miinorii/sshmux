@@ -24,15 +24,17 @@ pub fn strip_ansi(raw: &[u8]) -> String {
                 }
                 b']' => {
                     i += 1;
+                    let mut found_st = false;
                     while i < raw.len() && raw[i] != 0x07 {
                         if raw[i] == 0x1b && i + 1 < raw.len() && raw[i + 1] == b'\\' {
                             i += 2;
+                            found_st = true;
                             break;
                         }
                         i += 1;
                     }
-                    if i < raw.len() {
-                        i += 1;
+                    if !found_st && i < raw.len() {
+                        i += 1; // skip BEL
                     }
                 }
                 _ => {
@@ -587,5 +589,282 @@ mod tests {
         // 2000-02-29 00:00:00 UTC
         let (y, mo, d, _, _) = epoch_to_ymd(951782400);
         assert_eq!((y, mo, d), (2000, 2, 29));
+    }
+
+    #[test]
+    fn epoch_day_after_leap_day() {
+        // 2000-03-01 00:00:00 UTC
+        let (y, mo, d, _, _) = epoch_to_ymd(951868800);
+        assert_eq!((y, mo, d), (2000, 3, 1));
+    }
+
+    #[test]
+    fn epoch_new_years_eve() {
+        // 2023-12-31 23:59:00 UTC
+        let (y, mo, d, h, mi) = epoch_to_ymd(1704067140);
+        assert_eq!((y, mo, d, h, mi), (2023, 12, 31, 23, 59));
+    }
+
+    #[test]
+    fn epoch_non_leap_century() {
+        // 1900 is NOT a leap year (divisible by 100 but not 400)
+        // 1970-03-01 00:00:00 UTC = 5097600
+        let (y, mo, d, _, _) = epoch_to_ymd(5097600);
+        assert_eq!((y, mo, d), (1970, 3, 1));
+    }
+
+    // ---- scrape_transfer_progress ------------------------------------------
+
+    #[test]
+    fn scrape_progress_simple() {
+        assert_eq!(
+            scrape_transfer_progress(&["50%".to_string()]),
+            Some("50%".to_string())
+        );
+    }
+
+    #[test]
+    fn scrape_progress_zero() {
+        assert_eq!(
+            scrape_transfer_progress(&["0%".to_string()]),
+            Some("0%".to_string())
+        );
+    }
+
+    #[test]
+    fn scrape_progress_hundred() {
+        assert_eq!(
+            scrape_transfer_progress(&["100%".to_string()]),
+            Some("100%".to_string())
+        );
+    }
+
+    #[test]
+    fn scrape_progress_no_match() {
+        assert_eq!(
+            scrape_transfer_progress(&["no percent here".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn scrape_progress_empty() {
+        assert_eq!(scrape_transfer_progress(&[]), None);
+    }
+
+    #[test]
+    fn scrape_progress_carriage_return() {
+        // SCP overwrites progress with \r; last segment wins
+        assert_eq!(
+            scrape_transfer_progress(&["10%\r75%".to_string()]),
+            Some("75%".to_string())
+        );
+    }
+
+    #[test]
+    fn scrape_progress_last_line_wins() {
+        assert_eq!(
+            scrape_transfer_progress(&["10%".to_string(), "90%".to_string()]),
+            Some("90%".to_string())
+        );
+    }
+
+    #[test]
+    fn scrape_progress_with_surrounding_text() {
+        assert_eq!(
+            scrape_transfer_progress(&["demo.png  50% 125KB 62.5KB/s 00:02".to_string()]),
+            Some("50%".to_string())
+        );
+    }
+
+    #[test]
+    fn scrape_progress_invalid_percent() {
+        // "abc%" should not match (abc is not a u32)
+        assert_eq!(
+            scrape_transfer_progress(&["abc%".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn scrape_progress_negative_percent() {
+        // "-5%" should not match (negative not valid u32)
+        assert_eq!(
+            scrape_transfer_progress(&["-5%".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn scrape_progress_scp_full_line() {
+        // Realistic SCP output with \r-separated segments
+        let line = "demo.png   0%    0     0.0KB/s   --:-- ETA\rdemo.png 100%  125KB  62.5KB/s   00:02";
+        assert_eq!(
+            scrape_transfer_progress(&[line.to_string()]),
+            Some("100%".to_string())
+        );
+    }
+
+    // ---- shell_quote (additional edge cases) -------------------------------
+
+    #[test]
+    fn sq_multiple_consecutive_quotes() {
+        assert_eq!(shell_quote("a''b"), "'a'\\'''\\''b'");
+    }
+
+    #[test]
+    fn sq_quote_at_end() {
+        assert_eq!(shell_quote("end'"), "'end'\\'''");
+    }
+
+    #[test]
+    fn sq_newline() {
+        assert_eq!(shell_quote("hello\nworld"), "'hello\nworld'");
+    }
+
+    #[test]
+    fn sq_backslash() {
+        assert_eq!(shell_quote("back\\slash"), "'back\\slash'");
+    }
+
+    #[test]
+    fn sq_special_chars() {
+        assert_eq!(shell_quote("$HOME && rm -rf /"), "'$HOME && rm -rf /'");
+    }
+
+    // ---- parse_ls (additional edge cases) ----------------------------------
+
+    #[test]
+    fn parse_ls_unicode_filename() {
+        let e = parse_ls(&ls(
+            "-rw-r--r--    ? u g 100 Jan  1  2020 café.txt",
+        ));
+        assert!(e.iter().any(|x| x.name == "café.txt"));
+    }
+
+    #[test]
+    fn parse_ls_sticky_bit() {
+        let e = parse_ls(&ls(
+            "drwxrwxrwt    ? root root 4096 Jan  1  2020 tmp",
+        ));
+        let dir = e.iter().find(|x| x.name == "tmp");
+        assert!(dir.is_some());
+        assert!(dir.unwrap().is_dir);
+        assert_eq!(dir.unwrap().perms, "drwxrwxrwt");
+    }
+
+    #[test]
+    fn parse_ls_setuid_bit() {
+        let e = parse_ls(&ls(
+            "-rwsr-xr-x    ? root root 27104 Jan  1  2020 passwd",
+        ));
+        let f = e.iter().find(|x| x.name == "passwd");
+        assert!(f.is_some());
+        assert_eq!(f.unwrap().perms, "-rwsr-xr-x");
+    }
+
+    #[test]
+    fn parse_ls_block_device_skipped() {
+        // Block devices start with 'b', not '-', 'd', or 'l' — should be skipped
+        let e = parse_ls(&ls(
+            "brw-rw----    ? root disk 8 Jan  1  2020 0 sda",
+        ));
+        // Only the synthetic ".." entry
+        assert_eq!(e.len(), 1);
+    }
+
+    #[test]
+    fn parse_ls_char_device_skipped() {
+        let e = parse_ls(&ls(
+            "crw-rw-rw-    ? root tty 5 Jan  1  2020 0 tty",
+        ));
+        assert_eq!(e.len(), 1);
+    }
+
+    #[test]
+    fn parse_ls_zero_size() {
+        let e = parse_ls(&ls(
+            "-rw-r--r--    ? u g 0 Jan  1  2020 empty.txt",
+        ));
+        let f = e.iter().find(|x| x.name == "empty.txt").unwrap();
+        assert_eq!(f.size, "0 B");
+    }
+
+    #[test]
+    fn parse_ls_terabyte_file() {
+        let e = parse_ls(&ls(
+            "-rw-r--r--    ? u g 1099511627776 Jan  1  2020 large.bin",
+        ));
+        let f = e.iter().find(|x| x.name == "large.bin").unwrap();
+        assert_eq!(f.size, "1.0 TB");
+    }
+
+    #[test]
+    fn parse_ls_sshmux_prompt_skipped() {
+        let e = parse_ls(&ls(
+            "SSHMUX> ls -la /tmp\ntotal 12\n-rw-r--r--    ? u g 42 Jan  1  2020 data.csv",
+        ));
+        assert_eq!(e.len(), 2); // ".." + data.csv
+    }
+
+    #[test]
+    fn parse_ls_empty_input() {
+        let e = parse_ls(&[]);
+        assert_eq!(e.len(), 1); // only synthetic ".."
+        assert_eq!(e[0].name, "..");
+    }
+
+    #[test]
+    fn parse_ls_only_noise() {
+        let e = parse_ls(&ls("sftp>\ntotal 0\nls -la /tmp"));
+        assert_eq!(e.len(), 1);
+    }
+
+    // ---- strip_ansi (additional edge cases) --------------------------------
+
+    #[test]
+    fn strip_ansi_esc_at_end_of_buffer() {
+        // ESC at very end — should not panic
+        assert_eq!(strip_ansi(b"text\x1b"), "text");
+    }
+
+    #[test]
+    fn strip_ansi_partial_csi_at_end() {
+        // Incomplete CSI sequence
+        assert_eq!(strip_ansi(b"text\x1b[32"), "text");
+    }
+
+    #[test]
+    fn strip_ansi_multiple_sequences() {
+        assert_eq!(
+            strip_ansi(b"\x1b[32m\x1b[1mhi\x1b[0m"),
+            "hi"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_osc_with_st_terminator() {
+        // OSC terminated by ESC \ instead of BEL
+        assert_eq!(strip_ansi(b"\x1b]0;title\x1b\\text"), "text");
+    }
+
+    #[test]
+    fn strip_ansi_mixed_content() {
+        assert_eq!(
+            strip_ansi(b"hello \x1b[31mred\x1b[0m world"),
+            "hello red world"
+        );
+    }
+
+    // ---- human_size (additional edge cases) --------------------------------
+
+    #[test]
+    fn hs_tb() {
+        assert_eq!(human_size(1024u64 * 1024 * 1024 * 1024), "1.0 TB");
+    }
+
+    #[test]
+    fn hs_just_under_kb() {
+        assert_eq!(human_size(1023), "1023 B");
     }
 }

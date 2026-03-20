@@ -8,8 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListState, StatefulWidget, Widget},
 };
 
-use crate::sftp::FileBrowser;
-use crate::ssh_browser::SshBrowser;
+use crate::browser::{FileBrowser, SshBrowser};
 use crate::ssh_config::SshHost;
 use crate::terminal::EmbeddedTerminal;
 
@@ -653,5 +652,121 @@ mod tests {
         });
         assert_eq!(inner.width, 0);
         assert_eq!(inner.height, 0);
+    }
+
+    // ---- leaf_mut ----------------------------------------------------------
+
+    #[test]
+    fn leaf_mut_single() {
+        let mut p = connect();
+        assert!(p.leaf_mut(0).is_some());
+        assert!(p.leaf_mut(1).is_none());
+    }
+
+    #[test]
+    fn leaf_mut_split() {
+        let mut p = hsplit();
+        assert!(p.leaf_mut(0).is_some());
+        assert!(p.leaf_mut(1).is_some());
+        assert!(p.leaf_mut(2).is_none());
+    }
+
+    #[test]
+    fn leaf_mut_nested() {
+        let mut p = Pane::Split {
+            kind: Split::Horizontal,
+            children: vec![connect(), vsplit()],
+        };
+        assert!(p.leaf_mut(0).is_some());
+        assert!(p.leaf_mut(1).is_some());
+        assert!(p.leaf_mut(2).is_some());
+        assert!(p.leaf_mut(3).is_none());
+    }
+
+    #[test]
+    fn leaf_mut_modifies_correct_pane() {
+        let mut p = hsplit();
+        // Replace leaf 1 with a differently-configured connect pane
+        if let Some(pane) = p.leaf_mut(1) {
+            *pane = connect();
+        }
+        assert!(matches!(p.leaf(1), Some(Pane::Connect { .. })));
+    }
+
+    // ---- split_leaf --------------------------------------------------------
+
+    #[test]
+    fn split_leaf_increases_count() {
+        let mut p = hsplit();
+        p.split_leaf(0, Split::Vertical);
+        assert_eq!(p.leaf_count(), 3);
+    }
+
+    #[test]
+    fn split_leaf_nested() {
+        let mut p = Pane::Split {
+            kind: Split::Horizontal,
+            children: vec![connect(), vsplit()],
+        };
+        p.split_leaf(2, Split::Horizontal);
+        assert_eq!(p.leaf_count(), 4);
+    }
+
+    #[test]
+    fn split_leaf_noop_on_single() {
+        // split_leaf on a non-Split pane is a no-op
+        let mut p = connect();
+        p.split_leaf(0, Split::Horizontal);
+        assert_eq!(p.leaf_count(), 1);
+    }
+
+    // ---- remove_leaf (additional) ------------------------------------------
+
+    #[test]
+    fn remove_leaf_collapses_to_single() {
+        let mut p = hsplit();
+        remove_leaf(&mut p, 0);
+        // After removing one child from a 2-child split, it collapses
+        assert!(matches!(p, Pane::Connect { .. }));
+    }
+
+    #[test]
+    fn remove_leaf_deep_nested() {
+        // 4-leaf tree: split(connect, split(connect, split(connect, connect)))
+        let mut p = Pane::Split {
+            kind: Split::Horizontal,
+            children: vec![
+                connect(),
+                Pane::Split {
+                    kind: Split::Vertical,
+                    children: vec![
+                        connect(),
+                        Pane::Split {
+                            kind: Split::Horizontal,
+                            children: vec![connect(), connect()],
+                        },
+                    ],
+                },
+            ],
+        };
+        assert_eq!(p.leaf_count(), 4);
+        remove_leaf(&mut p, 3); // remove deepest right leaf
+        assert_eq!(p.leaf_count(), 3);
+    }
+
+    // ---- split_areas (additional) ------------------------------------------
+
+    #[test]
+    fn split_areas_single_element() {
+        let a = split_areas(r(100, 50), &Split::Horizontal, 1);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0], r(100, 50));
+    }
+
+    #[test]
+    fn split_areas_vertical_remainder_to_last() {
+        let a = split_areas(r(80, 31), &Split::Vertical, 2);
+        assert_eq!(a[0].height + a[1].height, 31);
+        assert_eq!(a[1].height, 16); // gets the remainder
     }
 }

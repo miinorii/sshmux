@@ -20,17 +20,14 @@ use std::sync::atomic::Ordering;
 
 mod app;
 mod pane;
-mod sftp;
-mod sftp_parse;
-mod ssh_browser;
+mod browser;
 mod ssh_config;
 mod tab;
 mod terminal;
 
 use app::{App, content_area};
 use pane::{Pane, Split, pane_inner};
-use sftp::{BrowserFocus, SftpState};
-use ssh_browser::SshBrowserState;
+use browser::{BrowserFocus, SftpState, SshBrowserState};
 
 // ---------------------------------------------------------------------------
 // Logging macro (available to all modules via #[macro_use] or re-export)

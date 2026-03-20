@@ -10,8 +10,7 @@ use ratatui::{
 };
 
 use crate::pane::{Pane, pane_inner};
-use crate::sftp::FileBrowser;
-use crate::ssh_browser::SshBrowser;
+use crate::browser::{FileBrowser, SshBrowser};
 use crate::ssh_config::SshHost;
 use crate::tab::Tab;
 use crate::terminal::EmbeddedTerminal;

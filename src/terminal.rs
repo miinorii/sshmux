@@ -341,7 +341,7 @@ impl EmbeddedTerminal {
         let Ok(rb) = self.raw_output.lock() else {
             return vec![];
         };
-        crate::sftp_parse::strip_ansi(&rb)
+        crate::browser::parse::strip_ansi(&rb)
             .lines()
             .map(|l| l.trim_end().to_string())
             .collect()
