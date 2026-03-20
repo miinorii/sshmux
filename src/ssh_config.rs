@@ -62,10 +62,7 @@ mod tests {
     use super::*;
 
     fn parse(config: &str) -> Vec<String> {
-        parse_str(config)
-            .into_iter()
-            .map(|h| h.label)
-            .collect()
+        parse_str(config).into_iter().map(|h| h.label).collect()
     }
 
     #[test]

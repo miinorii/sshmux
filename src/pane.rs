@@ -30,10 +30,19 @@ pub enum Pane {
         list_state: ListState,
         browser_menu: Option<ListState>,
     },
-    Session { terminal: EmbeddedTerminal },
-    FileBrowser { browser: FileBrowser },
-    SshBrowser { browser: SshBrowser },
-    Split { kind: Split, children: Vec<Pane> },
+    Session {
+        terminal: EmbeddedTerminal,
+    },
+    FileBrowser {
+        browser: FileBrowser,
+    },
+    SshBrowser {
+        browser: SshBrowser,
+    },
+    Split {
+        kind: Split,
+        children: Vec<Pane>,
+    },
 }
 
 impl Pane {
@@ -48,7 +57,10 @@ impl Pane {
 
     pub fn leaf_areas(&self, area: Rect) -> Vec<Rect> {
         match self {
-            Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } | Pane::SshBrowser { .. } => vec![area],
+            Pane::Connect { .. }
+            | Pane::Session { .. }
+            | Pane::FileBrowser { .. }
+            | Pane::SshBrowser { .. } => vec![area],
             Pane::Split { kind, children } => {
                 let areas = split_areas(area, kind, children.len());
                 children
@@ -62,14 +74,20 @@ impl Pane {
 
     pub fn leaf_count(&self) -> usize {
         match self {
-            Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } | Pane::SshBrowser { .. } => 1,
+            Pane::Connect { .. }
+            | Pane::Session { .. }
+            | Pane::FileBrowser { .. }
+            | Pane::SshBrowser { .. } => 1,
             Pane::Split { children, .. } => children.iter().map(|c| c.leaf_count()).sum(),
         }
     }
 
     pub fn leaf_mut(&mut self, n: usize) -> Option<&mut Pane> {
         match self {
-            Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } | Pane::SshBrowser { .. } => {
+            Pane::Connect { .. }
+            | Pane::Session { .. }
+            | Pane::FileBrowser { .. }
+            | Pane::SshBrowser { .. } => {
                 if n == 0 {
                     Some(self)
                 } else {
@@ -92,7 +110,10 @@ impl Pane {
 
     pub fn leaf(&self, n: usize) -> Option<&Pane> {
         match self {
-            Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } | Pane::SshBrowser { .. } => {
+            Pane::Connect { .. }
+            | Pane::Session { .. }
+            | Pane::FileBrowser { .. }
+            | Pane::SshBrowser { .. } => {
                 if n == 0 {
                     Some(self)
                 } else {
@@ -115,7 +136,10 @@ impl Pane {
 
     pub fn split_leaf(&mut self, n: usize, kind: Split) {
         match self {
-            Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } | Pane::SshBrowser { .. } => {}
+            Pane::Connect { .. }
+            | Pane::Session { .. }
+            | Pane::FileBrowser { .. }
+            | Pane::SshBrowser { .. } => {}
             Pane::Split { children, .. } => {
                 let mut offset = 0;
                 for child in children.iter_mut() {
@@ -402,7 +426,10 @@ pub fn split_areas(area: Rect, kind: &Split, count: usize) -> Vec<Rect> {
 
 pub fn remove_leaf(pane: &mut Pane, n: usize) {
     match pane {
-        Pane::Connect { .. } | Pane::Session { .. } | Pane::FileBrowser { .. } | Pane::SshBrowser { .. } => {}
+        Pane::Connect { .. }
+        | Pane::Session { .. }
+        | Pane::FileBrowser { .. }
+        | Pane::SshBrowser { .. } => {}
         Pane::Split { children, .. } => {
             let mut offset = 0;
             let mut to_remove = None;

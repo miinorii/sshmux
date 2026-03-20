@@ -1,4 +1,7 @@
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 // ---------------------------------------------------------------------------
 // ANSI stripping
@@ -680,25 +683,20 @@ mod tests {
     #[test]
     fn scrape_progress_invalid_percent() {
         // "abc%" should not match (abc is not a u32)
-        assert_eq!(
-            scrape_transfer_progress(&["abc%".to_string()]),
-            None
-        );
+        assert_eq!(scrape_transfer_progress(&["abc%".to_string()]), None);
     }
 
     #[test]
     fn scrape_progress_negative_percent() {
         // "-5%" should not match (negative not valid u32)
-        assert_eq!(
-            scrape_transfer_progress(&["-5%".to_string()]),
-            None
-        );
+        assert_eq!(scrape_transfer_progress(&["-5%".to_string()]), None);
     }
 
     #[test]
     fn scrape_progress_scp_full_line() {
         // Realistic SCP output with \r-separated segments
-        let line = "demo.png   0%    0     0.0KB/s   --:-- ETA\rdemo.png 100%  125KB  62.5KB/s   00:02";
+        let line =
+            "demo.png   0%    0     0.0KB/s   --:-- ETA\rdemo.png 100%  125KB  62.5KB/s   00:02";
         assert_eq!(
             scrape_transfer_progress(&[line.to_string()]),
             Some("100%".to_string())
@@ -736,17 +734,13 @@ mod tests {
 
     #[test]
     fn parse_ls_unicode_filename() {
-        let e = parse_ls(&ls(
-            "-rw-r--r--    ? u g 100 Jan  1  2020 café.txt",
-        ));
+        let e = parse_ls(&ls("-rw-r--r--    ? u g 100 Jan  1  2020 café.txt"));
         assert!(e.iter().any(|x| x.name == "café.txt"));
     }
 
     #[test]
     fn parse_ls_sticky_bit() {
-        let e = parse_ls(&ls(
-            "drwxrwxrwt    ? root root 4096 Jan  1  2020 tmp",
-        ));
+        let e = parse_ls(&ls("drwxrwxrwt    ? root root 4096 Jan  1  2020 tmp"));
         let dir = e.iter().find(|x| x.name == "tmp");
         assert!(dir.is_some());
         assert!(dir.unwrap().is_dir);
@@ -755,9 +749,7 @@ mod tests {
 
     #[test]
     fn parse_ls_setuid_bit() {
-        let e = parse_ls(&ls(
-            "-rwsr-xr-x    ? root root 27104 Jan  1  2020 passwd",
-        ));
+        let e = parse_ls(&ls("-rwsr-xr-x    ? root root 27104 Jan  1  2020 passwd"));
         let f = e.iter().find(|x| x.name == "passwd");
         assert!(f.is_some());
         assert_eq!(f.unwrap().perms, "-rwsr-xr-x");
@@ -766,26 +758,20 @@ mod tests {
     #[test]
     fn parse_ls_block_device_skipped() {
         // Block devices start with 'b', not '-', 'd', or 'l' — should be skipped
-        let e = parse_ls(&ls(
-            "brw-rw----    ? root disk 8 Jan  1  2020 0 sda",
-        ));
+        let e = parse_ls(&ls("brw-rw----    ? root disk 8 Jan  1  2020 0 sda"));
         // Only the synthetic ".." entry
         assert_eq!(e.len(), 1);
     }
 
     #[test]
     fn parse_ls_char_device_skipped() {
-        let e = parse_ls(&ls(
-            "crw-rw-rw-    ? root tty 5 Jan  1  2020 0 tty",
-        ));
+        let e = parse_ls(&ls("crw-rw-rw-    ? root tty 5 Jan  1  2020 0 tty"));
         assert_eq!(e.len(), 1);
     }
 
     #[test]
     fn parse_ls_zero_size() {
-        let e = parse_ls(&ls(
-            "-rw-r--r--    ? u g 0 Jan  1  2020 empty.txt",
-        ));
+        let e = parse_ls(&ls("-rw-r--r--    ? u g 0 Jan  1  2020 empty.txt"));
         let f = e.iter().find(|x| x.name == "empty.txt").unwrap();
         assert_eq!(f.size, "0 B");
     }
@@ -836,10 +822,7 @@ mod tests {
 
     #[test]
     fn strip_ansi_multiple_sequences() {
-        assert_eq!(
-            strip_ansi(b"\x1b[32m\x1b[1mhi\x1b[0m"),
-            "hi"
-        );
+        assert_eq!(strip_ansi(b"\x1b[32m\x1b[1mhi\x1b[0m"), "hi");
     }
 
     #[test]

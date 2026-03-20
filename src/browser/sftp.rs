@@ -1,7 +1,4 @@
-use std::{
-    path::PathBuf,
-    time::Instant,
-};
+use std::{path::PathBuf, time::Instant};
 
 use anyhow::Result;
 use log::{debug, info, warn};
@@ -225,9 +222,10 @@ impl FileBrowser {
                     let lines = self.sftp.raw_lines();
                     if let Some(ref mut t) = self.last_transfer {
                         if t.is_dir {
-                            let count = lines.iter().filter(|l| {
-                                l.contains("Fetching ") || l.contains("Uploading ")
-                            }).count();
+                            let count = lines
+                                .iter()
+                                .filter(|l| l.contains("Fetching ") || l.contains("Uploading "))
+                                .count();
                             if count != t.file_count {
                                 t.file_count = count;
                                 self.needs_redraw = true;
@@ -245,7 +243,10 @@ impl FileBrowser {
                     let lines = self.sftp.raw_lines();
                     let has_error = lines.iter().any(|l| {
                         let t = l.to_lowercase();
-                        t.contains("failure") || t.contains("couldn't") || t.contains("not empty") || t.contains("permission denied")
+                        t.contains("failure")
+                            || t.contains("couldn't")
+                            || t.contains("not empty")
+                            || t.contains("permission denied")
                     });
                     if let Some(name) = self.pending_delete_name.take() {
                         if has_error {
@@ -508,7 +509,12 @@ impl FileBrowser {
             let local_dest = self.local_path.to_string_lossy().replace('\\', "/");
             let flag = if entry.is_dir { "-r " } else { "" };
             let remote_file = format!("{}/{}", self.remote_path.trim_end_matches('/'), entry.name);
-            let cmd = format!("get {}{} {}/\r\n", flag, shell_quote(&remote_file), local_dest);
+            let cmd = format!(
+                "get {}{} {}/\r\n",
+                flag,
+                shell_quote(&remote_file),
+                local_dest
+            );
             self.last_transfer = Some(TransferStatus {
                 filename: entry.name.clone(),
                 direction: TransferDirection::Download,
@@ -538,7 +544,12 @@ impl FileBrowser {
             let local_path = self.local_path.join(&entry.name);
             let local_str = local_path.to_string_lossy().replace('\\', "/");
             let flag = if entry.is_dir { "-r " } else { "" };
-            let cmd = format!("put {}{} {}/\r\n", flag, shell_quote(&local_str), shell_quote(&self.remote_path));
+            let cmd = format!(
+                "put {}{} {}/\r\n",
+                flag,
+                shell_quote(&local_str),
+                shell_quote(&self.remote_path)
+            );
             self.last_transfer = Some(TransferStatus {
                 filename: entry.name.clone(),
                 direction: TransferDirection::Upload,
@@ -784,7 +795,11 @@ impl FileBrowser {
             BrowserFocus::Remote => self.remote_path.clone(),
         };
 
-        let border_col = if is_active { Color::Cyan } else { Color::DarkGray };
+        let border_col = if is_active {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_col))
@@ -809,13 +824,12 @@ impl FileBrowser {
                     .iter()
                     .map(|p| p.to_string_lossy().to_string())
                     .collect();
-                let list = List::new(items)
-                    .highlight_style(
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    );
+                let list = List::new(items).highlight_style(
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                );
                 StatefulWidget::render(list, inner, buf, drive_sel);
                 return;
             }
@@ -853,9 +867,17 @@ impl FileBrowser {
         let meta_width: usize = 9 + 1 + 16 + 1 + 10; // size + gap + modified + gap + perms
 
         // Find the longest display name to align metadata columns
-        let max_name_len = entries.iter().map(|e| {
-            if e.is_dir { e.name.len() + 1 } else { e.name.len() }
-        }).max().unwrap_or(0);
+        let max_name_len = entries
+            .iter()
+            .map(|e| {
+                if e.is_dir {
+                    e.name.len() + 1
+                } else {
+                    e.name.len()
+                }
+            })
+            .max()
+            .unwrap_or(0);
 
         // Virtual row width: at least panel width so metadata is right-aligned
         let virtual_width = (max_name_len + 1 + meta_width).max(w);
@@ -884,13 +906,7 @@ impl FileBrowser {
                 let meta = format!("{:>9} {:<16} {:<10}", e.size, e.modified, e.perms);
                 let name_len = display_name.chars().count();
                 let gap = virtual_width - meta_width - name_len;
-                let full = format!(
-                    "{}{:gap$}{}",
-                    display_name,
-                    "",
-                    meta,
-                    gap = gap,
-                );
+                let full = format!("{}{:gap$}{}", display_name, "", meta, gap = gap,);
 
                 let scrolled: String = full.chars().skip(sx).take(w).collect();
                 let padded = format!("{:<width$}", scrolled, width = w);
@@ -903,7 +919,8 @@ impl FileBrowser {
                 };
 
                 if visible_name_chars == 0 {
-                    let line = Line::from(Span::styled(padded, Style::default().fg(Color::DarkGray)));
+                    let line =
+                        Line::from(Span::styled(padded, Style::default().fg(Color::DarkGray)));
                     ListItem::new(line)
                 } else {
                     let name_part: String = padded.chars().take(visible_name_chars).collect();
@@ -917,13 +934,16 @@ impl FileBrowser {
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(if is_active { Color::Cyan } else { Color::DarkGray })
-                    .add_modifier(Modifier::BOLD),
-            );
+        let list = List::new(items).highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(if is_active {
+                    Color::Cyan
+                } else {
+                    Color::DarkGray
+                })
+                .add_modifier(Modifier::BOLD),
+        );
         StatefulWidget::render(list, inner, buf, list_state);
     }
 
@@ -951,9 +971,7 @@ impl FileBrowser {
 
         let (state_label, state_col) = match self.sftp_state {
             SftpState::Connecting => ("[connecting]", Color::Yellow),
-            SftpState::WaitingPwd | SftpState::WaitingLs => {
-                ("[loading]", Color::Yellow)
-            }
+            SftpState::WaitingPwd | SftpState::WaitingLs => ("[loading]", Color::Yellow),
             SftpState::Idle => ("[idle]", self.status_color),
             SftpState::WaitingDelete => ("[deleting]", Color::Yellow),
             SftpState::Transferring => ("[transfer]", Color::Green),
@@ -1001,10 +1019,7 @@ impl FileBrowser {
                 format!(" {}{}", self.status_msg, progress_suffix),
                 Style::default().fg(msg_color),
             ),
-            Span::styled(
-                duration_suffix,
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(duration_suffix, Style::default().fg(Color::DarkGray)),
         ]);
         buf.set_line(area.x, area.y, &left_line, help_x.saturating_sub(area.x));
 

@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::Result;
-use log::{info, error};
+use log::{error, info};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::{
     buffer::Buffer,
@@ -49,11 +49,7 @@ pub struct EmbeddedTerminal {
 }
 
 impl EmbeddedTerminal {
-    pub fn new(
-        rows: u16,
-        cols: u16,
-        cmd: CommandBuilder,
-    ) -> Result<Self> {
+    pub fn new(rows: u16, cols: u16, cmd: CommandBuilder) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows,

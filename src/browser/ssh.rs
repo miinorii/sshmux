@@ -1,10 +1,7 @@
-use std::{
-    path::PathBuf,
-    time::Instant,
-};
+use std::{path::PathBuf, time::Instant};
 
 use anyhow::Result;
-use log::{debug, info, warn, error};
+use log::{debug, error, info, warn};
 use portable_pty::CommandBuilder;
 use ratatui::{
     buffer::Buffer,
@@ -14,11 +11,11 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, StatefulWidget, Widget},
 };
 
-use super::sftp::{BrowserFocus, TransferDirection, TransferStatus};
 use super::parse::{
     FsEntry, list_drives, parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress,
     shell_quote, strip_ansi,
 };
+use super::sftp::{BrowserFocus, TransferDirection, TransferStatus};
 use crate::terminal::EmbeddedTerminal;
 
 // ---------------------------------------------------------------------------
@@ -355,7 +352,11 @@ impl SshBrowser {
                         debug!("SSH delete line[{}]: {:?}", i, line);
                     }
                     // Skip command echo (first line) when checking for errors
-                    let output_lines = if lines.len() > 1 { &lines[1..] } else { &lines[..] };
+                    let output_lines = if lines.len() > 1 {
+                        &lines[1..]
+                    } else {
+                        &lines[..]
+                    };
                     let has_error = output_lines.iter().any(|l| {
                         let t = l.to_lowercase();
                         t.contains("cannot remove")
@@ -656,7 +657,10 @@ impl SshBrowser {
             cmd.arg(format!("{}:{}", self.host, remote_file));
             cmd.arg(&*local_dest);
             cmd.env("TERM", "xterm");
-            info!("SCP download: {}:{} -> {}", self.host, remote_file, local_dest);
+            info!(
+                "SCP download: {}:{} -> {}",
+                self.host, remote_file, local_dest
+            );
 
             match EmbeddedTerminal::new(24, 80, cmd) {
                 Ok(term) => {
@@ -711,7 +715,12 @@ impl SshBrowser {
                 self.remote_path.trim_end_matches('/')
             ));
             cmd.env("TERM", "xterm");
-            info!("SCP upload: {} -> {}:{}", local_str, self.host, self.remote_path.trim_end_matches('/'));
+            info!(
+                "SCP upload: {} -> {}:{}",
+                local_str,
+                self.host,
+                self.remote_path.trim_end_matches('/')
+            );
 
             match EmbeddedTerminal::new(24, 80, cmd) {
                 Ok(term) => {
@@ -795,11 +804,8 @@ impl SshBrowser {
                     }
                     let full_path = self.local_path.join(&entry.name);
                     let kind = if entry.is_dir { "dir" } else { "file" };
-                    self.confirm_delete = Some(format!(
-                        "local:{}:{}",
-                        kind,
-                        full_path.to_string_lossy()
-                    ));
+                    self.confirm_delete =
+                        Some(format!("local:{}:{}", kind, full_path.to_string_lossy()));
                     self.needs_redraw = true;
                 }
             }
@@ -813,11 +819,8 @@ impl SshBrowser {
                     if entry.name == ".." || self.ssh_state != SshBrowserState::Idle {
                         return;
                     }
-                    let full_path = format!(
-                        "{}/{}",
-                        self.remote_path.trim_end_matches('/'),
-                        entry.name
-                    );
+                    let full_path =
+                        format!("{}/{}", self.remote_path.trim_end_matches('/'), entry.name);
                     let kind = if entry.is_dir { "dir" } else { "file" };
                     self.confirm_delete = Some(format!("remote:{}:{}", kind, full_path));
                     self.needs_redraw = true;
@@ -1018,7 +1021,11 @@ impl SshBrowser {
             BrowserFocus::Remote => self.remote_path.clone(),
         };
 
-        let border_col = if is_active { Color::Cyan } else { Color::DarkGray };
+        let border_col = if is_active {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_col))
@@ -1121,13 +1128,7 @@ impl SshBrowser {
                 let meta = format!("{:>9} {:<16} {:<10}", e.size, e.modified, e.perms);
                 let name_len = display_name.chars().count();
                 let gap = virtual_width - meta_width - name_len;
-                let full = format!(
-                    "{}{:gap$}{}",
-                    display_name,
-                    "",
-                    meta,
-                    gap = gap,
-                );
+                let full = format!("{}{:gap$}{}", display_name, "", meta, gap = gap,);
 
                 let scrolled: String = full.chars().skip(sx).take(w).collect();
                 let padded = format!("{:<width$}", scrolled, width = w);
@@ -1139,10 +1140,8 @@ impl SshBrowser {
                 };
 
                 if visible_name_chars == 0 {
-                    let line = Line::from(Span::styled(
-                        padded,
-                        Style::default().fg(Color::DarkGray),
-                    ));
+                    let line =
+                        Line::from(Span::styled(padded, Style::default().fg(Color::DarkGray)));
                     ListItem::new(line)
                 } else {
                     let name_part: String = padded.chars().take(visible_name_chars).collect();
@@ -1159,7 +1158,11 @@ impl SshBrowser {
         let list = List::new(items).highlight_style(
             Style::default()
                 .fg(Color::Black)
-                .bg(if is_active { Color::Cyan } else { Color::DarkGray })
+                .bg(if is_active {
+                    Color::Cyan
+                } else {
+                    Color::DarkGray
+                })
                 .add_modifier(Modifier::BOLD),
         );
         StatefulWidget::render(list, inner, buf, list_state);
@@ -1239,10 +1242,7 @@ impl SshBrowser {
 
         let left_line = Line::from(vec![
             Span::styled(
-                format!(
-                    "[{}]",
-                    state_label.trim_matches(|c| c == '[' || c == ']')
-                ),
+                format!("[{}]", state_label.trim_matches(|c| c == '[' || c == ']')),
                 Style::default().fg(state_col).add_modifier(Modifier::BOLD),
             ),
             Span::styled(

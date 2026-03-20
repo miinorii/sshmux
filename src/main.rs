@@ -16,15 +16,15 @@ use std::sync::atomic::Ordering;
 // ---------------------------------------------------------------------------
 
 mod app;
-mod pane;
 mod browser;
+mod pane;
 mod ssh_config;
 mod tab;
 mod terminal;
 
 use app::{App, content_area};
-use pane::{Pane, Split, pane_inner};
 use browser::{BrowserFocus, SftpState, SshBrowserState};
+use pane::{Pane, Split, pane_inner};
 
 // ---------------------------------------------------------------------------
 // main
@@ -155,21 +155,28 @@ fn main() -> Result<()> {
                         // Check if browser menu is open
                         let menu_open = matches!(
                             app.tab().focused_pane(),
-                            Some(Pane::Connect { browser_menu: Some(_), .. })
+                            Some(Pane::Connect {
+                                browser_menu: Some(_),
+                                ..
+                            })
                         );
 
                         if menu_open {
                             match key.code {
                                 KeyCode::Up => {
-                                    if let Some(Pane::Connect { browser_menu: Some(ms), .. }) =
-                                        app.tab_mut().focused_pane_mut()
+                                    if let Some(Pane::Connect {
+                                        browser_menu: Some(ms),
+                                        ..
+                                    }) = app.tab_mut().focused_pane_mut()
                                     {
                                         ms.select_previous();
                                     }
                                 }
                                 KeyCode::Down => {
-                                    if let Some(Pane::Connect { browser_menu: Some(ms), .. }) =
-                                        app.tab_mut().focused_pane_mut()
+                                    if let Some(Pane::Connect {
+                                        browser_menu: Some(ms),
+                                        ..
+                                    }) = app.tab_mut().focused_pane_mut()
                                     {
                                         ms.select_next();
                                     }
@@ -353,8 +360,7 @@ fn main() -> Result<()> {
                     );
 
                     if focused_is_ssh_browser {
-                        if let Some(Pane::SshBrowser { browser }) =
-                            app.tab_mut().focused_pane_mut()
+                        if let Some(Pane::SshBrowser { browser }) = app.tab_mut().focused_pane_mut()
                         {
                             // Password prompt (both during connection and transfer)
                             if browser.waiting_password {
@@ -369,14 +375,11 @@ fn main() -> Result<()> {
                                         if browser.ssh_state == SshBrowserState::Transferring {
                                             browser.scp_pty = None;
                                             browser.ssh_state = SshBrowserState::Idle;
-                                            browser.status_msg =
-                                                "Transfer cancelled".to_string();
+                                            browser.status_msg = "Transfer cancelled".to_string();
                                         } else {
-                                            browser.status_msg =
-                                                "Password cancelled".to_string();
+                                            browser.status_msg = "Password cancelled".to_string();
                                         }
-                                        browser.status_color =
-                                            ratatui::style::Color::Yellow;
+                                        browser.status_color = ratatui::style::Color::Yellow;
                                     }
                                     _ => {}
                                 }
@@ -567,8 +570,7 @@ fn main() -> Result<()> {
                         );
                         if is_browser {
                             if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                                let leaf_count =
-                                    app.tabs[app.selected_tab].root.leaf_count();
+                                let leaf_count = app.tabs[app.selected_tab].root.leaf_count();
                                 if let Some(Pane::FileBrowser { browser }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
@@ -617,8 +619,7 @@ fn main() -> Result<()> {
                         );
                         if is_ssh_browser {
                             if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                                let leaf_count =
-                                    app.tabs[app.selected_tab].root.leaf_count();
+                                let leaf_count = app.tabs[app.selected_tab].root.leaf_count();
                                 if let Some(Pane::SshBrowser { browser }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
@@ -766,7 +767,16 @@ fn epoch_days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     let month_days = [
         31,
         if leap { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
     ];
     let mut mo = 1u64;
     for &md in &month_days {

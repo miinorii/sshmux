@@ -9,8 +9,8 @@ use ratatui::{
     widgets::{Block, Borders, Widget},
 };
 
-use crate::pane::{Pane, pane_inner};
 use crate::browser::{FileBrowser, SshBrowser};
+use crate::pane::{Pane, pane_inner};
 use crate::ssh_config::SshHost;
 use crate::tab::Tab;
 use crate::terminal::EmbeddedTerminal;
@@ -71,11 +71,7 @@ impl App {
         } else {
             pane_area
         };
-        let term = EmbeddedTerminal::ssh(
-            term_area.height,
-            term_area.width,
-            &host.label,
-        )?;
+        let term = EmbeddedTerminal::ssh(term_area.height, term_area.width, &host.label)?;
         if self.tab().leaf_count() == 1 {
             self.tab_mut().name = host.label.clone();
         }
