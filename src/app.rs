@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, atomic::Ordering};
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use ratatui::{
@@ -19,16 +19,14 @@ pub struct App {
     pub tabs: Vec<Tab>,
     pub selected_tab: usize,
     pub hosts: Vec<SshHost>,
-    pub log: Option<Arc<Mutex<std::fs::File>>>,
 }
 
 impl App {
-    pub fn new(log: Option<Arc<Mutex<std::fs::File>>>) -> Self {
+    pub fn new() -> Self {
         App {
             tabs: vec![Tab::new("1")],
             selected_tab: 0,
             hosts: crate::ssh_config::parse_ssh_config(),
-            log,
         }
     }
 
@@ -77,7 +75,6 @@ impl App {
             term_area.height,
             term_area.width,
             &host.label,
-            self.log.clone(),
         )?;
         if self.tab().leaf_count() == 1 {
             self.tab_mut().name = host.label.clone();
@@ -94,7 +91,7 @@ impl App {
             .get(host_idx)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("invalid host"))?;
-        let browser = FileBrowser::new(&host.label, self.log.clone())?;
+        let browser = FileBrowser::new(&host.label)?;
         if self.tab().leaf_count() == 1 {
             self.tab_mut().name = format!("sftp:{}", host.label);
         }
@@ -110,7 +107,7 @@ impl App {
             .get(host_idx)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("invalid host"))?;
-        let browser = SshBrowser::new(&host.label, self.log.clone())?;
+        let browser = SshBrowser::new(&host.label)?;
         if self.tab().leaf_count() == 1 {
             self.tab_mut().name = format!("scp:{}", host.label);
         }

@@ -7,8 +7,8 @@ use std::{
     thread,
 };
 
-use crate::log;
 use anyhow::Result;
+use log::debug;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::{
     buffer::Buffer,
@@ -52,7 +52,6 @@ impl EmbeddedTerminal {
         rows: u16,
         cols: u16,
         cmd: CommandBuilder,
-        log: Option<Arc<Mutex<std::fs::File>>>,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
@@ -82,7 +81,6 @@ impl EmbeddedTerminal {
         let cursor_visible_c = Arc::clone(&cursor_visible);
         let raw_output_c = Arc::clone(&raw_output);
         let exited_c = Arc::clone(&exited);
-        let log_c = log.clone();
 
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
@@ -90,7 +88,7 @@ impl EmbeddedTerminal {
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
-                        log!(log_c, "PTY EOF");
+                        debug!("PTY EOF");
                         exited_c.store(true, Ordering::Release);
                         break;
                     }
@@ -179,7 +177,7 @@ impl EmbeddedTerminal {
                         }
                     }
                     Err(e) => {
-                        log!(log_c, "PTY error: {}", e);
+                        debug!("PTY error: {}", e);
                         exited_c.store(true, Ordering::Release);
                         break;
                     }
@@ -204,38 +202,33 @@ impl EmbeddedTerminal {
     }
 
     /// Spawn an SSH interactive session to `host`.
-    pub fn ssh(
-        rows: u16,
-        cols: u16,
-        host: &str,
-        log: Option<Arc<Mutex<std::fs::File>>>,
-    ) -> Result<Self> {
+    pub fn ssh(rows: u16, cols: u16, host: &str) -> Result<Self> {
         let mut cmd = CommandBuilder::new("ssh");
         cmd.arg(host);
         cmd.arg("-t");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        log!(log, "SSH spawned {}x{} host={}", cols, rows, host);
-        Self::new(rows, cols, cmd, log)
+        debug!("SSH spawned {}x{} host={}", cols, rows, host);
+        Self::new(rows, cols, cmd)
     }
 
     /// Spawn an SFTP subsession to `host` (small fixed size, never rendered).
-    pub fn sftp(host: &str, log: Option<Arc<Mutex<std::fs::File>>>) -> Result<Self> {
+    pub fn sftp(host: &str) -> Result<Self> {
         let mut cmd = CommandBuilder::new("sftp");
         cmd.arg(host);
         cmd.env("TERM", "dumb");
-        log!(log, "SFTP spawned host={}", host);
-        Self::new(200, 220, cmd, log)
+        debug!("SFTP spawned host={}", host);
+        Self::new(200, 220, cmd)
     }
 
     /// Spawn an SSH shell to `host` for browsing (fixed size, parsed not rendered).
-    pub fn ssh_shell(host: &str, log: Option<Arc<Mutex<std::fs::File>>>) -> Result<Self> {
+    pub fn ssh_shell(host: &str) -> Result<Self> {
         let mut cmd = CommandBuilder::new("ssh");
         cmd.arg(host);
         cmd.arg("-t");
         cmd.env("TERM", "dumb");
-        log!(log, "SSH shell spawned host={}", host);
-        Self::new(200, 220, cmd, log)
+        debug!("SSH shell spawned host={}", host);
+        Self::new(200, 220, cmd)
     }
 
     pub fn send_str(&mut self, s: &str) {

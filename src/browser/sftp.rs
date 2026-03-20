@@ -1,11 +1,10 @@
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex},
     time::Instant,
 };
 
-use crate::log;
 use anyhow::Result;
+use log::debug;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -13,7 +12,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, StatefulWidget, Widget},
 };
-use std::io::Write;
 
 use super::parse::{
     FsEntry, list_drives, parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress,
@@ -84,7 +82,6 @@ pub struct FileBrowser {
     pub confirm_delete: Option<String>,
     pub pending_delete_name: Option<String>,
     pub drive_picker: Option<(Vec<PathBuf>, ListState)>,
-    pub log: Option<Arc<Mutex<std::fs::File>>>,
     pub status_color: Color,
     pub cmd_start: Option<Instant>,
     pub last_duration: Option<std::time::Duration>,
@@ -93,8 +90,8 @@ pub struct FileBrowser {
 }
 
 impl FileBrowser {
-    pub fn new(host: &str, log: Option<Arc<Mutex<std::fs::File>>>) -> Result<Self> {
-        let sftp = EmbeddedTerminal::sftp(host, log.clone())?;
+    pub fn new(host: &str) -> Result<Self> {
+        let sftp = EmbeddedTerminal::sftp(host)?;
         let local_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let local_entries = read_local_dir(&local_path);
         let mut local_sel = ListState::default();
@@ -122,7 +119,6 @@ impl FileBrowser {
             confirm_delete: None,
             pending_delete_name: None,
             drive_picker: None,
-            log: log.clone(),
             status_color: Color::Yellow,
             cmd_start: None,
             last_duration: None,
@@ -161,7 +157,7 @@ impl FileBrowser {
                     self.sftp_state = SftpState::WaitingPwd;
                     self.status_msg = format!("Connected to {}", self.host);
                     self.status_color = Color::Green;
-                    log!(self.log, "SFTP connected to {}, sent pwd", self.host);
+                    debug!("SFTP connected to {}, sent pwd", self.host);
                     self.needs_redraw = true;
                 }
             }
@@ -171,7 +167,7 @@ impl FileBrowser {
                     let lines = self.sftp.raw_lines();
                     self.remote_path =
                         parse_pwd(&lines).unwrap_or_else(|| self.remote_path.clone());
-                    log!(self.log, "SFTP pwd => {}, sending ls -la", self.remote_path);
+                    debug!("SFTP pwd => {}, sending ls -la", self.remote_path);
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
                     self.send_ls();
@@ -187,7 +183,7 @@ impl FileBrowser {
                         self.remote_path = p;
                     }
                     let parsed = parse_ls(&lines);
-                    log!(self.log, "SFTP ls done: {} entries", parsed.len());
+                    debug!("SFTP ls done: {} entries", parsed.len());
                     self.remote_entries = parsed;
                     self.raw_snapshot.clear();
                     let max = self.remote_entries.len().saturating_sub(1);
@@ -220,7 +216,7 @@ impl FileBrowser {
                         self.status_color = Color::Green;
                     }
                     self.local_entries = read_local_dir(&self.local_path);
-                    log!(self.log, "SFTP transfer complete");
+                    debug!("SFTP transfer complete");
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
                     self.send_ls();
@@ -251,7 +247,7 @@ impl FileBrowser {
                         let t = l.to_lowercase();
                         t.contains("failure") || t.contains("couldn't") || t.contains("not empty") || t.contains("permission denied")
                     });
-                    log!(self.log, "SFTP WaitingDelete complete, error={}", has_error);
+                    debug!("SFTP WaitingDelete complete, error={}", has_error);
                     if let Some(name) = self.pending_delete_name.take() {
                         if has_error {
                             self.status_msg = format!("Delete failed: {}", name);
@@ -402,7 +398,7 @@ impl FileBrowser {
                             self.prompt_stable = 0;
                             self.send_ls();
                             self.sftp_state = SftpState::WaitingLs;
-                            log!(self.log, "SFTP ls {}", self.remote_path);
+                            debug!("SFTP ls {}", self.remote_path);
                         } else {
                             self.download();
                         }
@@ -492,7 +488,7 @@ impl FileBrowser {
                 self.prompt_stable = 0;
                 self.send_ls();
                 self.sftp_state = SftpState::WaitingLs;
-                log!(self.log, "SFTP ls {}", self.remote_path);
+                debug!("SFTP ls {}", self.remote_path);
             }
         }
     }
@@ -523,7 +519,7 @@ impl FileBrowser {
             });
             self.status_msg = format!("Downloading {}...", entry.name);
             self.status_color = Color::Yellow;
-            log!(self.log, "SFTP get {} -> {}", entry.name, local_dest);
+            debug!("SFTP get {} -> {}", entry.name, local_dest);
             self.sftp.send_str(&cmd);
             self.sftp_state = SftpState::Transferring;
         }
@@ -553,7 +549,7 @@ impl FileBrowser {
             });
             self.status_msg = format!("Uploading {}...", entry.name);
             self.status_color = Color::Yellow;
-            log!(self.log, "SFTP put {}", local_str);
+            debug!("SFTP put {}", local_str);
             self.sftp.send_str(&cmd);
             self.sftp_state = SftpState::Transferring;
         }

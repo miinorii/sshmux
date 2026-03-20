@@ -1,7 +1,4 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
@@ -9,9 +6,9 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use log::debug;
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, widgets::ListState};
 
-use std::io::Write;
 use std::sync::atomic::Ordering;
 
 // ---------------------------------------------------------------------------
@@ -30,33 +27,36 @@ use pane::{Pane, Split, pane_inner};
 use browser::{BrowserFocus, SftpState, SshBrowserState};
 
 // ---------------------------------------------------------------------------
-// Logging macro (available to all modules via #[macro_use] or re-export)
-// ---------------------------------------------------------------------------
-
-/// Write a line to the debug log file.
-/// When `$log` is `None` (debug mode not enabled) this is a no-op.
-#[macro_export]
-macro_rules! log {
-    ($log:expr, $($arg:tt)*) => {{
-        if let Some(ref log_inner) = $log {
-            if let Ok(mut f) = log_inner.lock() {
-                writeln!(f, $($arg)*).ok();
-            }
-        }
-    }};
-}
-
-// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<()> {
-    let debug = std::env::args().any(|a| a == "--debug");
-    let log_file: Option<Arc<Mutex<std::fs::File>>> = if debug {
-        Some(Arc::new(Mutex::new(std::fs::File::create("debug.log")?)))
-    } else {
-        None
-    };
+    let is_debug = std::env::args().any(|a| a == "--debug");
+    if is_debug {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = now.as_secs();
+        // Convert epoch to YYYYMMDD_HHMMSS (UTC)
+        let s = secs % 60;
+        let m = (secs / 60) % 60;
+        let h = (secs / 3600) % 24;
+        let days = secs / 86400;
+        // Simple date from days since epoch
+        let (y, mo, d) = epoch_days_to_ymd(days);
+        let filename = format!("sshmux-debug-{y:04}{mo:02}{d:02}_{h:02}{m:02}{s:02}.log");
+        let file = std::fs::File::create(&filename)?;
+        simplelog::WriteLogger::init(
+            simplelog::LevelFilter::Debug,
+            simplelog::ConfigBuilder::new()
+                .set_time_format_custom(time::macros::format_description!(
+                    "[year]-[month]-[day] [hour]:[minute]:[second]"
+                ))
+                .build(),
+            file,
+        )
+        .ok();
+    }
 
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -69,7 +69,7 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(log_file.clone());
+    let mut app = App::new();
     let mut last_area = {
         let s = terminal.size()?;
         Rect {
@@ -194,12 +194,12 @@ fn main() -> Result<()> {
                                         match mi {
                                             0 => {
                                                 if let Err(e) = app.open_browser(idx) {
-                                                    log!(log_file, "open_browser error: {}", e);
+                                                    debug!("open_browser error: {}", e);
                                                 }
                                             }
                                             1 => {
                                                 if let Err(e) = app.open_ssh_browser(idx) {
-                                                    log!(log_file, "open_ssh_browser error: {}", e);
+                                                    debug!("open_ssh_browser error: {}", e);
                                                 }
                                             }
                                             _ => {}
@@ -253,7 +253,7 @@ fn main() -> Result<()> {
                                 };
                                 if let Some(idx) = selected {
                                     if let Err(e) = app.open_session(idx, last_area) {
-                                        log!(log_file, "open_session error: {}", e);
+                                        debug!("open_session error: {}", e);
                                     }
                                     app.resize_all(last_area);
                                 }
@@ -728,7 +728,7 @@ fn main() -> Result<()> {
                         height: h,
                     };
                     app.resize_all(last_area);
-                    log!(log_file, "resize {}x{}", w, h);
+                    debug!("resize {}x{}", w, h);
                 }
                 _ => {}
             }
@@ -748,4 +748,36 @@ fn main() -> Result<()> {
             })?;
         }
     }
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+fn epoch_days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    let mut y = 1970;
+    loop {
+        let year_days = if is_leap(y) { 366 } else { 365 };
+        if days < year_days {
+            break;
+        }
+        days -= year_days;
+        y += 1;
+    }
+    let leap = is_leap(y);
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+    ];
+    let mut mo = 1u64;
+    for &md in &month_days {
+        if days < md {
+            break;
+        }
+        days -= md;
+        mo += 1;
+    }
+    (y, mo, days + 1)
+}
+
+fn is_leap(y: u64) -> bool {
+    y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
 }
