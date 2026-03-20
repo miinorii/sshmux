@@ -201,11 +201,11 @@ WaitingLs ── send "ls -la\r\n"
     v
 Idle <──────────────────────────────────────────────┐
     │                                               │
-    ├── cd dir ──> WaitingLs ──────────────────────┘
+    ├── cd dir ──> WaitingLs ───────────────────────┘
     │
-    ├── transfer ──> Transferring (scp process) ───┘
+    ├── transfer ──> Transferring (scp process) ────┘
     │
-    └── rm ──> WaitingDelete ──> WaitingLs ────────┘
+    └── rm ──> WaitingDelete ──> WaitingLs ─────────┘
 ```
 
 Transfers spawn a separate `scp` process (new SSH connection). Password prompts during SCP are detected and forwarded to the user.
