@@ -312,6 +312,33 @@ fn main() -> Result<()> {
                         if let Some(Pane::SshBrowser { browser }) =
                             app.tab_mut().focused_pane_mut()
                         {
+                            // Password prompt (both during connection and transfer)
+                            if browser.waiting_password {
+                                match key.code {
+                                    KeyCode::Char(c) => browser.password_char(c),
+                                    KeyCode::Backspace => browser.password_backspace(),
+                                    KeyCode::Enter => browser.submit_password(),
+                                    KeyCode::Esc => {
+                                        browser.waiting_password = false;
+                                        browser.password_buf.clear();
+                                        browser.needs_redraw = true;
+                                        if browser.ssh_state == SshBrowserState::Transferring {
+                                            browser.scp_pty = None;
+                                            browser.ssh_state = SshBrowserState::Idle;
+                                            browser.status_msg =
+                                                "Transfer cancelled".to_string();
+                                        } else {
+                                            browser.status_msg =
+                                                "Password cancelled".to_string();
+                                        }
+                                        browser.status_color =
+                                            ratatui::style::Color::Yellow;
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+
                             // During connecting/setting prompt, forward keystrokes to SSH PTY
                             if matches!(
                                 browser.ssh_state,

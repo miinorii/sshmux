@@ -15,7 +15,6 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, StatefulWidget, Widget},
 };
 use std::io::Write;
-use std::sync::atomic::Ordering;
 
 use crate::sftp::{BrowserFocus, TransferDirection, TransferStatus};
 use crate::sftp_parse::{
@@ -73,6 +72,10 @@ pub struct SshBrowser {
     pub last_duration: Option<std::time::Duration>,
     pub local_scroll_x: usize,
     pub remote_scroll_x: usize,
+    pub saved_password: Option<String>,
+    pub password_buf: String,
+    pub waiting_password: bool,
+    pub password_prompts_seen: usize,
 }
 
 impl SshBrowser {
@@ -112,23 +115,79 @@ impl SshBrowser {
             last_duration: None,
             local_scroll_x: 0,
             remote_scroll_x: 0,
+            saved_password: None,
+            password_buf: String::new(),
+            waiting_password: false,
+            password_prompts_seen: 0,
         })
     }
 
     pub fn tick(&mut self) {
         // --- SCP transfer monitoring ---
         if self.ssh_state == SshBrowserState::Transferring {
-            if let Some(ref scp) = self.scp_pty {
+            if self.waiting_password {
+                return; // waiting for user input, don't process
+            }
+            if let Some(ref mut scp) = self.scp_pty {
+                let exited = scp.process_exited();
                 let lines = scp.raw_lines();
+
+                // Detect password prompt
+                let pw_count = lines
+                    .iter()
+                    .filter(|l| l.trim().to_lowercase().ends_with("password:"))
+                    .count();
+                if pw_count > self.password_prompts_seen {
+                    self.password_prompts_seen = pw_count;
+                    if let Some(ref pw) = self.saved_password {
+                        if pw_count > 1 {
+                            // Password was rejected, ask again
+                            log!(self.log, "SCP password rejected, re-prompting");
+                            self.saved_password = None;
+                            self.password_buf.clear();
+                            self.waiting_password = true;
+                            self.status_msg = "Wrong password, try again".to_string();
+                            self.status_color = Color::Red;
+                            self.needs_redraw = true;
+                        } else {
+                            // Auto-send saved password
+                            log!(self.log, "SCP auto-sending saved password");
+                            scp.send_str(&format!("{}\r\n", pw));
+                            if let Some(ref t) = self.last_transfer {
+                                let verb = match t.direction {
+                                    TransferDirection::Download => "Downloading",
+                                    TransferDirection::Upload => "Uploading",
+                                };
+                                self.status_msg = format!("{}...", verb);
+                            }
+                            self.status_color = Color::Yellow;
+                            self.needs_redraw = true;
+                        }
+                    } else {
+                        // No saved password, prompt user
+                        log!(self.log, "SCP password prompt detected, asking user");
+                        self.waiting_password = true;
+                        self.password_buf.clear();
+                        self.status_msg = "SCP requires password".to_string();
+                        self.status_color = Color::Yellow;
+                        self.needs_redraw = true;
+                    }
+                    return;
+                }
+
+                let pct = scrape_transfer_progress(&lines);
+
                 if let Some(ref mut t) = self.last_transfer {
-                    if let Some(pct) = scrape_transfer_progress(&lines) {
-                        if pct != t.progress {
-                            t.progress = pct;
+                    if let Some(ref pct) = pct {
+                        if *pct != t.progress {
+                            t.progress = pct.clone();
                             self.needs_redraw = true;
                         }
                     }
                 }
-                if scp.exited.load(Ordering::Acquire) {
+
+                if exited {
+                    log!(self.log, "SCP transfer done (process exited)");
                     let completion_msg = self.last_transfer.as_mut().map(|t| {
                         t.done = true;
                         t.progress = "100%".to_string();
@@ -154,6 +213,45 @@ impl SshBrowser {
                 }
             }
             return;
+        }
+
+        // --- SSH connection password detection ---
+        if self.ssh_state == SshBrowserState::Connecting && !self.waiting_password {
+            let lines = self.ssh.raw_lines();
+            let pw_count = lines
+                .iter()
+                .filter(|l| l.trim().to_lowercase().ends_with("password:"))
+                .count();
+            if pw_count > self.password_prompts_seen {
+                self.password_prompts_seen = pw_count;
+                if let Some(ref pw) = self.saved_password {
+                    if pw_count > 1 {
+                        log!(self.log, "SSH password rejected, re-prompting");
+                        self.saved_password = None;
+                        self.password_buf.clear();
+                        self.waiting_password = true;
+                        self.status_msg = "Wrong password, try again".to_string();
+                        self.status_color = Color::Red;
+                    } else {
+                        log!(self.log, "SSH auto-sending saved password");
+                        self.ssh.send_str(&format!("{}\r\n", pw));
+                        self.status_msg = "Authenticating...".to_string();
+                        self.status_color = Color::Yellow;
+                    }
+                } else {
+                    log!(self.log, "SSH password prompt detected, asking user");
+                    self.waiting_password = true;
+                    self.password_buf.clear();
+                    self.status_msg = "SSH requires password".to_string();
+                    self.status_color = Color::Yellow;
+                }
+                self.needs_redraw = true;
+                return;
+            }
+        }
+
+        if self.ssh_state == SshBrowserState::Connecting && self.waiting_password {
+            return; // waiting for user password input
         }
 
         // --- SSH prompt stability ---
@@ -194,6 +292,7 @@ impl SshBrowser {
                     self.ssh
                         .send_str("PS1='SSHMUX> '; PS2=''; unset PROMPT_COMMAND 2>/dev/null\r\n");
                     self.ssh_state = SshBrowserState::SettingPrompt;
+                    self.password_prompts_seen = 0;
                     self.status_msg = format!("Setting prompt on {}", self.host);
                     self.status_color = Color::Yellow;
                     log!(self.log, "SSH shell detected on {}, setting PS1", self.host);
@@ -550,12 +649,14 @@ impl SshBrowser {
             let remote_file = format!("{}/{}", self.remote_path.trim_end_matches('/'), entry.name);
 
             let mut cmd = CommandBuilder::new("scp");
+            cmd.arg("-O");
             if entry.is_dir {
                 cmd.arg("-r");
             }
             cmd.arg(format!("{}:{}", self.host, remote_file));
             cmd.arg(&*local_dest);
-            cmd.env("TERM", "dumb");
+            cmd.env("TERM", "xterm");
+            log!(self.log, "SCP download cmd: scp -O {} {}:{} {}", if entry.is_dir { "-r" } else { "" }, self.host, remote_file, local_dest);
 
             match EmbeddedTerminal::new(24, 80, cmd, self.log.clone()) {
                 Ok(term) => {
@@ -571,6 +672,8 @@ impl SshBrowser {
                     self.status_msg = format!("Downloading {}...", entry.name);
                     self.status_color = Color::Yellow;
                     self.ssh_state = SshBrowserState::Transferring;
+                    self.password_prompts_seen = 0;
+                    self.waiting_password = false;
                     log!(self.log, "SCP get {} -> {}", entry.name, local_dest);
                 }
                 Err(e) => {
@@ -596,6 +699,7 @@ impl SshBrowser {
             let local_str = local_path.to_string_lossy().replace('\\', "/");
 
             let mut cmd = CommandBuilder::new("scp");
+            cmd.arg("-O");
             if entry.is_dir {
                 cmd.arg("-r");
             }
@@ -605,7 +709,8 @@ impl SshBrowser {
                 self.host,
                 self.remote_path.trim_end_matches('/')
             ));
-            cmd.env("TERM", "dumb");
+            cmd.env("TERM", "xterm");
+            log!(self.log, "SCP upload cmd: scp -O {} {} {}:{}", if entry.is_dir { "-r" } else { "" }, local_str, self.host, self.remote_path.trim_end_matches('/'));
 
             match EmbeddedTerminal::new(24, 80, cmd, self.log.clone()) {
                 Ok(term) => {
@@ -621,6 +726,8 @@ impl SshBrowser {
                     self.status_msg = format!("Uploading {}...", entry.name);
                     self.status_color = Color::Yellow;
                     self.ssh_state = SshBrowserState::Transferring;
+                    self.password_prompts_seen = 0;
+                    self.waiting_password = false;
                     log!(self.log, "SCP put {}", local_str);
                 }
                 Err(e) => {
@@ -630,6 +737,44 @@ impl SshBrowser {
             }
             self.needs_redraw = true;
         }
+    }
+
+    // ---- password input for SCP auth ----------------------------------------
+
+    pub fn password_char(&mut self, c: char) {
+        self.password_buf.push(c);
+        self.needs_redraw = true;
+    }
+
+    pub fn password_backspace(&mut self) {
+        self.password_buf.pop();
+        self.needs_redraw = true;
+    }
+
+    pub fn submit_password(&mut self) {
+        let pw = self.password_buf.clone();
+        if self.ssh_state == SshBrowserState::Connecting {
+            // Send password to the SSH PTY for connection auth
+            log!(self.log, "SSH sending user password ({} chars)", pw.len());
+            self.ssh.send_str(&format!("{}\r\n", pw));
+            self.status_msg = "Authenticating...".to_string();
+        } else if let Some(ref mut scp) = self.scp_pty {
+            // Send password to the SCP PTY for transfer auth
+            log!(self.log, "SCP sending user password ({} chars)", pw.len());
+            scp.send_str(&format!("{}\r\n", pw));
+            if let Some(ref t) = self.last_transfer {
+                let verb = match t.direction {
+                    TransferDirection::Download => "Downloading",
+                    TransferDirection::Upload => "Uploading",
+                };
+                self.status_msg = format!("{}...", verb);
+            }
+        }
+        self.saved_password = Some(pw);
+        self.password_buf.clear();
+        self.waiting_password = false;
+        self.status_color = Color::Yellow;
+        self.needs_redraw = true;
     }
 
     // ---- delete ------------------------------------------------------------
@@ -1022,6 +1167,22 @@ impl SshBrowser {
                 Style::default()
                     .fg(Color::White)
                     .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            );
+            buf.set_span(area.x, area.y, &span, area.width);
+            return;
+        }
+
+        if self.waiting_password {
+            let stars = "*".repeat(self.password_buf.len());
+            let text = format!("  Password: {}\u{2588}", stars);
+            let pad = (area.width as usize).saturating_sub(text.chars().count());
+            let msg = format!("{}{}", text, " ".repeat(pad));
+            let span = Span::styled(
+                msg,
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
             );
             buf.set_span(area.x, area.y, &span, area.width);

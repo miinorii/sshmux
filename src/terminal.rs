@@ -9,7 +9,7 @@ use std::{
 
 use crate::log;
 use anyhow::Result;
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -44,6 +44,7 @@ pub struct EmbeddedTerminal {
     pub cols: u16,
     pub raw_output: Arc<Mutex<Vec<u8>>>,
     pub exited: Arc<AtomicBool>,
+    pub child: Option<Arc<Mutex<Box<dyn Child + Send + Sync>>>>,
 }
 
 impl EmbeddedTerminal {
@@ -64,7 +65,8 @@ impl EmbeddedTerminal {
         let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
         let mut reader = pair.master.try_clone_reader()?;
 
-        pair.slave.spawn_command(cmd)?;
+        let child_handle = pair.slave.spawn_command(cmd)?;
+        drop(pair.slave); // drop slave so PTY EOF is signalled on Windows when child exits
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let dirty = Arc::new(AtomicBool::new(false));
@@ -197,6 +199,7 @@ impl EmbeddedTerminal {
             cols,
             raw_output,
             exited,
+            child: Some(Arc::new(Mutex::new(child_handle))),
         })
     }
 
@@ -352,5 +355,21 @@ impl EmbeddedTerminal {
 
     pub fn raw_len(&self) -> usize {
         self.raw_output.lock().map(|rb| rb.len()).unwrap_or(0)
+    }
+
+    /// Non-blocking check whether the child process has exited.
+    pub fn process_exited(&self) -> bool {
+        if self.exited.load(Ordering::Acquire) {
+            return true;
+        }
+        if let Some(ref child) = self.child {
+            if let Ok(mut c) = child.lock() {
+                if let Ok(Some(_status)) = c.try_wait() {
+                    self.exited.store(true, Ordering::Release);
+                    return true;
+                }
+            }
+        }
+        false
     }
 }

@@ -165,8 +165,11 @@ pub fn skip_n_tokens(line: &str, n: usize) -> &str {
 /// Scrape a transfer progress percentage from sftp output lines.
 pub fn scrape_transfer_progress(lines: &[String]) -> Option<String> {
     lines.iter().rev().find_map(|l| {
-        let l = l.trim();
-        l.split_whitespace()
+        // SCP uses \r to overwrite progress on the same line; take the last segment.
+        let segment = l.rsplit('\r').next().unwrap_or(l);
+        let segment = segment.trim();
+        segment
+            .split_whitespace()
             .find(|tok| tok.ends_with('%') && tok.trim_end_matches('%').parse::<u32>().is_ok())
             .map(|s| s.to_string())
     })
