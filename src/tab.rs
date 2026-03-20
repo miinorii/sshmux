@@ -66,6 +66,7 @@ impl Tab {
         } else {
             self.root.split_leaf(n, kind);
         }
+        self.focus_idx = n + 1;
         self.root.resize_all(area, self.leaf_count() > 1);
     }
 
