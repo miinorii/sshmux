@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::Result;
-use log::debug;
+use log::{info, error};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::{
     buffer::Buffer,
@@ -91,7 +91,7 @@ impl EmbeddedTerminal {
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
-                        debug!("PTY EOF");
+                        info!("PTY EOF");
                         exited_c.store(true, Ordering::Release);
                         break;
                     }
@@ -183,7 +183,7 @@ impl EmbeddedTerminal {
                         }
                     }
                     Err(e) => {
-                        debug!("PTY error: {}", e);
+                        error!("PTY read error: {}", e);
                         exited_c.store(true, Ordering::Release);
                         break;
                     }
@@ -215,7 +215,7 @@ impl EmbeddedTerminal {
         cmd.arg("-t");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        debug!("SSH spawned {}x{} host={}", cols, rows, host);
+        info!("SSH session {}x{} host={}", cols, rows, host);
         Self::new(rows, cols, cmd)
     }
 
@@ -224,7 +224,7 @@ impl EmbeddedTerminal {
         let mut cmd = CommandBuilder::new("sftp");
         cmd.arg(host);
         cmd.env("TERM", "dumb");
-        debug!("SFTP spawned host={}", host);
+        info!("SFTP session host={}", host);
         Self::new(200, 220, cmd)
     }
 
@@ -234,7 +234,7 @@ impl EmbeddedTerminal {
         cmd.arg(host);
         cmd.arg("-t");
         cmd.env("TERM", "dumb");
-        debug!("SSH shell spawned host={}", host);
+        info!("SSH shell host={}", host);
         Self::new(200, 220, cmd)
     }
 

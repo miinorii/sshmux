@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
-use log::debug;
+use log::{debug, info, warn, error};
 use portable_pty::CommandBuilder;
 use ratatui::{
     buffer::Buffer,
@@ -138,7 +138,7 @@ impl SshBrowser {
                     if let Some(ref pw) = self.saved_password {
                         if pw_count > 1 {
                             // Password was rejected, ask again
-                            debug!("SCP password rejected, re-prompting");
+                            warn!("SCP password rejected, re-prompting");
                             self.saved_password = None;
                             self.password_buf.clear();
                             self.waiting_password = true;
@@ -161,7 +161,7 @@ impl SshBrowser {
                         }
                     } else {
                         // No saved password, prompt user
-                        debug!("SCP password prompt detected, asking user");
+                        info!("SCP password prompt detected");
                         self.waiting_password = true;
                         self.password_buf.clear();
                         self.status_msg = "SCP requires password".to_string();
@@ -183,7 +183,7 @@ impl SshBrowser {
                 }
 
                 if exited {
-                    debug!("SCP transfer done (process exited)");
+                    info!("SCP transfer done (process exited)");
                     let completion_msg = self.last_transfer.as_mut().map(|t| {
                         t.done = true;
                         t.progress = "100%".to_string();
@@ -199,7 +199,7 @@ impl SshBrowser {
                     }
                     self.scp_pty = None;
                     self.local_entries = read_local_dir(&self.local_path);
-                    debug!("SCP transfer complete");
+                    info!("SCP transfer complete");
                     self.ssh.drain_raw();
                     self.prev_raw_len = 0;
                     self.prompt_stable = 0;
@@ -222,7 +222,7 @@ impl SshBrowser {
                 self.password_prompts_seen = pw_count;
                 if let Some(ref pw) = self.saved_password {
                     if pw_count > 1 {
-                        debug!("SSH password rejected, re-prompting");
+                        warn!("SSH password rejected, re-prompting");
                         self.saved_password = None;
                         self.password_buf.clear();
                         self.waiting_password = true;
@@ -235,7 +235,7 @@ impl SshBrowser {
                         self.status_color = Color::Yellow;
                     }
                 } else {
-                    debug!("SSH password prompt detected, asking user");
+                    info!("SSH password prompt detected");
                     self.waiting_password = true;
                     self.password_buf.clear();
                     self.status_msg = "SSH requires password".to_string();
@@ -291,7 +291,7 @@ impl SshBrowser {
                     self.password_prompts_seen = 0;
                     self.status_msg = format!("Setting prompt on {}", self.host);
                     self.status_color = Color::Yellow;
-                    debug!("SSH shell detected on {}, setting PS1", self.host);
+                    info!("SSH shell detected on {}, setting PS1", self.host);
                     self.needs_redraw = true;
                 }
             }
@@ -305,7 +305,7 @@ impl SshBrowser {
                     self.ssh_state = SshBrowserState::WaitingPwd;
                     self.status_msg = format!("Connected to {}", self.host);
                     self.status_color = Color::Green;
-                    debug!("SSH prompt set on {}, sent pwd", self.host);
+                    info!("SSH prompt set on {}", self.host);
                     self.needs_redraw = true;
                 }
             }
@@ -364,12 +364,9 @@ impl SshBrowser {
                             || t.contains("not empty")
                             || t.contains("directory not empty")
                     });
-                    debug!(
-                        "SSH WaitingDelete complete, error={}",
-                        has_error
-                    );
                     if let Some(name) = self.pending_delete_name.take() {
                         if has_error {
+                            warn!("SSH delete failed: {}", name);
                             self.status_msg = format!("Delete failed: {}", name);
                             self.status_color = Color::Red;
                         } else {
@@ -659,7 +656,7 @@ impl SshBrowser {
             cmd.arg(format!("{}:{}", self.host, remote_file));
             cmd.arg(&*local_dest);
             cmd.env("TERM", "xterm");
-            debug!("SCP download cmd: scp -O {} {}:{} {}", if entry.is_dir { "-r" } else { "" }, self.host, remote_file, local_dest);
+            info!("SCP download: {}:{} -> {}", self.host, remote_file, local_dest);
 
             match EmbeddedTerminal::new(24, 80, cmd) {
                 Ok(term) => {
@@ -677,9 +674,10 @@ impl SshBrowser {
                     self.ssh_state = SshBrowserState::Transferring;
                     self.password_prompts_seen = 0;
                     self.waiting_password = false;
-                    debug!("SCP get {} -> {}", entry.name, local_dest);
+                    info!("SCP get {} started", entry.name);
                 }
                 Err(e) => {
+                    error!("SCP spawn failed: {}", e);
                     self.status_msg = format!("SCP error: {}", e);
                     self.status_color = Color::Red;
                 }
@@ -713,7 +711,7 @@ impl SshBrowser {
                 self.remote_path.trim_end_matches('/')
             ));
             cmd.env("TERM", "xterm");
-            debug!("SCP upload cmd: scp -O {} {} {}:{}", if entry.is_dir { "-r" } else { "" }, local_str, self.host, self.remote_path.trim_end_matches('/'));
+            info!("SCP upload: {} -> {}:{}", local_str, self.host, self.remote_path.trim_end_matches('/'));
 
             match EmbeddedTerminal::new(24, 80, cmd) {
                 Ok(term) => {
@@ -731,9 +729,10 @@ impl SshBrowser {
                     self.ssh_state = SshBrowserState::Transferring;
                     self.password_prompts_seen = 0;
                     self.waiting_password = false;
-                    debug!("SCP put {}", local_str);
+                    info!("SCP put {} started", local_str);
                 }
                 Err(e) => {
+                    error!("SCP spawn failed: {}", e);
                     self.status_msg = format!("SCP error: {}", e);
                     self.status_color = Color::Red;
                 }
@@ -833,16 +832,18 @@ impl SshBrowser {
                 let is_dir = rest.starts_with("dir:");
                 let full_path = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
                 let path = std::path::PathBuf::from(full_path);
-                debug!("Local delete: {:?} is_dir={}", path, is_dir);
+                info!("local delete: {:?} is_dir={}", path, is_dir);
                 let result = if is_dir {
                     std::fs::remove_dir_all(&path)
                 } else {
                     std::fs::remove_file(&path)
                 };
                 if let Err(e) = result {
+                    error!("local delete failed: {:?}: {}", path, e);
                     self.status_msg = format!("Delete failed: {}", e);
                     self.status_color = Color::Red;
                 } else {
+                    info!("local delete ok: {}", full_path);
                     self.status_msg = format!("Deleted: {}", full_path);
                     self.status_color = Color::Green;
                     self.local_entries = read_local_dir(&self.local_path);
@@ -852,7 +853,7 @@ impl SshBrowser {
             } else if let Some(rest) = tagged.strip_prefix("remote:") {
                 let is_dir = rest.starts_with("dir:");
                 let full_path = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
-                debug!("Remote delete: {} is_dir={}", full_path, is_dir);
+                info!("remote delete: {} is_dir={}", full_path, is_dir);
                 let cmd = if is_dir {
                     format!("rm -rf -- {}\r\n", shell_quote(full_path))
                 } else {

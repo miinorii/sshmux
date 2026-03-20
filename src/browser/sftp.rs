@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
-use log::debug;
+use log::{debug, info, warn};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -157,7 +157,7 @@ impl FileBrowser {
                     self.sftp_state = SftpState::WaitingPwd;
                     self.status_msg = format!("Connected to {}", self.host);
                     self.status_color = Color::Green;
-                    debug!("SFTP connected to {}, sent pwd", self.host);
+                    info!("SFTP connected to {}", self.host);
                     self.needs_redraw = true;
                 }
             }
@@ -216,7 +216,7 @@ impl FileBrowser {
                         self.status_color = Color::Green;
                     }
                     self.local_entries = read_local_dir(&self.local_path);
-                    debug!("SFTP transfer complete");
+                    info!("SFTP transfer complete");
                     self.sftp.drain_raw();
                     self.prev_raw_len = 0;
                     self.send_ls();
@@ -247,9 +247,9 @@ impl FileBrowser {
                         let t = l.to_lowercase();
                         t.contains("failure") || t.contains("couldn't") || t.contains("not empty") || t.contains("permission denied")
                     });
-                    debug!("SFTP WaitingDelete complete, error={}", has_error);
                     if let Some(name) = self.pending_delete_name.take() {
                         if has_error {
+                            warn!("SFTP delete failed: {}", name);
                             self.status_msg = format!("Delete failed: {}", name);
                             self.status_color = Color::Red;
                         } else {
@@ -519,7 +519,7 @@ impl FileBrowser {
             });
             self.status_msg = format!("Downloading {}...", entry.name);
             self.status_color = Color::Yellow;
-            debug!("SFTP get {} -> {}", entry.name, local_dest);
+            info!("SFTP get {} -> {}", entry.name, local_dest);
             self.sftp.send_str(&cmd);
             self.sftp_state = SftpState::Transferring;
         }
@@ -549,7 +549,7 @@ impl FileBrowser {
             });
             self.status_msg = format!("Uploading {}...", entry.name);
             self.status_color = Color::Yellow;
-            debug!("SFTP put {}", local_str);
+            info!("SFTP put {}", local_str);
             self.sftp.send_str(&cmd);
             self.sftp_state = SftpState::Transferring;
         }
@@ -602,9 +602,11 @@ impl FileBrowser {
                     std::fs::remove_file(&path)
                 };
                 if let Err(e) = result {
+                    warn!("SFTP local delete failed: {:?}: {}", path, e);
                     self.status_msg = format!("Delete failed: {}", e);
                     self.status_color = Color::Red;
                 } else {
+                    info!("SFTP local delete ok: {}", name);
                     self.status_msg = format!("Deleted local: {}", name);
                     self.status_color = Color::Green;
                     self.local_entries = read_local_dir(&self.local_path);
@@ -615,6 +617,7 @@ impl FileBrowser {
                 let is_dir = rest.starts_with("dir:");
                 let name = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
                 let remote_file = format!("{}/{}", self.remote_path.trim_end_matches('/'), name);
+                info!("SFTP remote delete: {}", remote_file);
                 let cmd = if is_dir {
                     format!("rmdir {}\r\n", shell_quote(&remote_file))
                 } else {

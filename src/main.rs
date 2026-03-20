@@ -6,7 +6,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use log::debug;
+use log::{debug, error};
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, widgets::ListState};
 
 use std::sync::atomic::Ordering;
@@ -194,12 +194,12 @@ fn main() -> Result<()> {
                                         match mi {
                                             0 => {
                                                 if let Err(e) = app.open_browser(idx) {
-                                                    debug!("open_browser error: {}", e);
+                                                    error!("open_browser: {}", e);
                                                 }
                                             }
                                             1 => {
                                                 if let Err(e) = app.open_ssh_browser(idx) {
-                                                    debug!("open_ssh_browser error: {}", e);
+                                                    error!("open_ssh_browser: {}", e);
                                                 }
                                             }
                                             _ => {}
@@ -253,7 +253,7 @@ fn main() -> Result<()> {
                                 };
                                 if let Some(idx) = selected {
                                     if let Err(e) = app.open_session(idx, last_area) {
-                                        debug!("open_session error: {}", e);
+                                        error!("open_session: {}", e);
                                     }
                                     app.resize_all(last_area);
                                 }
