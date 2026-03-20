@@ -126,6 +126,9 @@ pub fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
             name
         };
 
+        // Strip shell quoting GNU ls adds in PTY mode (e.g. 'file name' or "file name")
+        let name = strip_shell_quote(&name);
+
         // Strip directory prefix (from `ls -la /path` output)
         let name = name.rsplit('/').next().unwrap_or(&name).to_string();
         if name.is_empty() || name == "." || name == ".." {
@@ -303,6 +306,26 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Remove shell-style quoting that GNU `ls` adds in PTY mode.
+/// Only strips if the inner content does NOT contain the same quote char,
+/// which avoids false positives on filenames that legitimately contain quotes.
+fn strip_shell_quote(s: &str) -> String {
+    let s = s.trim();
+    if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
+        let inner = &s[1..s.len() - 1];
+        if !inner.contains('\'') {
+            return inner.to_string();
+        }
+    }
+    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+        let inner = &s[1..s.len() - 1];
+        if !inner.contains('"') {
+            return inner.to_string();
+        }
+    }
+    s.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Re-export PathBuf for callers that need it via this module
 // ---------------------------------------------------------------------------
@@ -436,6 +459,23 @@ mod tests {
             "-rw-r--r--    ? u g 100 Jan  1  2020 my great file.txt",
         ));
         assert!(e.iter().any(|x| x.name == "my great file.txt"));
+    }
+
+    #[test]
+    fn parse_ls_shell_quoted_filename() {
+        // GNU ls wraps names with special chars in single quotes in PTY mode
+        let quoted_name = format!("'{}'", "file [1] (copy).txt");
+        let line = format!("-rw-r--r--    ? u g 100 Jan  1  2020 {}", quoted_name);
+        let e = parse_ls(&ls(&line));
+        assert!(e.iter().any(|x| x.name == "file [1] (copy).txt"));
+    }
+
+    #[test]
+    fn parse_ls_filename_with_internal_quote() {
+        // A filename like it's_a_file.txt must NOT be mangled
+        let line = "-rw-r--r--    ? u g 100 Jan  1  2020 it's_a_file.txt";
+        let e = parse_ls(&ls(line));
+        assert!(e.iter().any(|x| x.name == "it's_a_file.txt"));
     }
 
     // ---- strip_ansi --------------------------------------------------------

@@ -9,7 +9,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, widgets::ListState};
 
 use std::io::Write;
 use std::sync::atomic::Ordering;
@@ -155,6 +155,72 @@ fn main() -> Result<()> {
                     );
 
                     if focused_is_connect {
+                        // Check if browser menu is open
+                        let menu_open = matches!(
+                            app.tab().focused_pane(),
+                            Some(Pane::Connect { browser_menu: Some(_), .. })
+                        );
+
+                        if menu_open {
+                            match key.code {
+                                KeyCode::Up => {
+                                    if let Some(Pane::Connect { browser_menu: Some(ms), .. }) =
+                                        app.tab_mut().focused_pane_mut()
+                                    {
+                                        ms.select_previous();
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    if let Some(Pane::Connect { browser_menu: Some(ms), .. }) =
+                                        app.tab_mut().focused_pane_mut()
+                                    {
+                                        ms.select_next();
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    let (host_idx, menu_idx) = if let Some(Pane::Connect {
+                                        list_state,
+                                        browser_menu: Some(ms),
+                                    }) = app.tab().focused_pane()
+                                    {
+                                        (list_state.selected(), ms.selected())
+                                    } else {
+                                        (None, None)
+                                    };
+                                    // Close menu first
+                                    if let Some(Pane::Connect { browser_menu, .. }) =
+                                        app.tab_mut().focused_pane_mut()
+                                    {
+                                        *browser_menu = None;
+                                    }
+                                    if let (Some(idx), Some(mi)) = (host_idx, menu_idx) {
+                                        match mi {
+                                            0 => {
+                                                if let Err(e) = app.open_browser(idx) {
+                                                    log!(log_file, "open_browser error: {}", e);
+                                                }
+                                            }
+                                            1 => {
+                                                if let Err(e) = app.open_ssh_browser(idx) {
+                                                    log!(log_file, "open_ssh_browser error: {}", e);
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                KeyCode::Esc => {
+                                    if let Some(Pane::Connect { browser_menu, .. }) =
+                                        app.tab_mut().focused_pane_mut()
+                                    {
+                                        *browser_menu = None;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
                         match key.code {
                             KeyCode::Char('c') if ctrl && !alt => {
                                 disable_raw_mode()?;
@@ -167,21 +233,21 @@ fn main() -> Result<()> {
                                 return Ok(());
                             }
                             KeyCode::Up | KeyCode::Char('k') => {
-                                if let Some(Pane::Connect { list_state }) =
+                                if let Some(Pane::Connect { list_state, .. }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
                                     list_state.select_previous();
                                 }
                             }
                             KeyCode::Down | KeyCode::Char('j') => {
-                                if let Some(Pane::Connect { list_state }) =
+                                if let Some(Pane::Connect { list_state, .. }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
                                     list_state.select_next();
                                 }
                             }
                             KeyCode::Enter => {
-                                let selected = if let Some(Pane::Connect { list_state }) =
+                                let selected = if let Some(Pane::Connect { list_state, .. }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
                                     list_state.selected()
@@ -195,32 +261,13 @@ fn main() -> Result<()> {
                                     app.resize_all(last_area);
                                 }
                             }
-                            KeyCode::Char('b') => {
-                                let selected = if let Some(Pane::Connect { list_state }) =
+                            KeyCode::Char('b') | KeyCode::Char('B') => {
+                                if let Some(Pane::Connect { browser_menu, .. }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
-                                    list_state.selected()
-                                } else {
-                                    None
-                                };
-                                if let Some(idx) = selected {
-                                    if let Err(e) = app.open_browser(idx) {
-                                        log!(log_file, "open_browser error: {}", e);
-                                    }
-                                }
-                            }
-                            KeyCode::Char('B') => {
-                                let selected = if let Some(Pane::Connect { list_state }) =
-                                    app.tab_mut().focused_pane_mut()
-                                {
-                                    list_state.selected()
-                                } else {
-                                    None
-                                };
-                                if let Some(idx) = selected {
-                                    if let Err(e) = app.open_ssh_browser(idx) {
-                                        log!(log_file, "open_ssh_browser error: {}", e);
-                                    }
+                                    let mut ms = ListState::default();
+                                    ms.select(Some(0));
+                                    *browser_menu = Some(ms);
                                 }
                             }
                             _ => {}

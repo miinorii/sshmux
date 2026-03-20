@@ -355,7 +355,12 @@ impl SshBrowser {
                 if prompt_ready {
                     self.prompt_stable = 0;
                     let lines = self.ssh.raw_lines();
-                    let has_error = lines.iter().any(|l| {
+                    for (i, line) in lines.iter().enumerate() {
+                        log!(self.log, "SSH delete line[{}]: {:?}", i, line);
+                    }
+                    // Skip command echo (first line) when checking for errors
+                    let output_lines = if lines.len() > 1 { &lines[1..] } else { &lines[..] };
+                    let has_error = output_lines.iter().any(|l| {
                         let t = l.to_lowercase();
                         t.contains("cannot remove")
                             || t.contains("no such file")
@@ -551,7 +556,10 @@ impl SshBrowser {
     }
 
     fn send_ls(&mut self) {
-        let cmd = format!("ls -la {}\r\n", shell_quote(&self.remote_path));
+        let cmd = format!(
+            "ls -la --quoting-style=literal {}\r\n",
+            shell_quote(&self.remote_path)
+        );
         self.cmd_start = Some(Instant::now());
         self.ssh.send_str(&cmd);
     }
@@ -791,8 +799,13 @@ impl SshBrowser {
                     if entry.name == ".." {
                         return;
                     }
+                    let full_path = self.local_path.join(&entry.name);
                     let kind = if entry.is_dir { "dir" } else { "file" };
-                    self.confirm_delete = Some(format!("local:{}:{}", kind, entry.name));
+                    self.confirm_delete = Some(format!(
+                        "local:{}:{}",
+                        kind,
+                        full_path.to_string_lossy()
+                    ));
                     self.needs_redraw = true;
                 }
             }
@@ -806,8 +819,13 @@ impl SshBrowser {
                     if entry.name == ".." || self.ssh_state != SshBrowserState::Idle {
                         return;
                     }
+                    let full_path = format!(
+                        "{}/{}",
+                        self.remote_path.trim_end_matches('/'),
+                        entry.name
+                    );
                     let kind = if entry.is_dir { "dir" } else { "file" };
-                    self.confirm_delete = Some(format!("remote:{}:{}", kind, entry.name));
+                    self.confirm_delete = Some(format!("remote:{}:{}", kind, full_path));
                     self.needs_redraw = true;
                 }
             }
@@ -818,8 +836,9 @@ impl SshBrowser {
         if let Some(tagged) = self.confirm_delete.take() {
             if let Some(rest) = tagged.strip_prefix("local:") {
                 let is_dir = rest.starts_with("dir:");
-                let name = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
-                let path = self.local_path.join(name);
+                let full_path = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
+                let path = std::path::PathBuf::from(full_path);
+                log!(self.log, "Local delete: {:?} is_dir={}", path, is_dir);
                 let result = if is_dir {
                     std::fs::remove_dir_all(&path)
                 } else {
@@ -829,7 +848,7 @@ impl SshBrowser {
                     self.status_msg = format!("Delete failed: {}", e);
                     self.status_color = Color::Red;
                 } else {
-                    self.status_msg = format!("Deleted local: {}", name);
+                    self.status_msg = format!("Deleted: {}", full_path);
                     self.status_color = Color::Green;
                     self.local_entries = read_local_dir(&self.local_path);
                 }
@@ -837,19 +856,18 @@ impl SshBrowser {
                 self.needs_redraw = true;
             } else if let Some(rest) = tagged.strip_prefix("remote:") {
                 let is_dir = rest.starts_with("dir:");
-                let name = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
-                let remote_file = format!("{}/{}", self.remote_path.trim_end_matches('/'), name);
-                // SSH advantage: rm -rf works for non-empty dirs
+                let full_path = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
+                log!(self.log, "Remote delete: {} is_dir={}", full_path, is_dir);
                 let cmd = if is_dir {
-                    format!("rm -rf {}\r\n", shell_quote(&remote_file))
+                    format!("rm -rf -- {}\r\n", shell_quote(full_path))
                 } else {
-                    format!("rm {}\r\n", shell_quote(&remote_file))
+                    format!("rm -- {}\r\n", shell_quote(full_path))
                 };
                 self.ssh.send_str(&cmd);
                 self.ssh_state = SshBrowserState::WaitingDelete;
-                self.status_msg = format!("Deleting {}...", name);
+                self.status_msg = format!("Deleting {}...", full_path);
                 self.status_color = Color::Yellow;
-                self.pending_delete_name = Some(name.to_string());
+                self.pending_delete_name = Some(full_path.to_string());
                 self.ssh.drain_raw();
                 self.prev_raw_len = 0;
                 self.prompt_stable = 0;
@@ -946,7 +964,7 @@ impl SshBrowser {
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            let title = format!(" ssh: {} ", self.host);
+            let title = format!(" scp: {} ", self.host);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(border_style)

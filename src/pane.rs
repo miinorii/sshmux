@@ -27,7 +27,10 @@ pub enum Split {
 // ---------------------------------------------------------------------------
 
 pub enum Pane {
-    Connect { list_state: ListState },
+    Connect {
+        list_state: ListState,
+        browser_menu: Option<ListState>,
+    },
     Session { terminal: EmbeddedTerminal },
     FileBrowser { browser: FileBrowser },
     SshBrowser { browser: SshBrowser },
@@ -38,7 +41,10 @@ impl Pane {
     pub fn new_connect() -> Self {
         let mut ls = ListState::default();
         ls.select_first();
-        Pane::Connect { list_state: ls }
+        Pane::Connect {
+            list_state: ls,
+            browser_menu: None,
+        }
     }
 
     pub fn leaf_areas(&self, area: Rect) -> Vec<Rect> {
@@ -198,7 +204,10 @@ impl Pane {
         my_idx: &mut usize,
     ) {
         match self {
-            Pane::Connect { list_state } => {
+            Pane::Connect {
+                list_state,
+                browser_menu,
+            } => {
                 let is_focus = *my_idx == focus_idx;
                 *my_idx += 1;
 
@@ -219,7 +228,7 @@ impl Pane {
                     area
                 };
 
-                const HELP_LINES: u16 = 9;
+                const HELP_LINES: u16 = 8;
                 let list_area = Rect {
                     x: inner.x,
                     y: inner.y,
@@ -249,10 +258,9 @@ impl Pane {
                     ("Alt+W", "close pane / tab"),
                     ("Alt+-", "split vertical"),
                     ("Alt++", "split horizontal"),
-                    ("B", "sftp browser"),
-                    ("Shift+B", "ssh browser"),
-                    ("Alt+↑↓", "cycle pane focus"),
-                    ("Alt+←→", "switch tab"),
+                    ("B", "file browser"),
+                    ("Alt+\u{2191}\u{2193}", "cycle pane focus"),
+                    ("Alt+\u{2190}\u{2192}", "switch tab"),
                     ("Ctrl+C", "quit"),
                 ];
                 for (i, (key, desc)) in shortcuts.iter().enumerate() {
@@ -270,6 +278,36 @@ impl Pane {
                         ]),
                         help_area.width,
                     );
+                }
+
+                // Browser type picker overlay
+                if let Some(menu_state) = browser_menu {
+                    let menu_w = 36u16;
+                    let menu_h = 4u16; // border + 2 items + border
+                    let cx = inner.x + inner.width.saturating_sub(menu_w) / 2;
+                    let cy = inner.y + inner.height.saturating_sub(menu_h) / 2;
+                    let menu_area = Rect {
+                        x: cx,
+                        y: cy,
+                        width: menu_w.min(inner.width),
+                        height: menu_h.min(inner.height),
+                    };
+                    let menu_items = vec!["SFTP", "SCP (legacy, linux target)"];
+                    let menu_list = List::new(menu_items)
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(Color::Yellow))
+                                .title(" Browse with "),
+                        )
+                        .style(Style::default().fg(Color::White))
+                        .highlight_style(
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                        .highlight_symbol("> ");
+                    StatefulWidget::render(menu_list, menu_area, buf, menu_state);
                 }
             }
 

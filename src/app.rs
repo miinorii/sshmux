@@ -113,7 +113,7 @@ impl App {
             .ok_or_else(|| anyhow::anyhow!("invalid host"))?;
         let browser = SshBrowser::new(&host.label, self.log.clone())?;
         if self.tab().leaf_count() == 1 {
-            self.tab_mut().name = format!("ssh:{}", host.label);
+            self.tab_mut().name = format!("scp:{}", host.label);
         }
         if let Some(pane) = self.tab_mut().focused_pane_mut() {
             *pane = Pane::SshBrowser { browser };
