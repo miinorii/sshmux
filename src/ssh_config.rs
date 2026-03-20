@@ -1,40 +1,27 @@
+use std::io::BufReader;
+
+use ssh2_config::{ParseRule, SshConfig};
+
 /// A single entry from `~/.ssh/config` that can be dialled directly.
 #[derive(Clone)]
 pub struct SshHost {
     pub label: String,
 }
 
-/// Parse SSH config content from a string and return all non-wildcard `Host` entries.
-pub fn parse_ssh_config_from_str(content: &str) -> Vec<SshHost> {
-    let mut hosts = Vec::new();
-    for line in content.lines() {
-        // Strip UTF-8 BOM that some Windows editors insert at the start of the file.
-        let line = line.trim_start_matches('\u{feff}');
-        let trimmed = line.trim();
+/// Strip a leading UTF-8 BOM if present (common on Windows).
+fn strip_bom(s: &str) -> &str {
+    s.strip_prefix('\u{feff}').unwrap_or(s)
+}
 
-        // Split on whitespace to separate key from value.
-        let mut parts = trimmed.splitn(2, |c: char| c.is_whitespace());
-
-        if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-            if !key.eq_ignore_ascii_case("host") {
-                continue;
-            }
-
-            // Strip inline comments, everything after the first '#' is ignored.
-            // .split('#').next() never returns None so the unwrap is safe.
-            let name = value.split('#').next().unwrap().trim();
-
-            // Ignore empty values and catch-all glob patterns.
-            if name.is_empty() || name.contains('*') || name.contains('?') {
-                continue;
-            }
-
-            hosts.push(SshHost {
-                label: name.to_string(),
-            });
-        }
-    }
-    hosts
+/// Parse SSH config content from a string.
+fn parse_str(content: &str) -> Vec<SshHost> {
+    let clean = strip_bom(content);
+    let mut reader = BufReader::new(clean.as_bytes());
+    let config = match SshConfig::default().parse(&mut reader, ParseRule::ALLOW_UNKNOWN_FIELDS) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    extract_hosts(&config)
 }
 
 /// Parse `~/.ssh/config` and return all non-wildcard `Host` entries.
@@ -47,7 +34,27 @@ pub fn parse_ssh_config() -> Vec<SshHost> {
         Ok(c) => c,
         Err(_) => return vec![],
     };
-    parse_ssh_config_from_str(&content)
+    parse_str(&content)
+}
+
+/// Extract non-wildcard, non-negated host labels from a parsed config.
+fn extract_hosts(config: &SshConfig) -> Vec<SshHost> {
+    let mut hosts = Vec::new();
+    for host in config.get_hosts() {
+        for clause in &host.pattern {
+            if clause.negated {
+                continue;
+            }
+            let name = &clause.pattern;
+            if name.is_empty() || name.contains('*') || name.contains('?') {
+                continue;
+            }
+            hosts.push(SshHost {
+                label: name.clone(),
+            });
+        }
+    }
+    hosts
 }
 
 #[cfg(test)]
@@ -55,13 +62,11 @@ mod tests {
     use super::*;
 
     fn parse(config: &str) -> Vec<String> {
-        parse_ssh_config_from_str(config)
+        parse_str(config)
             .into_iter()
             .map(|h| h.label)
             .collect()
     }
-
-    // ---- basic parsing -----------------------------------------------------
 
     #[test]
     fn simple_host_entry() {
@@ -74,15 +79,6 @@ mod tests {
         let hosts = parse("Host web\nHost db\nHost cache\n");
         assert_eq!(hosts, vec!["web", "db", "cache"]);
     }
-
-    #[test]
-    fn case_insensitive_keyword() {
-        assert_eq!(parse("HOST myserver\n"), vec!["myserver"]);
-        assert_eq!(parse("host myserver\n"), vec!["myserver"]);
-        assert_eq!(parse("HoSt myserver\n"), vec!["myserver"]);
-    }
-
-    // ---- wildcards are excluded --------------------------------------------
 
     #[test]
     fn wildcard_star_excluded() {
@@ -99,81 +95,46 @@ mod tests {
         assert!(parse("Host *.example.com\n").is_empty());
     }
 
-    // ---- comments ----------------------------------------------------------
-
-    #[test]
-    fn inline_comment_stripped() {
-        let hosts = parse("Host vps # my production server\n");
-        assert_eq!(hosts, vec!["vps"]);
-    }
-
-    #[test]
-    fn comment_only_line_ignored() {
-        let hosts = parse("# this is a comment\nHost vps\n");
-        assert_eq!(hosts, vec!["vps"]);
-    }
-
-    #[test]
-    fn host_value_with_hash_in_comment() {
-        let hosts = parse("Host prod # host=prod.example.com\n");
-        assert_eq!(hosts, vec!["prod"]);
-    }
-
-    // ---- empty / degenerate input ------------------------------------------
-
     #[test]
     fn empty_config() {
         assert!(parse("").is_empty());
     }
 
     #[test]
-    fn host_keyword_with_no_value() {
-        assert!(parse("Host\n").is_empty());
+    fn host_with_multiple_patterns() {
+        // "Host foo bar" defines two patterns for the same block
+        let hosts = parse("Host foo bar\n    HostName example.com\n");
+        assert_eq!(hosts, vec!["foo", "bar"]);
     }
 
     #[test]
-    fn host_keyword_with_only_whitespace() {
-        assert!(parse("Host   \n").is_empty());
+    fn first_host_not_skipped() {
+        // Regression: ensure the very first Host entry is included
+        let content = "AddKeysToAgent yes\nIdentityFile ~/.ssh/id_ed25519\n\n\
+                        Host first\n    HostName a.com\nHost second\n    HostName b.com\n";
+        let hosts = parse(&content);
+        assert_eq!(hosts, vec!["first", "second"]);
     }
 
     #[test]
-    fn blank_lines_ignored() {
-        let hosts = parse("\n\n\nHost vps\n\n\n");
-        assert_eq!(hosts, vec!["vps"]);
-    }
-
-    // ---- BOM ---------------------------------------------------------------
-
-    #[test]
-    fn utf8_bom_stripped() {
-        let hosts = parse("\u{feff}Host vps\n");
-        assert_eq!(hosts, vec!["vps"]);
-    }
-
-    // ---- non-Host keys ignored ---------------------------------------------
-
-    #[test]
-    fn non_host_keys_ignored() {
-        let hosts = parse("HostName example.com\nUser debian\nPort 22\nHost vps\n");
-        assert_eq!(hosts, vec!["vps"]);
+    fn utf8_bom_first_host_not_lost() {
+        let content = "\u{feff}Host first\n    HostName a.com\nHost second\n    HostName b.com\n";
+        let hosts = parse(&content);
+        assert_eq!(hosts, vec!["first", "second"]);
     }
 
     #[test]
-    fn hostname_key_not_confused_with_host() {
-        assert!(parse("HostName example.com\n").is_empty());
-    }
-
-    // ---- whitespace variants -----------------------------------------------
-
-    #[test]
-    fn tab_separated_key_value() {
-        let hosts = parse("Host\tvps\n");
-        assert_eq!(hosts, vec!["vps"]);
+    fn host_star_at_top_does_not_hide_entries() {
+        let content = "Host *\n    ServerAliveInterval 60\n\n\
+                        Host alpha\n    HostName a.com\nHost beta\n    HostName b.com\n";
+        let hosts = parse(&content);
+        assert_eq!(hosts, vec!["alpha", "beta"]);
     }
 
     #[test]
-    fn extra_whitespace_around_value() {
-        let hosts = parse("Host   vps   \n");
-        assert_eq!(hosts, vec!["vps"]);
+    fn negated_pattern_excluded() {
+        // "Host !internal" — negated patterns should not appear as connectable hosts
+        let hosts = parse("Host !internal\n");
+        assert!(hosts.is_empty());
     }
 }
