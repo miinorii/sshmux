@@ -514,10 +514,8 @@ pub fn remove_leaf(pane: &mut Pane, n: usize) {
         }
     }
     // Collapse a Split that is down to a single child into that child directly.
-    if let Pane::Split { children, .. } = pane {
-        if children.len() == 1 {
-            *pane = children.remove(0);
-        }
+    if let Pane::Split { children, .. } = pane && children.len() == 1 {
+        *pane = children.remove(0);
     }
 }
 

@@ -87,13 +87,11 @@ impl Tab {
         } else {
             *pane_area
         };
-        if let Some(Pane::Session { terminal }) = self.root.leaf(self.focus_idx) {
-            if let Some((cx, cy)) = terminal.cursor_pos() {
-                let sx = inner.x + cx;
-                let sy = inner.y + cy;
-                if sx < inner.x + inner.width && sy < inner.y + inner.height {
-                    return Some((sx, sy));
-                }
+        if let Some(Pane::Session { terminal }) = self.root.leaf(self.focus_idx) && let Some((cx, cy)) = terminal.cursor_pos() {
+            let sx = inner.x + cx;
+            let sy = inner.y + cy;
+            if sx < inner.x + inner.width && sy < inner.y + inner.height {
+                return Some((sx, sy));
             }
         }
         None

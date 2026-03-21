@@ -58,12 +58,10 @@ pub fn strip_ansi(raw: &[u8]) -> String {
 
 /// Extract the remote working directory from `pwd` output.
 pub fn parse_pwd(lines: &[String]) -> Option<String> {
-    if let Some(l) = lines.iter().find(|l| l.contains("working directory")) {
-        if let Some(path) = l.splitn(2, ':').nth(1) {
-            let p = path.trim();
-            if !p.is_empty() {
-                return Some(p.to_string());
-            }
+    if let Some(l) = lines.iter().find(|l| l.contains("working directory")) && let Some(path) = l.split_once(':').map(|x| x.1) {
+        let p = path.trim();
+        if !p.is_empty() {
+            return Some(p.to_string());
         }
     }
     lines
@@ -126,7 +124,7 @@ pub fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
         }
 
         let name = if is_link {
-            name.splitn(2, " -> ").next().unwrap_or(&name).to_string()
+            name.split(" -> ").next().unwrap_or(&name).to_string()
         } else {
             name
         };
@@ -195,7 +193,7 @@ pub fn epoch_to_ymd(secs: u64) -> (u32, u32, u32, u32, u32) {
     let mut y = 1970u32;
     let mut d = days as u32;
     loop {
-        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let leap = y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
         let ydays = if leap { 366 } else { 365 };
         if d < ydays {
             break;
@@ -203,7 +201,7 @@ pub fn epoch_to_ymd(secs: u64) -> (u32, u32, u32, u32, u32) {
         d -= ydays;
         y += 1;
     }
-    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let leap = y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
     let month_days: [u32; 12] = [
         31,
         if leap { 29 } else { 28 },

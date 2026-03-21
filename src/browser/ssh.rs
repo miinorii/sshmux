@@ -170,13 +170,9 @@ impl SshBrowser {
 
                 let pct = scrape_transfer_progress(&lines);
 
-                if let Some(ref mut t) = self.last_transfer {
-                    if let Some(ref pct) = pct {
-                        if *pct != t.progress {
-                            t.progress = pct.clone();
-                            self.needs_redraw = true;
-                        }
-                    }
+                if let Some(ref mut t) = self.last_transfer && let Some(ref pct) = pct && *pct != t.progress {
+                    t.progress = pct.clone();
+                    self.needs_redraw = true;
                 }
 
                 if exited {
@@ -480,14 +476,10 @@ impl SshBrowser {
         match self.focus {
             BrowserFocus::Local => {
                 if self.drive_picker.is_some() {
-                    if let Some((drives, sel)) = self.drive_picker.take() {
-                        if let Some(i) = sel.selected() {
-                            if let Some(drive) = drives.get(i).cloned() {
-                                self.local_path = drive;
-                                self.local_entries = read_local_dir(&self.local_path);
-                                self.local_sel.select_first();
-                            }
-                        }
+                    if let Some((drives, sel)) = self.drive_picker.take() && let Some(i) = sel.selected() && let Some(drive) = drives.get(i).cloned() {
+                        self.local_path = drive;
+                        self.local_entries = read_local_dir(&self.local_path);
+                        self.local_sel.select_first();
                     }
                     self.needs_redraw = true;
                     return;
@@ -527,21 +519,19 @@ impl SshBrowser {
                 if self.ssh_state != SshBrowserState::Idle {
                     return;
                 }
-                if let Some(i) = self.remote_sel.selected() {
-                    if let Some(entry) = self.remote_entries.get(i).cloned() {
-                        if entry.is_dir {
-                            self.apply_cd(&entry.name);
-                            self.status_msg = format!("Remote: {}", self.remote_path);
-                            self.status_color = Color::Yellow;
-                            self.ssh.drain_raw();
-                            self.prev_raw_len = 0;
-                            self.prompt_stable = 0;
-                            self.send_ls();
-                            self.ssh_state = SshBrowserState::WaitingLs;
-                            debug!("SSH ls {}", self.remote_path);
-                        } else {
-                            self.download();
-                        }
+                if let Some(i) = self.remote_sel.selected() && let Some(entry) = self.remote_entries.get(i).cloned() {
+                    if entry.is_dir {
+                        self.apply_cd(&entry.name);
+                        self.status_msg = format!("Remote: {}", self.remote_path);
+                        self.status_color = Color::Yellow;
+                        self.ssh.drain_raw();
+                        self.prev_raw_len = 0;
+                        self.prompt_stable = 0;
+                        self.send_ls();
+                        self.ssh_state = SshBrowserState::WaitingLs;
+                        debug!("SSH ls {}", self.remote_path);
+                    } else {
+                        self.download();
                     }
                 }
             }
@@ -1043,21 +1033,19 @@ impl SshBrowser {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        if side == BrowserFocus::Local {
-            if let Some((drives, drive_sel)) = &mut self.drive_picker {
-                let items: Vec<String> = drives
-                    .iter()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .collect();
-                let list = List::new(items).highlight_style(
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                );
-                StatefulWidget::render(list, inner, buf, drive_sel);
-                return;
-            }
+        if side == BrowserFocus::Local && let Some((drives, drive_sel)) = &mut self.drive_picker {
+            let items: Vec<String> = drives
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            let list = List::new(items).highlight_style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            );
+            StatefulWidget::render(list, inner, buf, drive_sel);
+            return;
         }
 
         let (entries, list_state) = match side {

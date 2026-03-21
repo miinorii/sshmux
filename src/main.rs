@@ -694,25 +694,23 @@ fn main() -> Result<()> {
                                     );
                                 }
                             }
-                            if let MouseEventKind::Up(MouseButton::Left) = mouse.kind {
-                                if let Some(Pane::FileBrowser { browser }) =
-                                    app.tab_mut().focused_pane_mut()
-                                {
-                                    let inner = pane_inner(pane_area);
-                                    let half = inner.width / 2;
-                                    let in_remote = mouse.column >= inner.x + half;
-                                    let drag_from = browser.focus;
-                                    if in_remote && drag_from == BrowserFocus::Local {
-                                        browser.drag_local_to_remote();
-                                    } else if !in_remote && drag_from == BrowserFocus::Remote {
-                                        browser.drag_remote_to_local();
-                                    }
-                                    browser.focus = if in_remote {
-                                        BrowserFocus::Remote
-                                    } else {
-                                        BrowserFocus::Local
-                                    };
+                            if let MouseEventKind::Up(MouseButton::Left) = mouse.kind && let Some(Pane::FileBrowser { browser }) =
+                                app.tab_mut().focused_pane_mut()
+                            {
+                                let inner = pane_inner(pane_area);
+                                let half = inner.width / 2;
+                                let in_remote = mouse.column >= inner.x + half;
+                                let drag_from = browser.focus;
+                                if in_remote && drag_from == BrowserFocus::Local {
+                                    browser.drag_local_to_remote();
+                                } else if !in_remote && drag_from == BrowserFocus::Remote {
+                                    browser.drag_remote_to_local();
                                 }
+                                browser.focus = if in_remote {
+                                    BrowserFocus::Remote
+                                } else {
+                                    BrowserFocus::Local
+                                };
                             }
                             continue;
                         }
@@ -743,25 +741,23 @@ fn main() -> Result<()> {
                                     );
                                 }
                             }
-                            if let MouseEventKind::Up(MouseButton::Left) = mouse.kind {
-                                if let Some(Pane::SshBrowser { browser }) =
-                                    app.tab_mut().focused_pane_mut()
-                                {
-                                    let inner = pane_inner(pane_area);
-                                    let half = inner.width / 2;
-                                    let in_remote = mouse.column >= inner.x + half;
-                                    let drag_from = browser.focus;
-                                    if in_remote && drag_from == BrowserFocus::Local {
-                                        browser.drag_local_to_remote();
-                                    } else if !in_remote && drag_from == BrowserFocus::Remote {
-                                        browser.drag_remote_to_local();
-                                    }
-                                    browser.focus = if in_remote {
-                                        BrowserFocus::Remote
-                                    } else {
-                                        BrowserFocus::Local
-                                    };
+                            if let MouseEventKind::Up(MouseButton::Left) = mouse.kind && let Some(Pane::SshBrowser { browser }) =
+                                app.tab_mut().focused_pane_mut()
+                            {
+                                let inner = pane_inner(pane_area);
+                                let half = inner.width / 2;
+                                let in_remote = mouse.column >= inner.x + half;
+                                let drag_from = browser.focus;
+                                if in_remote && drag_from == BrowserFocus::Local {
+                                    browser.drag_local_to_remote();
+                                } else if !in_remote && drag_from == BrowserFocus::Remote {
+                                    browser.drag_remote_to_local();
                                 }
+                                browser.focus = if in_remote {
+                                    BrowserFocus::Remote
+                                } else {
+                                    BrowserFocus::Local
+                                };
                             }
                             continue;
                         }
@@ -942,5 +938,5 @@ fn epoch_days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 }
 
 fn is_leap(y: u64) -> bool {
-    y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+    y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400))
 }
