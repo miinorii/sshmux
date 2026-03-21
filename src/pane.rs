@@ -29,6 +29,7 @@ pub enum Pane {
     Connect {
         list_state: ListState,
         browser_menu: Option<ListState>,
+        connect_input: Option<String>,
     },
     Session {
         terminal: EmbeddedTerminal,
@@ -52,6 +53,7 @@ impl Pane {
         Pane::Connect {
             list_state: ls,
             browser_menu: None,
+            connect_input: None,
         }
     }
 
@@ -230,6 +232,7 @@ impl Pane {
             Pane::Connect {
                 list_state,
                 browser_menu,
+                connect_input,
             } => {
                 let is_focus = *my_idx == focus_idx;
                 *my_idx += 1;
@@ -251,7 +254,7 @@ impl Pane {
                     area
                 };
 
-                const HELP_LINES: u16 = 8;
+                const HELP_LINES: u16 = 9;
                 let list_area = Rect {
                     x: inner.x,
                     y: inner.y,
@@ -277,14 +280,15 @@ impl Pane {
                 StatefulWidget::render(list, list_area, buf, list_state);
 
                 let shortcuts = [
+                    ("Enter", "connect"),
+                    ("C", "connect (manual)"),
+                    ("B", "file browser"),
                     ("Alt+T", "new tab"),
                     ("Alt+W", "close pane / tab"),
-                    ("Alt+-", "split vertical"),
-                    ("Alt++", "split horizontal"),
-                    ("B", "file browser"),
+                    ("Alt+-", "split top/bottom"),
+                    ("Alt++", "split left/right"),
                     ("Alt+\u{2191}\u{2193}", "cycle pane focus"),
                     ("Alt+\u{2190}\u{2192}", "switch tab"),
-                    ("Ctrl+C", "quit"),
                 ];
                 for (i, (key, desc)) in shortcuts.iter().enumerate() {
                     let y = help_area.y + i as u16;
@@ -331,6 +335,34 @@ impl Pane {
                         )
                         .highlight_symbol("> ");
                     StatefulWidget::render(menu_list, menu_area, buf, menu_state);
+                }
+
+                // Connect input overlay
+                if let Some(input) = connect_input {
+                    let input_w = 50u16.min(inner.width.saturating_sub(2));
+                    let input_h = 3u16;
+                    let cx = inner.x + inner.width.saturating_sub(input_w) / 2;
+                    let cy = inner.y + inner.height.saturating_sub(input_h) / 2;
+                    let input_area = Rect {
+                        x: cx,
+                        y: cy,
+                        width: input_w,
+                        height: input_h,
+                    };
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow))
+                        .title(" ssh ");
+                    let text_area = block.inner(input_area);
+                    block.render(input_area, buf);
+
+                    let display = format!("{}_", input);
+                    buf.set_line(
+                        text_area.x,
+                        text_area.y,
+                        &Line::from(Span::raw(&display).style(Style::default().fg(Color::White))),
+                        text_area.width,
+                    );
                 }
             }
 

@@ -81,6 +81,25 @@ impl App {
         Ok(())
     }
 
+    pub fn open_session_raw(&mut self, args: &str, area: Rect) -> Result<()> {
+        let pane_area = self.focused_pane_area(area);
+        let term_area = if self.tab().leaf_count() > 1 {
+            pane_inner(pane_area)
+        } else {
+            pane_area
+        };
+        let term = EmbeddedTerminal::ssh_raw(term_area.height, term_area.width, args)?;
+        // Use the last argument (typically user@host) as tab name
+        let name = args.split_whitespace().last().unwrap_or("ssh").to_string();
+        if self.tab().leaf_count() == 1 {
+            self.tab_mut().name = name;
+        }
+        if let Some(pane) = self.tab_mut().focused_pane_mut() {
+            *pane = Pane::Session { terminal: term };
+        }
+        Ok(())
+    }
+
     pub fn open_browser(&mut self, host_idx: usize) -> Result<()> {
         let host = self
             .hosts

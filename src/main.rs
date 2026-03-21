@@ -186,6 +186,7 @@ fn main() -> Result<()> {
                                     let (host_idx, menu_idx) = if let Some(Pane::Connect {
                                         list_state,
                                         browser_menu: Some(ms),
+                                        ..
                                     }) = app.tab().focused_pane()
                                     {
                                         (list_state.selected(), ms.selected())
@@ -219,6 +220,75 @@ fn main() -> Result<()> {
                                         app.tab_mut().focused_pane_mut()
                                     {
                                         *browser_menu = None;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
+                        // Check if connect input is open
+                        let input_open = matches!(
+                            app.tab().focused_pane(),
+                            Some(Pane::Connect {
+                                connect_input: Some(_),
+                                ..
+                            })
+                        );
+
+                        if input_open {
+                            match key.code {
+                                KeyCode::Char(c) if !ctrl => {
+                                    if let Some(Pane::Connect {
+                                        connect_input: Some(input),
+                                        ..
+                                    }) = app.tab_mut().focused_pane_mut()
+                                    {
+                                        input.push(c);
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    if let Some(Pane::Connect {
+                                        connect_input: Some(input),
+                                        ..
+                                    }) = app.tab_mut().focused_pane_mut()
+                                    {
+                                        input.pop();
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    let args = if let Some(Pane::Connect {
+                                        connect_input: Some(input),
+                                        ..
+                                    }) = app.tab().focused_pane()
+                                    {
+                                        let trimmed = input.trim().to_string();
+                                        if trimmed.is_empty() {
+                                            None
+                                        } else {
+                                            Some(trimmed)
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(args) = args {
+                                        if let Err(e) = app.open_session_raw(&args, last_area) {
+                                            error!("open_session_raw: {}", e);
+                                        }
+                                        app.resize_all(last_area);
+                                    } else {
+                                        if let Some(Pane::Connect { connect_input, .. }) =
+                                            app.tab_mut().focused_pane_mut()
+                                        {
+                                            *connect_input = None;
+                                        }
+                                    }
+                                }
+                                KeyCode::Esc => {
+                                    if let Some(Pane::Connect { connect_input, .. }) =
+                                        app.tab_mut().focused_pane_mut()
+                                    {
+                                        *connect_input = None;
                                     }
                                 }
                                 _ => {}
@@ -273,6 +343,13 @@ fn main() -> Result<()> {
                                     let mut ms = ListState::default();
                                     ms.select(Some(0));
                                     *browser_menu = Some(ms);
+                                }
+                            }
+                            KeyCode::Char('c') | KeyCode::Char('C') => {
+                                if let Some(Pane::Connect { connect_input, .. }) =
+                                    app.tab_mut().focused_pane_mut()
+                                {
+                                    *connect_input = Some(String::new());
                                 }
                             }
                             _ => {}

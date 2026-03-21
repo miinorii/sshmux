@@ -147,6 +147,19 @@ impl EmbeddedTerminal {
         Self::new(rows, cols, cmd, false)
     }
 
+    /// Spawn an SSH session with raw arguments (e.g. "-o HostKeyAlgorithms=+ssh-rsa user@ip").
+    pub fn ssh_raw(rows: u16, cols: u16, args: &str) -> Result<Self> {
+        let mut cmd = CommandBuilder::new("ssh");
+        cmd.arg("-t");
+        for arg in args.split_whitespace() {
+            cmd.arg(arg);
+        }
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        info!("SSH raw session {}x{} args={}", cols, rows, args);
+        Self::new(rows, cols, cmd, false)
+    }
+
     /// Spawn an SFTP subsession to `host` (small fixed size, never rendered).
     pub fn sftp(host: &str) -> Result<Self> {
         let mut cmd = CommandBuilder::new("sftp");
