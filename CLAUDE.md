@@ -21,7 +21,7 @@ SSH session multiplexer TUI. Uses system `ssh`, `sftp`, and `scp` binaries — n
 
 ### Core loop
 
-`main.rs` runs a 5ms poll loop: crossterm events → App dispatch → ratatui render. The App holds a `Vec<Tab>`, each Tab holds a tree of `Pane` nodes.
+`main.rs` runs a 5ms poll loop: crossterm events → `input.rs` dispatch → ratatui render. The App holds a `Vec<Tab>`, each Tab holds a tree of `Pane` nodes. All key and mouse handling lives in `input.rs`.
 
 ### Pane tree
 
@@ -41,7 +41,9 @@ Interactive sessions have 1000-line scrollback via `vt100::Parser`. Mouse scroll
 
 ### Browser state machines
 
-Both browsers (`FileBrowser` in browser/sftp.rs, `SshBrowser` in browser/ssh.rs) use prompt-stability detection: raw PTY buffer byte count unchanged for N ticks + expected prompt string present. They share parsing utilities from `browser/parse.rs` (ANSI stripping, `ls -la` parsing, transfer progress scraping).
+Both browsers (`FileBrowser` in browser/sftp.rs, `SshBrowser` in browser/ssh.rs) hold a `BrowserCore` field (browser/common.rs) that provides shared state, dual-panel rendering, local navigation, click/drag handling, and the common key dispatch via `handle_browser_key()`. Browser-specific logic (SFTP commands, SCP process spawning, password prompts) stays on the outer struct.
+
+Both use prompt-stability detection: raw PTY buffer byte count unchanged for N ticks + expected prompt string present. They share parsing utilities from `browser/parse.rs` (ANSI stripping, `ls -la` parsing, transfer progress scraping).
 
 **SFTP**: Detects `sftp>` prompt. Commands (`cd`, `get`, `put`, `rm`) run inside the SFTP session.
 
