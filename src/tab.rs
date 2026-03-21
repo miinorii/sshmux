@@ -87,7 +87,7 @@ impl Tab {
         } else {
             *pane_area
         };
-        if let Some(Pane::Session { terminal }) = self.root.leaf(self.focus_idx)
+        if let Some(Pane::Session { terminal, .. }) = self.root.leaf(self.focus_idx)
             && let Some((cx, cy)) = terminal.cursor_pos()
         {
             let sx = inner.x + cx;

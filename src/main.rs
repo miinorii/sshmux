@@ -557,8 +557,63 @@ fn main() -> Result<()> {
                         continue;
                     }
 
+                    // ---- Session exit menu ----
+                    let session_exited = matches!(
+                        app.tab().focused_pane(),
+                        Some(Pane::Session { terminal, .. }) if terminal.process_exited()
+                    );
+
+                    if session_exited {
+                        match key.code {
+                            KeyCode::Up | KeyCode::Down => {
+                                if let Some(Pane::Session { exit_selection, .. }) =
+                                    app.tab_mut().focused_pane_mut()
+                                {
+                                    *exit_selection = if *exit_selection == 0 { 1 } else { 0 };
+                                }
+                            }
+                            KeyCode::Enter => {
+                                let action = if let Some(Pane::Session { exit_selection, .. }) =
+                                    app.tab().focused_pane()
+                                {
+                                    Some(*exit_selection)
+                                } else {
+                                    None
+                                };
+                                match action {
+                                    Some(0) => {
+                                        // Reconnect
+                                        if let Some(Pane::Session { ssh_args, .. }) =
+                                            app.tab().focused_pane()
+                                        {
+                                            let args = ssh_args.clone();
+                                            if let Err(e) = app.open_session_raw(&args, last_area)
+                                            {
+                                                error!("reconnect: {}", e);
+                                            }
+                                            app.resize_all(last_area);
+                                        }
+                                    }
+                                    Some(1) => {
+                                        // Close pane
+                                        let was_last_pane = app.tab().leaf_count() == 1;
+                                        if was_last_pane {
+                                            app.close_tab();
+                                        } else {
+                                            app.tab_mut().close_focused();
+                                            app.resize_all(last_area);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     // Reset scrollback on any keypress to a session
-                    if let Some(Pane::Session { terminal }) = app.tab_mut().focused_pane_mut() {
+                    if let Some(Pane::Session { terminal, .. }) = app.tab_mut().focused_pane_mut() {
                         terminal.reset_scroll();
                     }
 
@@ -778,7 +833,7 @@ fn main() -> Result<()> {
                             .root
                             .leaf_mut(pane_idx)
                             .map(|p| {
-                                if let Pane::Session { terminal } = p {
+                                if let Pane::Session { terminal, .. } = p {
                                     terminal.mouse_active() && !terminal.process_exited()
                                 } else {
                                     false
@@ -793,7 +848,7 @@ fn main() -> Result<()> {
                                 .root
                                 .leaf(pane_idx)
                                 .map(|p| {
-                                    if let Pane::Session { terminal } = p {
+                                    if let Pane::Session { terminal, .. } = p {
                                         terminal.alternate_screen()
                                     } else {
                                         false
@@ -819,7 +874,7 @@ fn main() -> Result<()> {
                                     if !seq.is_empty() {
                                         app.send_str(seq);
                                     }
-                                } else if let Some(Pane::Session { terminal }) =
+                                } else if let Some(Pane::Session { terminal, .. }) =
                                     app.tabs[app.selected_tab].root.leaf_mut(pane_idx)
                                 {
                                     match mouse.kind {

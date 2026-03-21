@@ -134,18 +134,8 @@ impl EmbeddedTerminal {
         })
     }
 
-    /// Spawn an SSH interactive session to `host`.
-    pub fn ssh(rows: u16, cols: u16, host: &str) -> Result<Self> {
-        let mut cmd = CommandBuilder::new("ssh");
-        cmd.arg(host);
-        cmd.arg("-t");
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-        info!("SSH session {}x{} host={}", cols, rows, host);
-        Self::new(rows, cols, cmd, false)
-    }
-
-    /// Spawn an SSH session with raw arguments (e.g. "-o HostKeyAlgorithms=+ssh-rsa user@ip").
+    /// Spawn an SSH interactive session with the given arguments.
+    /// Can be a plain hostname or full args (e.g. "-o StrictHostKeyChecking=no user@ip").
     pub fn ssh_raw(rows: u16, cols: u16, args: &str) -> Result<Self> {
         let mut cmd = CommandBuilder::new("ssh");
         cmd.arg("-t");

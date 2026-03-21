@@ -34,6 +34,8 @@ pub enum Pane {
     },
     Session {
         terminal: EmbeddedTerminal,
+        ssh_args: String,
+        exit_selection: u8, // 0 = Reconnect, 1 = Close pane
     },
     FileBrowser {
         browser: FileBrowser,
@@ -168,7 +170,7 @@ impl Pane {
 
     pub fn any_dirty(&mut self) -> bool {
         match self {
-            Pane::Session { terminal } => terminal.dirty.swap(false, Ordering::AcqRel),
+            Pane::Session { terminal, .. } => terminal.dirty.swap(false, Ordering::AcqRel),
             Pane::FileBrowser { browser } => {
                 let pty_dirty = browser.sftp.dirty.swap(false, Ordering::AcqRel);
                 let state_dirty = browser.needs_redraw;
@@ -202,7 +204,7 @@ impl Pane {
 
     pub fn resize_all(&mut self, area: Rect, multi_pane: bool) {
         match self {
-            Pane::Session { terminal } => {
+            Pane::Session { terminal, .. } => {
                 let (h, w) = if multi_pane {
                     (area.height.saturating_sub(2), area.width.saturating_sub(2))
                 } else {
@@ -403,7 +405,11 @@ impl Pane {
                 }
             }
 
-            Pane::Session { terminal } => {
+            Pane::Session {
+                terminal,
+                exit_selection,
+                ..
+            } => {
                 let is_focus = *my_idx == focus_idx;
                 *my_idx += 1;
 
@@ -423,6 +429,52 @@ impl Pane {
                     area
                 };
                 terminal.render_into(inner, buf);
+
+                if terminal.process_exited() {
+                    let menu_w = 30u16.min(inner.width.saturating_sub(2));
+                    let menu_h = 4u16;
+                    let cx = inner.x + inner.width.saturating_sub(menu_w) / 2;
+                    let cy = inner.y + inner.height.saturating_sub(menu_h) / 2;
+                    let menu_area = Rect {
+                        x: cx,
+                        y: cy,
+                        width: menu_w,
+                        height: menu_h,
+                    };
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow))
+                        .title(" session ended ");
+                    let text_area = block.inner(menu_area);
+                    block.render(menu_area, buf);
+
+                    let items = ["Reconnect", "Close pane"];
+                    for (i, item) in items.iter().enumerate() {
+                        let y = text_area.y + i as u16;
+                        if y >= text_area.y + text_area.height {
+                            break;
+                        }
+                        let (sym, style) = if i as u8 == *exit_selection {
+                            (
+                                "> ",
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                        } else {
+                            ("  ", Style::default().fg(Color::White))
+                        };
+                        buf.set_line(
+                            text_area.x,
+                            y,
+                            &Line::from(vec![
+                                Span::raw(sym).style(style),
+                                Span::raw(*item).style(style),
+                            ]),
+                            text_area.width,
+                        );
+                    }
+                }
             }
 
             Pane::FileBrowser { browser } => {

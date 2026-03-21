@@ -46,13 +46,13 @@ impl App {
     }
 
     pub fn send_str(&mut self, s: &str) {
-        if let Some(Pane::Session { terminal }) = self.tab_mut().focused_pane_mut() {
+        if let Some(Pane::Session { terminal, .. }) = self.tab_mut().focused_pane_mut() {
             terminal.send_str(s);
         }
     }
 
     pub fn send_char(&mut self, c: char) {
-        if let Some(Pane::Session { terminal }) = self.tab_mut().focused_pane_mut() {
+        if let Some(Pane::Session { terminal, .. }) = self.tab_mut().focused_pane_mut() {
             terminal.send_char(c);
         }
     }
@@ -63,20 +63,7 @@ impl App {
             .get(host_idx)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("invalid host"))?;
-        let pane_area = self.focused_pane_area(area);
-        let term_area = if self.tab().leaf_count() > 1 {
-            pane_inner(pane_area)
-        } else {
-            pane_area
-        };
-        let term = EmbeddedTerminal::ssh(term_area.height, term_area.width, &host.label)?;
-        if self.tab().leaf_count() == 1 {
-            self.tab_mut().name = host.label.clone();
-        }
-        if let Some(pane) = self.tab_mut().focused_pane_mut() {
-            *pane = Pane::Session { terminal: term };
-        }
-        Ok(())
+        self.open_session_raw(&host.label, area)
     }
 
     pub fn open_session_raw(&mut self, args: &str, area: Rect) -> Result<()> {
@@ -87,13 +74,16 @@ impl App {
             pane_area
         };
         let term = EmbeddedTerminal::ssh_raw(term_area.height, term_area.width, args)?;
-        // Use the last argument (typically user@host) as tab name
         let name = args.split_whitespace().last().unwrap_or("ssh").to_string();
         if self.tab().leaf_count() == 1 {
             self.tab_mut().name = name;
         }
         if let Some(pane) = self.tab_mut().focused_pane_mut() {
-            *pane = Pane::Session { terminal: term };
+            *pane = Pane::Session {
+                terminal: term,
+                ssh_args: args.to_string(),
+                exit_selection: 0,
+            };
         }
         Ok(())
     }
@@ -131,7 +121,7 @@ impl App {
     }
 
     pub fn focused_pane_app_cursor(&self) -> bool {
-        if let Some(Pane::Session { terminal }) = self.tab().focused_pane() {
+        if let Some(Pane::Session { terminal, .. }) = self.tab().focused_pane() {
             terminal.app_cursor()
         } else {
             false
