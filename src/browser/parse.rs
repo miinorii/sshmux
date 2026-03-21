@@ -58,7 +58,9 @@ pub fn strip_ansi(raw: &[u8]) -> String {
 
 /// Extract the remote working directory from `pwd` output.
 pub fn parse_pwd(lines: &[String]) -> Option<String> {
-    if let Some(l) = lines.iter().find(|l| l.contains("working directory")) && let Some(path) = l.split_once(':').map(|x| x.1) {
+    if let Some(l) = lines.iter().find(|l| l.contains("working directory"))
+        && let Some(path) = l.split_once(':').map(|x| x.1)
+    {
         let p = path.trim();
         if !p.is_empty() {
             return Some(p.to_string());

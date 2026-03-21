@@ -170,7 +170,10 @@ impl SshBrowser {
 
                 let pct = scrape_transfer_progress(&lines);
 
-                if let Some(ref mut t) = self.last_transfer && let Some(ref pct) = pct && *pct != t.progress {
+                if let Some(ref mut t) = self.last_transfer
+                    && let Some(ref pct) = pct
+                    && *pct != t.progress
+                {
                     t.progress = pct.clone();
                     self.needs_redraw = true;
                 }
@@ -476,7 +479,10 @@ impl SshBrowser {
         match self.focus {
             BrowserFocus::Local => {
                 if self.drive_picker.is_some() {
-                    if let Some((drives, sel)) = self.drive_picker.take() && let Some(i) = sel.selected() && let Some(drive) = drives.get(i).cloned() {
+                    if let Some((drives, sel)) = self.drive_picker.take()
+                        && let Some(i) = sel.selected()
+                        && let Some(drive) = drives.get(i).cloned()
+                    {
                         self.local_path = drive;
                         self.local_entries = read_local_dir(&self.local_path);
                         self.local_sel.select_first();
@@ -519,7 +525,9 @@ impl SshBrowser {
                 if self.ssh_state != SshBrowserState::Idle {
                     return;
                 }
-                if let Some(i) = self.remote_sel.selected() && let Some(entry) = self.remote_entries.get(i).cloned() {
+                if let Some(i) = self.remote_sel.selected()
+                    && let Some(entry) = self.remote_entries.get(i).cloned()
+                {
                     if entry.is_dir {
                         self.apply_cd(&entry.name);
                         self.status_msg = format!("Remote: {}", self.remote_path);
@@ -1033,7 +1041,9 @@ impl SshBrowser {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        if side == BrowserFocus::Local && let Some((drives, drive_sel)) = &mut self.drive_picker {
+        if side == BrowserFocus::Local
+            && let Some((drives, drive_sel)) = &mut self.drive_picker
+        {
             let items: Vec<String> = drives
                 .iter()
                 .map(|p| p.to_string_lossy().to_string())

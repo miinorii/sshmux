@@ -1,5 +1,3 @@
-
-
 use anyhow::Result;
 use ratatui::{
     buffer::Buffer,

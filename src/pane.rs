@@ -280,10 +280,8 @@ impl Pane {
                     inner.x,
                     hint_y,
                     &Line::from(vec![
-                        Span::raw("  H")
-                            .style(Style::default().fg(Color::Yellow)),
-                        Span::raw(" help")
-                            .style(Style::default().fg(Color::DarkGray)),
+                        Span::raw("  H").style(Style::default().fg(Color::Yellow)),
+                        Span::raw(" help").style(Style::default().fg(Color::DarkGray)),
                     ]),
                     inner.width,
                 );
@@ -360,8 +358,7 @@ impl Pane {
                             &Line::from(vec![
                                 Span::raw(format!(" {:10}", key))
                                     .style(Style::default().fg(Color::Yellow)),
-                                Span::raw(*desc)
-                                    .style(Style::default().fg(Color::DarkGray)),
+                                Span::raw(*desc).style(Style::default().fg(Color::DarkGray)),
                             ]),
                             text_area.width,
                         );
@@ -514,7 +511,9 @@ pub fn remove_leaf(pane: &mut Pane, n: usize) {
         }
     }
     // Collapse a Split that is down to a single child into that child directly.
-    if let Pane::Split { children, .. } = pane && children.len() == 1 {
+    if let Pane::Split { children, .. } = pane
+        && children.len() == 1
+    {
         *pane = children.remove(0);
     }
 }

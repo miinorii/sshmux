@@ -9,8 +9,6 @@ use crossterm::{
 use log::{debug, error};
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, widgets::ListState};
 
-
-
 // ---------------------------------------------------------------------------
 // Module declarations
 // ---------------------------------------------------------------------------
@@ -337,8 +335,12 @@ fn main() -> Result<()> {
                                 }
                             }
                             KeyCode::Char('b') | KeyCode::Char('B') => {
-                                if let Some(Pane::Connect { browser_menu, connect_input, show_help, .. }) =
-                                    app.tab_mut().focused_pane_mut()
+                                if let Some(Pane::Connect {
+                                    browser_menu,
+                                    connect_input,
+                                    show_help,
+                                    ..
+                                }) = app.tab_mut().focused_pane_mut()
                                 {
                                     *show_help = false;
                                     *connect_input = None;
@@ -348,8 +350,12 @@ fn main() -> Result<()> {
                                 }
                             }
                             KeyCode::Char('c') | KeyCode::Char('C') => {
-                                if let Some(Pane::Connect { browser_menu, connect_input, show_help, .. }) =
-                                    app.tab_mut().focused_pane_mut()
+                                if let Some(Pane::Connect {
+                                    browser_menu,
+                                    connect_input,
+                                    show_help,
+                                    ..
+                                }) = app.tab_mut().focused_pane_mut()
                                 {
                                     *show_help = false;
                                     *browser_menu = None;
@@ -357,8 +363,12 @@ fn main() -> Result<()> {
                                 }
                             }
                             KeyCode::Char('h') | KeyCode::Char('H') => {
-                                if let Some(Pane::Connect { browser_menu, connect_input, show_help, .. }) =
-                                    app.tab_mut().focused_pane_mut()
+                                if let Some(Pane::Connect {
+                                    browser_menu,
+                                    connect_input,
+                                    show_help,
+                                    ..
+                                }) = app.tab_mut().focused_pane_mut()
                                 {
                                     *show_help = !*show_help;
                                     *browser_menu = None;
@@ -548,9 +558,7 @@ fn main() -> Result<()> {
                     }
 
                     // Reset scrollback on any keypress to a session
-                    if let Some(Pane::Session { terminal }) =
-                        app.tab_mut().focused_pane_mut()
-                    {
+                    if let Some(Pane::Session { terminal }) = app.tab_mut().focused_pane_mut() {
                         terminal.reset_scroll();
                     }
 
@@ -694,8 +702,9 @@ fn main() -> Result<()> {
                                     );
                                 }
                             }
-                            if let MouseEventKind::Up(MouseButton::Left) = mouse.kind && let Some(Pane::FileBrowser { browser }) =
-                                app.tab_mut().focused_pane_mut()
+                            if let MouseEventKind::Up(MouseButton::Left) = mouse.kind
+                                && let Some(Pane::FileBrowser { browser }) =
+                                    app.tab_mut().focused_pane_mut()
                             {
                                 let inner = pane_inner(pane_area);
                                 let half = inner.width / 2;
@@ -741,8 +750,9 @@ fn main() -> Result<()> {
                                     );
                                 }
                             }
-                            if let MouseEventKind::Up(MouseButton::Left) = mouse.kind && let Some(Pane::SshBrowser { browser }) =
-                                app.tab_mut().focused_pane_mut()
+                            if let MouseEventKind::Up(MouseButton::Left) = mouse.kind
+                                && let Some(Pane::SshBrowser { browser }) =
+                                    app.tab_mut().focused_pane_mut()
                             {
                                 let inner = pane_inner(pane_area);
                                 let half = inner.width / 2;
@@ -769,8 +779,7 @@ fn main() -> Result<()> {
                             .leaf_mut(pane_idx)
                             .map(|p| {
                                 if let Pane::Session { terminal } = p {
-                                    terminal.mouse_active()
-                                        && !terminal.process_exited()
+                                    terminal.mouse_active() && !terminal.process_exited()
                                 } else {
                                     false
                                 }

@@ -310,7 +310,10 @@ impl EmbeddedTerminal {
             let (cy, cx) = screen.cursor_position();
             let sx = area.x + cx;
             let sy = area.y + cy;
-            if sx < area.x + area.width && sy < area.y + area.height && let Some(bc) = buf.cell_mut((sx, sy)) {
+            if sx < area.x + area.width
+                && sy < area.y + area.height
+                && let Some(bc) = buf.cell_mut((sx, sy))
+            {
                 let style = bc.style().add_modifier(Modifier::REVERSED);
                 bc.set_style(style);
             }
@@ -356,7 +359,10 @@ impl EmbeddedTerminal {
         if self.exited.load(Ordering::Acquire) {
             return true;
         }
-        if let Some(ref child) = self.child && let Ok(mut c) = child.lock() && let Ok(Some(_status)) = c.try_wait() {
+        if let Some(ref child) = self.child
+            && let Ok(mut c) = child.lock()
+            && let Ok(Some(_status)) = c.try_wait()
+        {
             self.exited.store(true, Ordering::Release);
             return true;
         }
