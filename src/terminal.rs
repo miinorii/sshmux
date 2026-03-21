@@ -246,7 +246,9 @@ impl EmbeddedTerminal {
     pub fn scroll_down(&mut self, n: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(n);
         if let Ok(mut p) = self.parser.lock() {
-            p.screen_mut().set_scrollback(self.scroll_offset);
+            let screen = p.screen_mut();
+            screen.set_scrollback(self.scroll_offset);
+            self.scroll_offset = screen.scrollback();
         }
         self.dirty.store(true, Ordering::Release);
     }
