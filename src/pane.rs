@@ -2,10 +2,10 @@ use std::sync::atomic::Ordering;
 
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
+    layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListState, StatefulWidget, Widget},
+    widgets::{Block, Borders, List, ListState, Paragraph, StatefulWidget, Widget},
 };
 
 use crate::browser::{FileBrowser, SshBrowser};
@@ -431,8 +431,8 @@ impl Pane {
                 terminal.render_into(inner, buf);
 
                 if terminal.process_exited() {
-                    let menu_w = 30u16.min(inner.width.saturating_sub(2));
-                    let menu_h = 4u16;
+                    let menu_w = 34u16.min(inner.width.saturating_sub(2));
+                    let menu_h = 3u16;
                     let cx = inner.x + inner.width.saturating_sub(menu_w) / 2;
                     let cy = inner.y + inner.height.saturating_sub(menu_h) / 2;
                     let menu_area = Rect {
@@ -441,39 +441,28 @@ impl Pane {
                         width: menu_w,
                         height: menu_h,
                     };
-                    let block = Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Yellow))
-                        .title(" session ended ");
-                    let text_area = block.inner(menu_area);
-                    block.render(menu_area, buf);
-
+                    let sel = Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD);
+                    let dim = Style::default().fg(Color::DarkGray);
                     let items = ["Reconnect", "Close pane"];
+                    let mut spans = Vec::new();
                     for (i, item) in items.iter().enumerate() {
-                        let y = text_area.y + i as u16;
-                        if y >= text_area.y + text_area.height {
-                            break;
+                        if i > 0 {
+                            spans.push(Span::raw(" / ").style(dim));
                         }
-                        let (sym, style) = if i as u8 == *exit_selection {
-                            (
-                                "> ",
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
-                            )
-                        } else {
-                            ("  ", Style::default().fg(Color::White))
-                        };
-                        buf.set_line(
-                            text_area.x,
-                            y,
-                            &Line::from(vec![
-                                Span::raw(sym).style(style),
-                                Span::raw(*item).style(style),
-                            ]),
-                            text_area.width,
-                        );
+                        let style = if i as u8 == *exit_selection { sel } else { dim };
+                        spans.push(Span::raw(*item).style(style));
                     }
+                    let paragraph = Paragraph::new(Line::from(spans))
+                        .alignment(Alignment::Center)
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(Color::Yellow))
+                                .title(" session ended "),
+                        );
+                    paragraph.render(menu_area, buf);
                 }
             }
 

@@ -565,7 +565,7 @@ fn main() -> Result<()> {
 
                     if session_exited {
                         match key.code {
-                            KeyCode::Up | KeyCode::Down => {
+                            KeyCode::Left | KeyCode::Right => {
                                 if let Some(Pane::Session { exit_selection, .. }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
@@ -587,8 +587,7 @@ fn main() -> Result<()> {
                                             app.tab().focused_pane()
                                         {
                                             let args = ssh_args.clone();
-                                            if let Err(e) = app.open_session_raw(&args, last_area)
-                                            {
+                                            if let Err(e) = app.open_session_raw(&args, last_area) {
                                                 error!("reconnect: {}", e);
                                             }
                                             app.resize_all(last_area);
