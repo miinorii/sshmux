@@ -25,6 +25,7 @@ Hosts are read from `~/.ssh/config` at startup. Any non-wildcard `Host` entry is
 | `Alt++` | Split pane horizontally (left / right) |
 | `Alt+↑` / `Alt+↓` | Cycle focus between panes |
 | `Alt+←` / `Alt+→` | Switch tabs |
+| `Alt+Q` | Quit |
 
 ### Connect pane
 
@@ -37,7 +38,6 @@ Hosts are read from `~/.ssh/config` at startup. Any non-wildcard `Host` entry is
 | `b` | Open file browser menu (SFTP or SCP) |
 | `h` | Toggle shortcut help overlay |
 | `Esc` | Close overlay |
-| `Ctrl+C` | Quit |
 
 ### Session pane (SSH)
 

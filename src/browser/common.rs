@@ -44,7 +44,6 @@ pub struct TransferStatus {
 /// Action returned by `handle_browser_key` for browser-specific operations.
 pub enum BrowserKeyAction {
     Handled,
-    Quit,
     Enter,
     GoUp,
     Download,
@@ -706,7 +705,7 @@ impl BrowserCore {
 /// Handle a key event for a browser in idle mode (not connecting, not waiting
 /// for password). Navigation keys are handled directly on `core`; actions that
 /// need browser-specific logic are returned as a `BrowserKeyAction`.
-pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode, ctrl: bool) -> BrowserKeyAction {
+pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode) -> BrowserKeyAction {
     if core.confirm_delete.is_some() {
         match code {
             KeyCode::Char('y') | KeyCode::Char('Y') => return BrowserKeyAction::ConfirmDeleteYes,
@@ -749,7 +748,6 @@ pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode, ctrl: bool) -> 
             BrowserFocus::Local => BrowserKeyAction::Upload,
         },
         KeyCode::Delete => BrowserKeyAction::Delete,
-        KeyCode::Char('c') if ctrl => BrowserKeyAction::Quit,
         _ => BrowserKeyAction::Handled,
     }
 }

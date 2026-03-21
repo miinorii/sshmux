@@ -315,7 +315,7 @@ impl Pane {
                         ("Alt++", "split left/right"),
                         ("Alt+\u{2191}\u{2193}", "cycle pane focus"),
                         ("Alt+\u{2190}\u{2192}", "switch tab"),
-                        ("Ctrl+C", "quit"),
+                        ("Alt+Q", "quit"),
                     ];
                     let help_w = 36u16.min(inner.width.saturating_sub(2));
                     let help_h = (shortcuts.len() as u16 + 2).min(inner.height);

@@ -27,6 +27,7 @@ pub fn handle_key(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, last_area
     // ---- Global shortcuts (Alt+…) ----
     if alt && !ctrl {
         match code {
+            KeyCode::Char('q') => return Action::Quit,
             KeyCode::Left => {
                 if app.selected_tab > 0 {
                     app.selected_tab -= 1;
@@ -67,12 +68,12 @@ pub fn handle_key(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, last_area
     }
 
     // ---- FileBrowser pane ----
-    if let Some(action) = handle_sftp_browser_key(app, code, ctrl) {
+    if let Some(action) = handle_sftp_browser_key(app, code) {
         return action;
     }
 
     // ---- SshBrowser pane ----
-    if let Some(action) = handle_ssh_browser_key(app, code, ctrl) {
+    if let Some(action) = handle_ssh_browser_key(app, code) {
         return action;
     }
 
@@ -329,9 +330,6 @@ fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect)
 
     // Normal connect pane
     match code {
-        KeyCode::Char('c') if ctrl => {
-            return Some(Action::Quit);
-        }
         KeyCode::Up | KeyCode::Char('k') => {
             if let Some(Pane::Connect { list_state, .. }) = app.tab_mut().focused_pane_mut() {
                 list_state.select_previous();
@@ -412,7 +410,7 @@ fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect)
 // ---------------------------------------------------------------------------
 
 /// Returns `Some(Action)` if the focused pane is a FileBrowser.
-fn handle_sftp_browser_key(app: &mut App, code: KeyCode, ctrl: bool) -> Option<Action> {
+fn handle_sftp_browser_key(app: &mut App, code: KeyCode) -> Option<Action> {
     let focus_idx = app.tabs[app.selected_tab].focus_idx;
     if !matches!(
         app.tabs[app.selected_tab].root.leaf(focus_idx),
@@ -433,14 +431,14 @@ fn handle_sftp_browser_key(app: &mut App, code: KeyCode, ctrl: bool) -> Option<A
             return Some(Action::Continue);
         }
 
-        match handle_browser_key(&mut browser.core, code, ctrl) {
+        match handle_browser_key(&mut browser.core, code) {
             BrowserKeyAction::Enter => browser.enter(),
             BrowserKeyAction::GoUp => browser.go_up(),
             BrowserKeyAction::Download => browser.download(),
             BrowserKeyAction::Upload => browser.upload(),
             BrowserKeyAction::Delete => browser.delete_focused(),
             BrowserKeyAction::ConfirmDeleteYes => browser.confirm_delete_yes(),
-            BrowserKeyAction::Quit => return Some(Action::Quit),
+
             BrowserKeyAction::Handled => {}
         }
     }
@@ -453,7 +451,7 @@ fn handle_sftp_browser_key(app: &mut App, code: KeyCode, ctrl: bool) -> Option<A
 // ---------------------------------------------------------------------------
 
 /// Returns `Some(Action)` if the focused pane is an SshBrowser.
-fn handle_ssh_browser_key(app: &mut App, code: KeyCode, ctrl: bool) -> Option<Action> {
+fn handle_ssh_browser_key(app: &mut App, code: KeyCode) -> Option<Action> {
     let focus_idx = app.tabs[app.selected_tab].focus_idx;
     if !matches!(
         app.tabs[app.selected_tab].root.leaf(focus_idx),
@@ -501,14 +499,14 @@ fn handle_ssh_browser_key(app: &mut App, code: KeyCode, ctrl: bool) -> Option<Ac
             return Some(Action::Continue);
         }
 
-        match handle_browser_key(&mut browser.core, code, ctrl) {
+        match handle_browser_key(&mut browser.core, code) {
             BrowserKeyAction::Enter => browser.enter(),
             BrowserKeyAction::GoUp => browser.go_up(),
             BrowserKeyAction::Download => browser.download(),
             BrowserKeyAction::Upload => browser.upload(),
             BrowserKeyAction::Delete => browser.delete_focused(),
             BrowserKeyAction::ConfirmDeleteYes => browser.confirm_delete_yes(),
-            BrowserKeyAction::Quit => return Some(Action::Quit),
+
             BrowserKeyAction::Handled => {}
         }
     }
