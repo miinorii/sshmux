@@ -411,6 +411,12 @@ impl Pane {
                         let style = if i as u8 == *exit_selection { sel } else { dim };
                         spans.push(Span::raw(*item).style(style));
                     }
+                    // Clear the overlay area so terminal content doesn't bleed through
+                    for y in menu_area.y..menu_area.y + menu_area.height {
+                        for x in menu_area.x..menu_area.x + menu_area.width {
+                            buf[(x, y)].reset();
+                        }
+                    }
                     let paragraph = Paragraph::new(Line::from(spans))
                         .alignment(Alignment::Center)
                         .block(
