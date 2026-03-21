@@ -10,6 +10,7 @@ cargo build                  # Debug build
 cargo test                   # Run all tests (~125 tests, inline in source files)
 cargo test pane::tests       # Run tests for a specific module
 cargo test test_name         # Run a single test by name
+cargo clippy --release       # Lint — keep at zero warnings
 ```
 
 Debug logging: `sshmux --debug` creates a timestamped log file in the current directory.
@@ -28,9 +29,15 @@ SSH session multiplexer TUI. Uses system `ssh`, `sftp`, and `scp` binaries — n
 
 ### PTY layer
 
-`EmbeddedTerminal` (terminal.rs) wraps `portable_pty`. A background reader thread processes output through `vt100::Parser` (screen grid), accumulates `raw_output` (for browser scraping), scans DEC private mode sequences (mouse/cursor tracking), and replies to DSR probes. The main thread writes via `send_str()`/`send_char()`.
+`EmbeddedTerminal` (terminal.rs) wraps `portable_pty`. A background reader thread processes output through `vt100::Parser` (screen grid + 1000-line scrollback), accumulates `raw_output` (only when `capture_raw` is true — browsers only, not interactive sessions), and replies to DSR probes. The main thread writes via `send_str()`/`send_char()`.
 
-Three PTY constructors: `ssh()` (interactive session), `sftp()` (hidden, for SFTP browser), `ssh_shell()` (hidden, for SCP browser).
+Terminal state (mouse mode, application cursor, cursor visibility, alternate screen) is queried directly from `vt100::Screen` via methods on `EmbeddedTerminal` (`mouse_active()`, `app_cursor()`, `alternate_screen()`). No manual escape sequence scanning.
+
+Three PTY constructors: `ssh()` (interactive session, no raw capture), `sftp()` (hidden, for SFTP browser, captures raw), `ssh_shell()` (hidden, for SCP browser, captures raw). A fourth, `ssh_raw()`, accepts arbitrary SSH arguments for manual connections.
+
+### Scrollback
+
+Interactive sessions have 1000-line scrollback via `vt100::Parser`. Mouse scroll (when the remote app doesn't capture mouse) adjusts `scroll_offset` and calls `screen.set_scrollback()`. In alternate screen mode (vim, htop), scroll instead sends arrow key sequences. Any keypress resets scroll to live view. Cursor is hidden during scrollback.
 
 ### Browser state machines
 
@@ -42,8 +49,9 @@ Both browsers (`FileBrowser` in browser/sftp.rs, `SshBrowser` in browser/ssh.rs)
 
 ### Key patterns
 
-- Atomic flags (`AtomicBool`) for cross-thread state: `dirty`, `mouse_active`, `app_cursor`, `cursor_visible`, `exited`
+- `dirty: Arc<AtomicBool>` and `exited: Arc<AtomicBool>` for cross-thread state
 - `raw_output: Arc<Mutex<Vec<u8>>>` — browsers scrape PTY output by reading and draining this buffer
+- Connect pane has three mutually exclusive overlays: `browser_menu`, `connect_input`, `show_help`
 - Browser focus toggle (`Tab` key) switches between local and remote panels
 - `pane_inner()` computes render area by subtracting tab bar and shortcut bar
 
