@@ -33,7 +33,10 @@ Hosts are read from `~/.ssh/config` at startup. Any non-wildcard `Host` entry is
 | `↑` / `k` | Select previous host |
 | `↓` / `j` | Select next host |
 | `Enter` | Open SSH session |
+| `c` | Connect manually (type SSH args) |
 | `b` | Open file browser menu (SFTP or SCP) |
+| `h` | Toggle shortcut help overlay |
+| `Esc` | Close overlay |
 | `Ctrl+C` | Quit |
 
 ### Session pane (SSH)
@@ -48,6 +51,8 @@ Standard terminal input. Notable mappings:
 | `F1`–`F12` | xterm sequences |
 
 Mouse events forwarded as SGR sequences when the remote app enables mouse reporting.
+
+Scrollback: mouse scroll navigates 1000 lines of history when the remote app is not capturing mouse. In alternate screen apps (vim, htop, less), scroll sends arrow keys instead. Any keypress snaps back to live view.
 
 ### File browser pane (SFTP & SCP)
 
@@ -98,12 +103,12 @@ Drag-and-drop: click on one panel and release on the other to transfer.
 │  │ send_str()  │         │ reader.read()           │    │
 │  │     │       │         │   │                     │    │
 │  │     v       │         │   ├─> vt100::Parser     │    │
-│  │  writer     │         │   │     (screen grid)   │    │
-│  │  (Mutex)    │         │   ├─> raw_output Vec<u8>│    │
-│  └──────┬──────┘         │   │     SFTP scraping   │    │
+│  │  writer     │         │   │   (screen grid +    │    │
+│  │  (Mutex)    │         │   │   1000-line scroll) │    │
+│  └──────┬──────┘         │   ├─> raw_output Vec<u8>│    │
+│         │                │   │     (browsers only) │    │
 │         │                │   ├─> dirty AtomicBool  │    │
-│         │                │   ├─> mouse_active      │    │
-│         │                │   └─> cursor_visible    │    │
+│         │                │   └─> DSR reply         │    │
 │         │                └─────────────┬───────────┘    │
 │         │                              │                │
 │         v                              v                │
@@ -150,14 +155,13 @@ PTY master writer ────────────────────�
 PTY master reader <──────────────────────────────────┘
     │
     ├─> vt100::Parser::process(bytes)
-    │        └─> screen grid updated
+    │        └─> screen grid + scrollback updated
+    │            (mouse mode, app cursor, alt screen
+    │             queried via screen() at render time)
     │
-    ├─> raw_output.extend(bytes)      (SFTP/SCP browsers)
+    ├─> raw_output.extend(bytes)      (browsers only, capture_raw=true)
     │
     ├─> dirty.store(true)            ──> triggers ratatui redraw
-    │
-    ├─> scan ESC[?...h/l             ──> mouse_active / app_cursor /
-    │                                    cursor_visible
     │
     └─> reply to DSR (ESC[6n)        ──> neovim/htop cursor probe
 ```
