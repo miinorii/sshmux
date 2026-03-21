@@ -569,7 +569,7 @@ fn main() -> Result<()> {
                                 if let Some(Pane::Session { exit_selection, .. }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
-                                    *exit_selection = if *exit_selection == 0 { 1 } else { 0 };
+                                    *exit_selection ^= 1;
                                 }
                             }
                             KeyCode::Enter => {

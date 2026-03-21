@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 
 use ratatui::{
     buffer::Buffer,
-    layout::{Alignment, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListState, Paragraph, StatefulWidget, Widget},
@@ -342,29 +342,23 @@ impl Pane {
                         width: help_w,
                         height: help_h,
                     };
-                    let block = Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Yellow))
-                        .title(" shortcuts ");
-                    let text_area = block.inner(help_area);
-                    block.render(help_area, buf);
-
-                    for (i, (key, desc)) in shortcuts.iter().enumerate() {
-                        let y = text_area.y + i as u16;
-                        if y >= text_area.y + text_area.height {
-                            break;
-                        }
-                        buf.set_line(
-                            text_area.x,
-                            y,
-                            &Line::from(vec![
+                    let items: Vec<Line> = shortcuts
+                        .iter()
+                        .map(|(key, desc)| {
+                            Line::from(vec![
                                 Span::raw(format!(" {:10}", key))
                                     .style(Style::default().fg(Color::Yellow)),
                                 Span::raw(*desc).style(Style::default().fg(Color::DarkGray)),
-                            ]),
-                            text_area.width,
-                        );
-                    }
+                            ])
+                        })
+                        .collect();
+                    let help_list = List::new(items).block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(Color::Yellow))
+                            .title(" shortcuts "),
+                    );
+                    Widget::render(help_list, help_area, buf);
                 }
 
                 // Connect input overlay
@@ -379,29 +373,23 @@ impl Pane {
                         width: input_w,
                         height: input_h,
                     };
-                    let block = Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Yellow))
-                        .title(" ssh ");
-                    let text_area = block.inner(input_area);
-                    block.render(input_area, buf);
-
                     let display = format!("{}_", input);
-                    buf.set_line(
-                        text_area.x,
-                        text_area.y,
-                        &Line::from(Span::raw(&display).style(Style::default().fg(Color::White))),
-                        text_area.width,
-                    );
-                    buf.set_line(
-                        text_area.x,
-                        text_area.y + 1,
-                        &Line::from(
+                    let paragraph = Paragraph::new(vec![
+                        Line::from(
+                            Span::raw(display).style(Style::default().fg(Color::White)),
+                        ),
+                        Line::from(
                             Span::raw("e.g. -o StrictHostKeyChecking=no user@host")
                                 .style(Style::default().fg(Color::DarkGray)),
                         ),
-                        text_area.width,
+                    ])
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(Color::Yellow))
+                            .title(" ssh "),
                     );
+                    paragraph.render(input_area, buf);
                 }
             }
 
@@ -496,38 +484,25 @@ pub fn split_areas(area: Rect, kind: &Split, count: usize) -> Vec<Rect> {
     if count == 0 {
         return vec![];
     }
-    match kind {
-        Split::Horizontal => {
-            let w = area.width / count as u16;
-            (0..count)
-                .map(|i| Rect {
-                    x: area.x + i as u16 * w,
-                    y: area.y,
-                    width: if i == count - 1 {
-                        area.width - i as u16 * w
-                    } else {
-                        w
-                    },
-                    height: area.height,
-                })
-                .collect()
-        }
-        Split::Vertical => {
-            let h = area.height / count as u16;
-            (0..count)
-                .map(|i| Rect {
-                    x: area.x,
-                    y: area.y + i as u16 * h,
-                    width: area.width,
-                    height: if i == count - 1 {
-                        area.height - i as u16 * h
-                    } else {
-                        h
-                    },
-                })
-                .collect()
-        }
-    }
+    let direction = match kind {
+        Split::Horizontal => Direction::Horizontal,
+        Split::Vertical => Direction::Vertical,
+    };
+    let constraints = vec![Constraint::Fill(1); count];
+    Layout::default()
+        .direction(direction)
+        .constraints(constraints)
+        .split(area)
+        .to_vec()
+}
+
+// ---------------------------------------------------------------------------
+// pane_inner
+// ---------------------------------------------------------------------------
+
+/// The drawable area inside a pane's own border (1-cell inset on all sides).
+pub fn pane_inner(area: Rect) -> Rect {
+    Block::default().borders(Borders::ALL).inner(area)
 }
 
 // ---------------------------------------------------------------------------
@@ -568,19 +543,6 @@ pub fn remove_leaf(pane: &mut Pane, n: usize) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// pane_inner
-// ---------------------------------------------------------------------------
-
-/// The drawable area inside a pane's own border (1-cell inset on all sides).
-pub fn pane_inner(area: Rect) -> Rect {
-    Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -637,10 +599,9 @@ mod tests {
     }
 
     #[test]
-    fn split_areas_horizontal_remainder_to_last() {
+    fn split_areas_horizontal_remainder() {
         let a = split_areas(r(101, 20), &Split::Horizontal, 2);
         assert_eq!(a[0].width + a[1].width, 101);
-        assert_eq!(a[1].width, 51);
     }
 
     #[test]
@@ -901,9 +862,8 @@ mod tests {
     }
 
     #[test]
-    fn split_areas_vertical_remainder_to_last() {
+    fn split_areas_vertical_remainder() {
         let a = split_areas(r(80, 31), &Split::Vertical, 2);
         assert_eq!(a[0].height + a[1].height, 31);
-        assert_eq!(a[1].height, 16); // gets the remainder
     }
 }

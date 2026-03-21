@@ -34,13 +34,8 @@ impl Tab {
     }
 
     pub fn display_name(&self) -> &str {
-        if self.leaf_count() == 1 {
-            match &self.root {
-                Pane::Connect { .. } => "<connect>",
-                Pane::Session { .. } => &self.name,
-                Pane::FileBrowser { .. } => &self.name,
-                _ => &self.name,
-            }
+        if self.leaf_count() == 1 && matches!(self.root, Pane::Connect { .. }) {
+            "<connect>"
         } else {
             &self.name
         }
