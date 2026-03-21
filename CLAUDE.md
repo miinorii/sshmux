@@ -11,6 +11,7 @@ cargo test                   # Run all tests (~125 tests, inline in source files
 cargo test pane::tests       # Run tests for a specific module
 cargo test test_name         # Run a single test by name
 cargo clippy --release       # Lint — keep at zero warnings
+cargo fmt                    # Format — run before every commit
 ```
 
 Debug logging: `sshmux --debug` creates a timestamped log file in the current directory.
