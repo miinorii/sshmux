@@ -337,28 +337,39 @@ fn main() -> Result<()> {
                                 }
                             }
                             KeyCode::Char('b') | KeyCode::Char('B') => {
-                                if let Some(Pane::Connect { browser_menu, show_help, .. }) =
+                                if let Some(Pane::Connect { browser_menu, connect_input, show_help, .. }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
                                     *show_help = false;
+                                    *connect_input = None;
                                     let mut ms = ListState::default();
                                     ms.select(Some(0));
                                     *browser_menu = Some(ms);
                                 }
                             }
                             KeyCode::Char('c') | KeyCode::Char('C') => {
-                                if let Some(Pane::Connect { connect_input, show_help, .. }) =
+                                if let Some(Pane::Connect { browser_menu, connect_input, show_help, .. }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
                                     *show_help = false;
+                                    *browser_menu = None;
                                     *connect_input = Some(String::new());
                                 }
                             }
                             KeyCode::Char('h') | KeyCode::Char('H') => {
-                                if let Some(Pane::Connect { show_help, .. }) =
+                                if let Some(Pane::Connect { browser_menu, connect_input, show_help, .. }) =
                                     app.tab_mut().focused_pane_mut()
                                 {
                                     *show_help = !*show_help;
+                                    *browser_menu = None;
+                                    *connect_input = None;
+                                }
+                            }
+                            KeyCode::Esc => {
+                                if let Some(Pane::Connect { show_help, .. }) =
+                                    app.tab_mut().focused_pane_mut()
+                                {
+                                    *show_help = false;
                                 }
                             }
                             _ => {}
