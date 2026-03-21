@@ -47,7 +47,7 @@ pub struct EmbeddedTerminal {
 }
 
 impl EmbeddedTerminal {
-    pub fn new(rows: u16, cols: u16, cmd: CommandBuilder) -> Result<Self> {
+    pub fn new(rows: u16, cols: u16, cmd: CommandBuilder, capture_raw: bool) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows,
@@ -88,8 +88,10 @@ impl EmbeddedTerminal {
                         if let Ok(mut p) = parser_c.lock() {
                             p.process(data);
                         }
-                        if let Ok(mut rb) = raw_output_c.lock() {
-                            rb.extend_from_slice(data);
+                        if capture_raw {
+                            if let Ok(mut rb) = raw_output_c.lock() {
+                                rb.extend_from_slice(data);
+                            }
                         }
                         dirty_c.store(true, Ordering::Release);
 
@@ -142,7 +144,7 @@ impl EmbeddedTerminal {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         info!("SSH session {}x{} host={}", cols, rows, host);
-        Self::new(rows, cols, cmd)
+        Self::new(rows, cols, cmd, false)
     }
 
     /// Spawn an SFTP subsession to `host` (small fixed size, never rendered).
@@ -151,7 +153,7 @@ impl EmbeddedTerminal {
         cmd.arg(host);
         cmd.env("TERM", "dumb");
         info!("SFTP session host={}", host);
-        Self::new(200, 220, cmd)
+        Self::new(200, 220, cmd, true)
     }
 
     /// Spawn an SSH shell to `host` for browsing (fixed size, parsed not rendered).
@@ -161,7 +163,7 @@ impl EmbeddedTerminal {
         cmd.arg("-t");
         cmd.env("TERM", "dumb");
         info!("SSH shell host={}", host);
-        Self::new(200, 220, cmd)
+        Self::new(200, 220, cmd, true)
     }
 
     pub fn send_str(&mut self, s: &str) {

@@ -662,7 +662,7 @@ impl SshBrowser {
                 self.host, remote_file, local_dest
             );
 
-            match EmbeddedTerminal::new(24, 80, cmd) {
+            match EmbeddedTerminal::new(24, 80, cmd, true) {
                 Ok(term) => {
                     self.scp_pty = Some(term);
                     self.last_transfer = Some(TransferStatus {
@@ -722,7 +722,7 @@ impl SshBrowser {
                 self.remote_path.trim_end_matches('/')
             );
 
-            match EmbeddedTerminal::new(24, 80, cmd) {
+            match EmbeddedTerminal::new(24, 80, cmd, true) {
                 Ok(term) => {
                     self.scp_pty = Some(term);
                     self.last_transfer = Some(TransferStatus {
