@@ -336,7 +336,7 @@ impl EmbeddedTerminal {
             }
         }
 
-        if self.cursor_visible.load(Ordering::Acquire) {
+        if self.scroll_offset == 0 && self.cursor_visible.load(Ordering::Acquire) {
             let (cy, cx) = screen.cursor_position();
             let sx = area.x + cx;
             let sy = area.y + cy;
@@ -350,7 +350,7 @@ impl EmbeddedTerminal {
     }
 
     pub fn cursor_pos(&self) -> Option<(u16, u16)> {
-        if !self.cursor_visible.load(Ordering::Acquire) {
+        if self.scroll_offset > 0 || !self.cursor_visible.load(Ordering::Acquire) {
             return None;
         }
         let Ok(parser) = self.parser.try_lock() else {
