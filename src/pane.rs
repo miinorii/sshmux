@@ -173,8 +173,8 @@ impl Pane {
             Pane::Session { terminal, .. } => terminal.dirty.swap(false, Ordering::AcqRel),
             Pane::FileBrowser { browser } => {
                 let pty_dirty = browser.sftp.dirty.swap(false, Ordering::AcqRel);
-                let state_dirty = browser.needs_redraw;
-                browser.needs_redraw = false;
+                let state_dirty = browser.core.needs_redraw;
+                browser.core.needs_redraw = false;
                 pty_dirty || state_dirty
             }
             Pane::SshBrowser { browser } => {
@@ -184,8 +184,8 @@ impl Pane {
                     .as_ref()
                     .map(|s| s.dirty.swap(false, Ordering::AcqRel))
                     .unwrap_or(false);
-                let state_dirty = browser.needs_redraw;
-                browser.needs_redraw = false;
+                let state_dirty = browser.core.needs_redraw;
+                browser.core.needs_redraw = false;
                 pty_dirty || scp_dirty || state_dirty
             }
             Pane::Split { children, .. } => children.iter_mut().any(|c| c.any_dirty()),

@@ -189,44 +189,12 @@ pub fn scrape_transfer_progress(lines: &[String]) -> Option<String> {
 
 /// Decompose a Unix timestamp into (year, month, day, hour, minute).
 pub fn epoch_to_ymd(secs: u64) -> (u32, u32, u32, u32, u32) {
-    let mi = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
-    let days = secs / 86400;
-    let mut y = 1970u32;
-    let mut d = days as u32;
-    loop {
-        let leap = y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
-        let ydays = if leap { 366 } else { 365 };
-        if d < ydays {
-            break;
-        }
-        d -= ydays;
-        y += 1;
-    }
-    let leap = y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
-    let month_days: [u32; 12] = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut mo = 0u32;
-    for mlen in month_days {
-        if d < mlen {
-            break;
-        }
-        d -= mlen;
-        mo += 1;
-    }
-    (y, mo + 1, d + 1, h as u32, mi as u32)
+    let Ok(dt) = time::OffsetDateTime::from_unix_timestamp(secs as i64) else {
+        return (1970, 1, 1, 0, 0);
+    };
+    let (y, mo, d) = dt.to_calendar_date();
+    let (h, mi, _) = dt.to_hms();
+    (y as u32, mo as u32, d as u32, h as u32, mi as u32)
 }
 
 /// Returns a list of available root paths to browse.

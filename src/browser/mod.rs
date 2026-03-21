@@ -1,10 +1,12 @@
 use ratatui::layout::Rect;
 
+pub mod common;
 pub mod parse;
 pub mod sftp;
 pub mod ssh;
 
-pub use sftp::{BrowserFocus, FileBrowser, SftpState};
+pub use common::{BrowserKeyAction, DragAction, handle_browser_key};
+pub use sftp::{FileBrowser, SftpState};
 pub use ssh::{SshBrowser, SshBrowserState};
 
 /// Layout areas for the dual-pane browser UI.
