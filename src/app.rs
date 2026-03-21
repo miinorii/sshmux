@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+
 
 use anyhow::Result;
 use ratatui::{
@@ -115,7 +115,7 @@ impl App {
 
     pub fn focused_pane_app_cursor(&self) -> bool {
         if let Some(Pane::Session { terminal }) = self.tab().focused_pane() {
-            terminal.app_cursor.load(Ordering::Relaxed)
+            terminal.app_cursor()
         } else {
             false
         }

@@ -38,9 +38,6 @@ pub struct EmbeddedTerminal {
     pub master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pub dirty: Arc<AtomicBool>,
-    pub mouse_active: Arc<AtomicBool>,
-    pub app_cursor: Arc<AtomicBool>,
-    pub cursor_visible: Arc<AtomicBool>,
     pub rows: u16,
     pub cols: u16,
     pub raw_output: Arc<Mutex<Vec<u8>>>,
@@ -67,24 +64,17 @@ impl EmbeddedTerminal {
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
         let dirty = Arc::new(AtomicBool::new(false));
-        let mouse_active = Arc::new(AtomicBool::new(false));
-        let app_cursor = Arc::new(AtomicBool::new(false));
-        let cursor_visible = Arc::new(AtomicBool::new(true));
         let raw_output = Arc::new(Mutex::new(Vec::<u8>::new()));
         let exited = Arc::new(AtomicBool::new(false));
 
         let parser_c = Arc::clone(&parser);
         let writer_c = Arc::clone(&writer);
         let dirty_c = Arc::clone(&dirty);
-        let mouse_active_c = Arc::clone(&mouse_active);
-        let app_cursor_c = Arc::clone(&app_cursor);
-        let cursor_visible_c = Arc::clone(&cursor_visible);
         let raw_output_c = Arc::clone(&raw_output);
         let exited_c = Arc::clone(&exited);
 
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
-            let mut carry: Vec<u8> = Vec::new();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
@@ -102,65 +92,6 @@ impl EmbeddedTerminal {
                             rb.extend_from_slice(data);
                         }
                         dirty_c.store(true, Ordering::Release);
-
-                        // Build scan buffer: leftover incomplete sequence from the
-                        // previous read (if any) prepended to the new data.
-                        let mut scan = std::mem::take(&mut carry);
-                        scan.extend_from_slice(data);
-
-                        // Scan for DEC private mode set/reset sequences (ESC [ ? ... h/l).
-                        // Incomplete sequences at the end of the buffer are saved in
-                        // `carry` and prepended to the next read so nothing is missed.
-                        let mut i = 0;
-                        while i < scan.len() {
-                            if scan[i] != 0x1b {
-                                i += 1;
-                                continue;
-                            }
-                            if i + 1 >= scan.len() {
-                                carry = scan[i..].to_vec();
-                                break;
-                            }
-                            if scan[i + 1] != b'[' {
-                                i += 2;
-                                continue;
-                            }
-                            if i + 2 >= scan.len() {
-                                carry = scan[i..].to_vec();
-                                break;
-                            }
-                            if scan[i + 2] != b'?' {
-                                i += 3;
-                                continue;
-                            }
-                            let start = i + 3;
-                            let mut end = start;
-                            while end < scan.len() && scan[end] != b'h' && scan[end] != b'l' {
-                                end += 1;
-                            }
-                            if end >= scan.len() {
-                                carry = scan[i..].to_vec();
-                                break;
-                            }
-                            if let Ok(params) = std::str::from_utf8(&scan[start..end]) {
-                                let set = scan[end] == b'h';
-                                for param in params.split(';') {
-                                    match param.trim() {
-                                        "1" => {
-                                            app_cursor_c.store(set, Ordering::Release);
-                                        }
-                                        "1000" | "1002" | "1003" | "1006" => {
-                                            mouse_active_c.store(set, Ordering::Release);
-                                        }
-                                        "25" => {
-                                            cursor_visible_c.store(set, Ordering::Release);
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            i = end + 1;
-                        }
 
                         // Reply to DSR probes
                         let dsr_count = count_dsr(data);
@@ -194,9 +125,6 @@ impl EmbeddedTerminal {
             master,
             writer,
             dirty,
-            mouse_active,
-            app_cursor,
-            cursor_visible,
             rows,
             cols,
             raw_output,
@@ -266,6 +194,30 @@ impl EmbeddedTerminal {
         self.cols = cols;
     }
 
+    pub fn mouse_active(&self) -> bool {
+        let Ok(p) = self.parser.try_lock() else {
+            return false;
+        };
+        !matches!(
+            p.screen().mouse_protocol_mode(),
+            vt100::MouseProtocolMode::None
+        )
+    }
+
+    pub fn app_cursor(&self) -> bool {
+        let Ok(p) = self.parser.try_lock() else {
+            return false;
+        };
+        p.screen().application_cursor()
+    }
+
+    pub fn alternate_screen(&self) -> bool {
+        let Ok(p) = self.parser.try_lock() else {
+            return false;
+        };
+        p.screen().alternate_screen()
+    }
+
     pub fn scroll_up(&mut self, n: usize) {
         self.scroll_offset = self.scroll_offset.saturating_add(n);
         if let Ok(mut p) = self.parser.lock() {
@@ -321,6 +273,9 @@ impl EmbeddedTerminal {
                         if cell.bold() {
                             style = style.add_modifier(Modifier::BOLD);
                         }
+                        if cell.dim() {
+                            style = style.add_modifier(Modifier::DIM);
+                        }
                         if cell.italic() {
                             style = style.add_modifier(Modifier::ITALIC);
                         }
@@ -336,7 +291,7 @@ impl EmbeddedTerminal {
             }
         }
 
-        if self.scroll_offset == 0 && self.cursor_visible.load(Ordering::Acquire) {
+        if self.scroll_offset == 0 && !screen.hide_cursor() {
             let (cy, cx) = screen.cursor_position();
             let sx = area.x + cx;
             let sy = area.y + cy;
@@ -350,12 +305,15 @@ impl EmbeddedTerminal {
     }
 
     pub fn cursor_pos(&self) -> Option<(u16, u16)> {
-        if self.scroll_offset > 0 || !self.cursor_visible.load(Ordering::Acquire) {
+        if self.scroll_offset > 0 {
             return None;
         }
         let Ok(parser) = self.parser.try_lock() else {
             return None;
         };
+        if parser.screen().hide_cursor() {
+            return None;
+        }
         let (cy, cx) = parser.screen().cursor_position();
         Some((cx, cy))
     }

@@ -9,7 +9,7 @@ use crossterm::{
 use log::{debug, error};
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, widgets::ListState};
 
-use std::sync::atomic::Ordering;
+
 
 // ---------------------------------------------------------------------------
 // Module declarations
@@ -676,7 +676,7 @@ fn main() -> Result<()> {
                             .leaf_mut(pane_idx)
                             .map(|p| {
                                 if let Pane::Session { terminal } = p {
-                                    terminal.mouse_active.load(Ordering::Acquire)
+                                    terminal.mouse_active()
                                         && !terminal.process_exited()
                                 } else {
                                     false
@@ -685,12 +685,24 @@ fn main() -> Result<()> {
                             .unwrap_or(false);
 
                         // Scrollback when remote app doesn't capture mouse
+                        // and is not in alternate screen (vim, htop, etc.)
                         if !pane_wants_mouse {
+                            let in_alt_screen = app.tabs[app.selected_tab]
+                                .root
+                                .leaf(pane_idx)
+                                .map(|p| {
+                                    if let Pane::Session { terminal } = p {
+                                        terminal.alternate_screen()
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .unwrap_or(false);
                             let is_scroll = matches!(
                                 mouse.kind,
                                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                             );
-                            if is_scroll {
+                            if is_scroll && !in_alt_screen {
                                 if let Some(Pane::Session { terminal }) =
                                     app.tabs[app.selected_tab].root.leaf_mut(pane_idx)
                                 {
