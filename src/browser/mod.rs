@@ -44,3 +44,74 @@ pub fn browser_layout(inner: Rect) -> BrowserLayout {
         status,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_splits_evenly() {
+        let inner = Rect::new(0, 0, 100, 40);
+        let layout = browser_layout(inner);
+        assert_eq!(layout.local_panel.x, 0);
+        assert_eq!(layout.local_panel.width, 50);
+        assert_eq!(layout.remote_panel.x, 50);
+        assert_eq!(layout.remote_panel.width, 50);
+    }
+
+    #[test]
+    fn layout_odd_width_gives_extra_to_remote() {
+        let inner = Rect::new(0, 0, 101, 40);
+        let layout = browser_layout(inner);
+        assert_eq!(layout.local_panel.width, 50);
+        assert_eq!(layout.remote_panel.width, 51);
+    }
+
+    #[test]
+    fn layout_status_bar_one_row() {
+        let inner = Rect::new(0, 0, 80, 30);
+        let layout = browser_layout(inner);
+        assert_eq!(layout.status.height, 1);
+        assert_eq!(layout.status.y, 29);
+        assert_eq!(layout.status.width, 80);
+    }
+
+    #[test]
+    fn layout_panels_exclude_status() {
+        let inner = Rect::new(0, 0, 80, 30);
+        let layout = browser_layout(inner);
+        assert_eq!(layout.local_panel.height, 29);
+        assert_eq!(layout.remote_panel.height, 29);
+    }
+
+    #[test]
+    fn layout_offset_area() {
+        let inner = Rect::new(5, 3, 80, 30);
+        let layout = browser_layout(inner);
+        assert_eq!(layout.local_panel.x, 5);
+        assert_eq!(layout.remote_panel.x, 45);
+        assert_eq!(layout.status.x, 5);
+        assert_eq!(layout.status.y, 32);
+    }
+
+    #[test]
+    fn layout_zero_height_saturates() {
+        let inner = Rect::new(0, 0, 80, 0);
+        let layout = browser_layout(inner);
+        assert_eq!(layout.local_panel.height, 0);
+        // Status bar always claims 1 row; at zero height, it still has height 1
+        // but sits at y=0 (overlapping). This is fine since ratatui handles the
+        // zero-area case gracefully.
+        assert_eq!(layout.status.height, 1);
+    }
+
+    #[test]
+    fn layout_height_one() {
+        let inner = Rect::new(0, 0, 80, 1);
+        let layout = browser_layout(inner);
+        // panels_area height = 1 - 1 = 0, status takes the last row
+        assert_eq!(layout.local_panel.height, 0);
+        assert_eq!(layout.status.height, 1);
+        assert_eq!(layout.status.y, 0);
+    }
+}

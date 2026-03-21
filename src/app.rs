@@ -193,3 +193,100 @@ impl App {
             .render(content, buf, hosts, focus_idx, leaf_count, &mut idx);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_app() -> App {
+        App {
+            tabs: vec![Tab::new("1")],
+            selected_tab: 0,
+            hosts: vec![],
+        }
+    }
+
+    #[test]
+    fn new_app_has_one_tab() {
+        let app = make_app();
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.selected_tab, 0);
+    }
+
+    #[test]
+    fn new_tab_appends_and_selects() {
+        let mut app = make_app();
+        app.new_tab();
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.selected_tab, 1);
+    }
+
+    #[test]
+    fn new_tab_names_incrementally() {
+        let mut app = make_app();
+        app.new_tab();
+        assert_eq!(app.tabs[1].name, "2");
+        app.new_tab();
+        assert_eq!(app.tabs[2].name, "3");
+    }
+
+    #[test]
+    fn close_tab_removes_current() {
+        let mut app = make_app();
+        app.new_tab();
+        app.new_tab();
+        assert_eq!(app.tabs.len(), 3);
+        app.selected_tab = 1;
+        app.close_tab();
+        assert_eq!(app.tabs.len(), 2);
+    }
+
+    #[test]
+    fn close_last_tab_recreates_default() {
+        let mut app = make_app();
+        app.close_tab();
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.selected_tab, 0);
+        assert_eq!(app.tabs[0].name, "1");
+    }
+
+    #[test]
+    fn close_tab_clamps_index() {
+        let mut app = make_app();
+        app.new_tab();
+        app.selected_tab = 1;
+        app.close_tab();
+        assert_eq!(app.selected_tab, 0);
+    }
+
+    #[test]
+    fn close_tab_middle_preserves_order() {
+        let mut app = make_app();
+        app.new_tab(); // "2"
+        app.new_tab(); // "3"
+        app.selected_tab = 1;
+        app.close_tab();
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[0].name, "1");
+        assert_eq!(app.tabs[1].name, "3");
+    }
+
+    #[test]
+    fn tab_accessors() {
+        let mut app = make_app();
+        app.new_tab();
+        app.selected_tab = 0;
+        assert_eq!(app.tab().name, "1");
+        app.tab_mut().name = "renamed".to_string();
+        assert_eq!(app.tab().name, "renamed");
+    }
+
+    #[test]
+    fn focused_pane_is_connect_by_default() {
+        let app = make_app();
+        assert!(matches!(
+            app.tab().focused_pane(),
+            Some(Pane::Connect { .. })
+        ));
+    }
+}

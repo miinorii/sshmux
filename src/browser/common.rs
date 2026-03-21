@@ -19,7 +19,7 @@ use crate::pane::{pane_inner, render_pane_border};
 // Shared types
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrowserFocus {
     Local,
     Remote,
@@ -749,5 +749,411 @@ pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode) -> BrowserKeyAc
         },
         KeyCode::Delete => BrowserKeyAction::Delete,
         _ => BrowserKeyAction::Handled,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_entry(name: &str, is_dir: bool) -> FsEntry {
+        FsEntry {
+            name: name.to_string(),
+            is_dir,
+            size: "0".to_string(),
+            perms: "drwxr-xr-x".to_string(),
+            modified: "2025-01-01".to_string(),
+        }
+    }
+
+    fn core_with_remote_entries(names: &[(&str, bool)]) -> BrowserCore {
+        let mut core = BrowserCore::new("test-host");
+        core.remote_entries = names.iter().map(|(n, d)| dummy_entry(n, *d)).collect();
+        core.remote_sel.select(Some(0));
+        core
+    }
+
+    #[test]
+    fn nav_down_advances_remote_selection() {
+        let mut core =
+            core_with_remote_entries(&[("..", true), ("dir1", true), ("file.txt", false)]);
+        core.focus = BrowserFocus::Remote;
+        core.remote_sel.select(Some(0));
+        core.nav_down();
+        assert_eq!(core.remote_sel.selected(), Some(1));
+    }
+
+    #[test]
+    fn nav_up_retreats_remote_selection() {
+        let mut core =
+            core_with_remote_entries(&[("..", true), ("dir1", true), ("file.txt", false)]);
+        core.focus = BrowserFocus::Remote;
+        core.remote_sel.select(Some(2));
+        core.nav_up();
+        assert_eq!(core.remote_sel.selected(), Some(1));
+    }
+
+    // ---- toggle_focus -------------------------------------------------------
+
+    #[test]
+    fn toggle_focus_switches_local_to_remote() {
+        let mut core = BrowserCore::new("host");
+        assert_eq!(core.focus, BrowserFocus::Local);
+        core.toggle_focus();
+        assert_eq!(core.focus, BrowserFocus::Remote);
+    }
+
+    #[test]
+    fn toggle_focus_switches_remote_to_local() {
+        let mut core = BrowserCore::new("host");
+        core.focus = BrowserFocus::Remote;
+        core.toggle_focus();
+        assert_eq!(core.focus, BrowserFocus::Local);
+    }
+
+    #[test]
+    fn toggle_focus_dismisses_drive_picker() {
+        let mut core = BrowserCore::new("host");
+        core.drive_picker = Some((vec![], ListState::default()));
+        core.toggle_focus();
+        assert!(core.drive_picker.is_none());
+    }
+
+    // ---- scroll_left / scroll_right -----------------------------------------
+
+    #[test]
+    fn scroll_right_increments_by_four() {
+        let mut core = BrowserCore::new("host");
+        core.scroll_right();
+        assert_eq!(core.local_scroll_x, 4);
+        assert!(core.needs_redraw);
+    }
+
+    #[test]
+    fn scroll_left_decrements_by_four() {
+        let mut core = BrowserCore::new("host");
+        core.local_scroll_x = 8;
+        core.scroll_left();
+        assert_eq!(core.local_scroll_x, 4);
+    }
+
+    #[test]
+    fn scroll_left_saturates_at_zero() {
+        let mut core = BrowserCore::new("host");
+        core.local_scroll_x = 2;
+        core.scroll_left();
+        assert_eq!(core.local_scroll_x, 0);
+    }
+
+    #[test]
+    fn scroll_left_noop_when_zero() {
+        let mut core = BrowserCore::new("host");
+        core.needs_redraw = false;
+        core.scroll_left();
+        assert!(!core.needs_redraw);
+    }
+
+    #[test]
+    fn scroll_affects_remote_when_focused() {
+        let mut core = BrowserCore::new("host");
+        core.focus = BrowserFocus::Remote;
+        core.scroll_right();
+        assert_eq!(core.remote_scroll_x, 4);
+        assert_eq!(core.local_scroll_x, 0);
+    }
+
+    // ---- apply_cd -----------------------------------------------------------
+
+    #[test]
+    fn apply_cd_subdir() {
+        let mut core = BrowserCore::new("host");
+        core.remote_path = "/home/user".to_string();
+        core.apply_cd("docs");
+        assert_eq!(core.remote_path, "/home/user/docs");
+    }
+
+    #[test]
+    fn apply_cd_parent() {
+        let mut core = BrowserCore::new("host");
+        core.remote_path = "/home/user/docs".to_string();
+        core.apply_cd("..");
+        assert_eq!(core.remote_path, "/home/user");
+    }
+
+    #[test]
+    fn apply_cd_parent_at_root() {
+        let mut core = BrowserCore::new("host");
+        core.remote_path = "/".to_string();
+        core.apply_cd("..");
+        assert_eq!(core.remote_path, "/");
+    }
+
+    #[test]
+    fn apply_cd_parent_from_top_level_dir() {
+        let mut core = BrowserCore::new("host");
+        core.remote_path = "/home".to_string();
+        core.apply_cd("..");
+        assert_eq!(core.remote_path, "/");
+    }
+
+    #[test]
+    fn apply_cd_no_double_slash() {
+        let mut core = BrowserCore::new("host");
+        core.remote_path = "/home/user/".to_string();
+        core.apply_cd("docs");
+        assert_eq!(core.remote_path, "/home/user/docs");
+    }
+
+    // ---- format_duration ----------------------------------------------------
+
+    #[test]
+    fn format_duration_millis() {
+        assert_eq!(
+            BrowserCore::format_duration(Duration::from_millis(42)),
+            "42ms"
+        );
+    }
+
+    #[test]
+    fn format_duration_seconds() {
+        assert_eq!(BrowserCore::format_duration(Duration::from_secs(5)), "5s");
+    }
+
+    #[test]
+    fn format_duration_minutes() {
+        assert_eq!(BrowserCore::format_duration(Duration::from_secs(120)), "2m");
+    }
+
+    #[test]
+    fn format_duration_hours() {
+        assert_eq!(
+            BrowserCore::format_duration(Duration::from_secs(7200)),
+            "2h"
+        );
+    }
+
+    #[test]
+    fn format_duration_boundary_999ms() {
+        assert_eq!(
+            BrowserCore::format_duration(Duration::from_millis(999)),
+            "999ms"
+        );
+    }
+
+    #[test]
+    fn format_duration_boundary_1000ms() {
+        assert_eq!(
+            BrowserCore::format_duration(Duration::from_millis(1000)),
+            "1s"
+        );
+    }
+
+    // ---- confirm_delete_no --------------------------------------------------
+
+    #[test]
+    fn confirm_delete_no_clears_state() {
+        let mut core = BrowserCore::new("host");
+        core.confirm_delete = Some("remote:file:/tmp/test.txt".to_string());
+        core.confirm_delete_no();
+        assert!(core.confirm_delete.is_none());
+        assert_eq!(core.status_msg, "Deletion cancelled.");
+        assert_eq!(core.status_color, Color::Yellow);
+        assert!(core.needs_redraw);
+    }
+
+    // ---- local_delete_focused -----------------------------------------------
+
+    #[test]
+    fn local_delete_focused_sets_confirm() {
+        let mut core = BrowserCore::new("host");
+        // local_entries already populated from cwd; add a known entry
+        core.local_entries = vec![dummy_entry("..", true), dummy_entry("myfile.txt", false)];
+        core.local_sel.select(Some(1));
+        core.local_delete_focused();
+        assert!(core.confirm_delete.is_some());
+        let tag = core.confirm_delete.unwrap();
+        assert!(tag.starts_with("local:file:"));
+        assert!(tag.contains("myfile.txt"));
+    }
+
+    #[test]
+    fn local_delete_focused_skips_dotdot() {
+        let mut core = BrowserCore::new("host");
+        core.local_entries = vec![dummy_entry("..", true)];
+        core.local_sel.select(Some(0));
+        core.local_delete_focused();
+        assert!(core.confirm_delete.is_none());
+    }
+
+    // ---- stop_timer ---------------------------------------------------------
+
+    #[test]
+    fn stop_timer_records_duration() {
+        let mut core = BrowserCore::new("host");
+        core.cmd_start = Some(Instant::now());
+        std::thread::sleep(Duration::from_millis(5));
+        core.stop_timer();
+        assert!(core.cmd_start.is_none());
+        assert!(core.last_duration.is_some());
+    }
+
+    #[test]
+    fn stop_timer_noop_without_start() {
+        let mut core = BrowserCore::new("host");
+        core.stop_timer();
+        assert!(core.last_duration.is_none());
+    }
+
+    // ---- dismiss_drive_picker -----------------------------------------------
+
+    #[test]
+    fn dismiss_drive_picker_when_active() {
+        let mut core = BrowserCore::new("host");
+        core.drive_picker = Some((vec![], ListState::default()));
+        core.needs_redraw = false;
+        core.dismiss_drive_picker();
+        assert!(core.drive_picker.is_none());
+        assert!(core.needs_redraw);
+    }
+
+    #[test]
+    fn dismiss_drive_picker_noop_when_none() {
+        let mut core = BrowserCore::new("host");
+        core.needs_redraw = false;
+        core.dismiss_drive_picker();
+        assert!(!core.needs_redraw);
+    }
+
+    // ---- handle_browser_key -------------------------------------------------
+
+    #[test]
+    fn key_tab_toggles_focus() {
+        let mut core = BrowserCore::new("host");
+        assert_eq!(core.focus, BrowserFocus::Local);
+        let action = handle_browser_key(&mut core, KeyCode::Tab);
+        assert!(matches!(action, BrowserKeyAction::Handled));
+        assert_eq!(core.focus, BrowserFocus::Remote);
+    }
+
+    #[test]
+    fn key_enter_returns_enter_action() {
+        let mut core = BrowserCore::new("host");
+        assert!(matches!(
+            handle_browser_key(&mut core, KeyCode::Enter),
+            BrowserKeyAction::Enter
+        ));
+    }
+
+    #[test]
+    fn key_space_returns_enter_action() {
+        let mut core = BrowserCore::new("host");
+        assert!(matches!(
+            handle_browser_key(&mut core, KeyCode::Char(' ')),
+            BrowserKeyAction::Enter
+        ));
+    }
+
+    #[test]
+    fn key_backspace_returns_go_up() {
+        let mut core = BrowserCore::new("host");
+        assert!(matches!(
+            handle_browser_key(&mut core, KeyCode::Backspace),
+            BrowserKeyAction::GoUp
+        ));
+    }
+
+    #[test]
+    fn key_t_remote_returns_download() {
+        let mut core = BrowserCore::new("host");
+        core.focus = BrowserFocus::Remote;
+        assert!(matches!(
+            handle_browser_key(&mut core, KeyCode::Char('t')),
+            BrowserKeyAction::Download
+        ));
+    }
+
+    #[test]
+    fn key_t_local_returns_upload() {
+        let mut core = BrowserCore::new("host");
+        core.focus = BrowserFocus::Local;
+        assert!(matches!(
+            handle_browser_key(&mut core, KeyCode::Char('t')),
+            BrowserKeyAction::Upload
+        ));
+    }
+
+    #[test]
+    fn key_delete_returns_delete() {
+        let mut core = BrowserCore::new("host");
+        assert!(matches!(
+            handle_browser_key(&mut core, KeyCode::Delete),
+            BrowserKeyAction::Delete
+        ));
+    }
+
+    #[test]
+    fn key_unknown_returns_handled() {
+        let mut core = BrowserCore::new("host");
+        assert!(matches!(
+            handle_browser_key(&mut core, KeyCode::F(5)),
+            BrowserKeyAction::Handled
+        ));
+    }
+
+    // ---- confirm delete key dispatch ----------------------------------------
+
+    #[test]
+    fn key_y_during_confirm_returns_confirm_yes() {
+        let mut core = BrowserCore::new("host");
+        core.confirm_delete = Some("remote:file:/tmp/x".to_string());
+        assert!(matches!(
+            handle_browser_key(&mut core, KeyCode::Char('y')),
+            BrowserKeyAction::ConfirmDeleteYes
+        ));
+    }
+
+    #[test]
+    fn key_n_during_confirm_cancels() {
+        let mut core = BrowserCore::new("host");
+        core.confirm_delete = Some("remote:file:/tmp/x".to_string());
+        let action = handle_browser_key(&mut core, KeyCode::Char('n'));
+        assert!(matches!(action, BrowserKeyAction::Handled));
+        assert!(core.confirm_delete.is_none());
+    }
+
+    #[test]
+    fn key_esc_during_confirm_cancels() {
+        let mut core = BrowserCore::new("host");
+        core.confirm_delete = Some("remote:file:/tmp/x".to_string());
+        let action = handle_browser_key(&mut core, KeyCode::Esc);
+        assert!(matches!(action, BrowserKeyAction::Handled));
+        assert!(core.confirm_delete.is_none());
+    }
+
+    #[test]
+    fn key_random_during_confirm_is_swallowed() {
+        let mut core = BrowserCore::new("host");
+        core.confirm_delete = Some("remote:file:/tmp/x".to_string());
+        let action = handle_browser_key(&mut core, KeyCode::Char('z'));
+        assert!(matches!(action, BrowserKeyAction::Handled));
+        // confirm_delete is still active
+        assert!(core.confirm_delete.is_some());
+    }
+
+    // ---- BrowserCore::new ---------------------------------------------------
+
+    #[test]
+    fn new_core_defaults() {
+        let core = BrowserCore::new("myhost");
+        assert_eq!(core.host, "myhost");
+        assert_eq!(core.remote_path, ".");
+        assert!(core.remote_entries.is_empty());
+        assert_eq!(core.focus, BrowserFocus::Local);
+        assert!(core.confirm_delete.is_none());
+        assert!(core.drive_picker.is_none());
+        assert_eq!(core.local_scroll_x, 0);
+        assert_eq!(core.remote_scroll_x, 0);
+        assert_eq!(core.prompt_stable, 0);
+        assert_eq!(core.status_msg, "Connecting…");
     }
 }

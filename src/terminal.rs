@@ -357,3 +357,57 @@ impl EmbeddedTerminal {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dsr_empty_input() {
+        assert_eq!(count_dsr(b""), 0);
+    }
+
+    #[test]
+    fn dsr_no_match() {
+        assert_eq!(count_dsr(b"hello world"), 0);
+    }
+
+    #[test]
+    fn dsr_single() {
+        assert_eq!(count_dsr(b"\x1b[6n"), 1);
+    }
+
+    #[test]
+    fn dsr_multiple() {
+        assert_eq!(count_dsr(b"\x1b[6n\x1b[6n"), 2);
+    }
+
+    #[test]
+    fn dsr_surrounded_by_text() {
+        assert_eq!(count_dsr(b"abc\x1b[6ndef\x1b[6nghi"), 2);
+    }
+
+    #[test]
+    fn dsr_partial_sequence_not_counted() {
+        assert_eq!(count_dsr(b"\x1b[6"), 0);
+        assert_eq!(count_dsr(b"\x1b["), 0);
+        assert_eq!(count_dsr(b"\x1b"), 0);
+    }
+
+    #[test]
+    fn dsr_overlapping_bytes() {
+        // ESC [ 6 n immediately followed by another ESC — should count the first
+        assert_eq!(count_dsr(b"\x1b[6n\x1b"), 1);
+    }
+
+    #[test]
+    fn dsr_three_back_to_back() {
+        assert_eq!(count_dsr(b"\x1b[6n\x1b[6n\x1b[6n"), 3);
+    }
+
+    #[test]
+    fn dsr_wrong_final_byte() {
+        // ESC [ 6 m is NOT a DSR
+        assert_eq!(count_dsr(b"\x1b[6m"), 0);
+    }
+}
