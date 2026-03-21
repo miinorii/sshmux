@@ -202,10 +202,7 @@ impl EmbeddedTerminal {
         let Ok(p) = self.parser.try_lock() else {
             return false;
         };
-        !matches!(
-            p.screen().mouse_protocol_mode(),
-            MouseProtocolMode::None
-        )
+        !matches!(p.screen().mouse_protocol_mode(), MouseProtocolMode::None)
     }
 
     pub fn app_cursor(&self) -> bool {

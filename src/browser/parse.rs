@@ -242,10 +242,7 @@ pub fn read_local_dir(path: &Path) -> Vec<FsEntry> {
                 .as_ref()
                 .and_then(|m| m.modified().ok())
                 .map(|t| {
-                    let secs = t
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
+                    let secs = t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
                     let (y, mo, d, h, mi) = epoch_to_ymd(secs);
                     format!("{:04}-{:02}-{:02} {:02}:{:02}", y, mo, d, h, mi)
                 })
