@@ -30,6 +30,7 @@ pub enum Pane {
         list_state: ListState,
         browser_menu: Option<ListState>,
         connect_input: Option<String>,
+        show_help: bool,
     },
     Session {
         terminal: EmbeddedTerminal,
@@ -54,6 +55,7 @@ impl Pane {
             list_state: ls,
             browser_menu: None,
             connect_input: None,
+            show_help: false,
         }
     }
 
@@ -233,6 +235,7 @@ impl Pane {
                 list_state,
                 browser_menu,
                 connect_input,
+                show_help,
             } => {
                 let is_focus = *my_idx == focus_idx;
                 *my_idx += 1;
@@ -254,19 +257,13 @@ impl Pane {
                     area
                 };
 
-                const HELP_LINES: u16 = 9;
                 let list_area = Rect {
                     x: inner.x,
                     y: inner.y,
                     width: inner.width,
-                    height: inner.height.saturating_sub(HELP_LINES + 1),
+                    height: inner.height.saturating_sub(1),
                 };
-                let help_area = Rect {
-                    x: inner.x,
-                    y: inner.y + inner.height.saturating_sub(HELP_LINES),
-                    width: inner.width,
-                    height: HELP_LINES,
-                };
+                let hint_y = inner.y + inner.height.saturating_sub(1);
 
                 let items: Vec<&str> = hosts.iter().map(|h| h.label.as_str()).collect();
                 let list = List::new(items)
@@ -279,33 +276,17 @@ impl Pane {
                     .highlight_symbol("> ");
                 StatefulWidget::render(list, list_area, buf, list_state);
 
-                let shortcuts = [
-                    ("Enter", "connect"),
-                    ("C", "connect (manual)"),
-                    ("B", "file browser"),
-                    ("Alt+T", "new tab"),
-                    ("Alt+W", "close pane / tab"),
-                    ("Alt+-", "split top/bottom"),
-                    ("Alt++", "split left/right"),
-                    ("Alt+\u{2191}\u{2193}", "cycle pane focus"),
-                    ("Alt+\u{2190}\u{2192}", "switch tab"),
-                ];
-                for (i, (key, desc)) in shortcuts.iter().enumerate() {
-                    let y = help_area.y + i as u16;
-                    if y >= help_area.y + help_area.height {
-                        break;
-                    }
-                    buf.set_line(
-                        help_area.x,
-                        y,
-                        &Line::from(vec![
-                            Span::raw(format!("  {:10}", key))
-                                .style(Style::default().fg(Color::Yellow)),
-                            Span::raw(*desc).style(Style::default().fg(Color::DarkGray)),
-                        ]),
-                        help_area.width,
-                    );
-                }
+                buf.set_line(
+                    inner.x,
+                    hint_y,
+                    &Line::from(vec![
+                        Span::raw("  H")
+                            .style(Style::default().fg(Color::Yellow)),
+                        Span::raw(" help")
+                            .style(Style::default().fg(Color::DarkGray)),
+                    ]),
+                    inner.width,
+                );
 
                 // Browser type picker overlay
                 if let Some(menu_state) = browser_menu {
@@ -335,6 +316,56 @@ impl Pane {
                         )
                         .highlight_symbol("> ");
                     StatefulWidget::render(menu_list, menu_area, buf, menu_state);
+                }
+
+                // Help overlay
+                if *show_help {
+                    let shortcuts = [
+                        ("Enter", "connect"),
+                        ("C", "connect (manual)"),
+                        ("B", "file browser"),
+                        ("Alt+T", "new tab"),
+                        ("Alt+W", "close pane / tab"),
+                        ("Alt+-", "split top/bottom"),
+                        ("Alt++", "split left/right"),
+                        ("Alt+\u{2191}\u{2193}", "cycle pane focus"),
+                        ("Alt+\u{2190}\u{2192}", "switch tab"),
+                        ("Ctrl+C", "quit"),
+                    ];
+                    let help_w = 36u16.min(inner.width.saturating_sub(2));
+                    let help_h = (shortcuts.len() as u16 + 2).min(inner.height);
+                    let cx = inner.x + inner.width.saturating_sub(help_w) / 2;
+                    let cy = inner.y + inner.height.saturating_sub(help_h) / 2;
+                    let help_area = Rect {
+                        x: cx,
+                        y: cy,
+                        width: help_w,
+                        height: help_h,
+                    };
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow))
+                        .title(" shortcuts ");
+                    let text_area = block.inner(help_area);
+                    block.render(help_area, buf);
+
+                    for (i, (key, desc)) in shortcuts.iter().enumerate() {
+                        let y = text_area.y + i as u16;
+                        if y >= text_area.y + text_area.height {
+                            break;
+                        }
+                        buf.set_line(
+                            text_area.x,
+                            y,
+                            &Line::from(vec![
+                                Span::raw(format!(" {:10}", key))
+                                    .style(Style::default().fg(Color::Yellow)),
+                                Span::raw(*desc)
+                                    .style(Style::default().fg(Color::DarkGray)),
+                            ]),
+                            text_area.width,
+                        );
+                    }
                 }
 
                 // Connect input overlay
