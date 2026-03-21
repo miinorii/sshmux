@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 use log::error;
-use ratatui::{layout::Rect, widgets::ListState};
+use ratatui::{layout::Rect, style::Color, widgets::ListState};
 
 use crate::app::App;
 use crate::browser::{
@@ -480,7 +480,7 @@ fn handle_ssh_browser_key(app: &mut App, code: KeyCode, ctrl: bool) -> Option<Ac
                     } else {
                         browser.core.status_msg = "Password cancelled".to_string();
                     }
-                    browser.core.status_color = ratatui::style::Color::Yellow;
+                    browser.core.status_color = Color::Yellow;
                 }
                 _ => {}
             }

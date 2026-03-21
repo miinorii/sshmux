@@ -2,12 +2,14 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyEventKind, KeyModifiers},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use log::debug;
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
+use time::OffsetDateTime;
 
 // ---------------------------------------------------------------------------
 // Module declarations
@@ -32,15 +34,15 @@ use pane::pane_inner;
 fn main() -> Result<()> {
     let is_debug = std::env::args().any(|a| a == "--debug");
     if is_debug {
-        let now = time::OffsetDateTime::now_utc();
+        let now = OffsetDateTime::now_utc();
         let (y, mo, d) = now.to_calendar_date();
         let (h, m, s) = now.to_hms();
         let mo = mo as u8;
         let filename = format!("sshmux-debug-{y:04}{mo:02}{d:02}_{h:02}{m:02}{s:02}.log");
         let file = std::fs::File::create(&filename)?;
-        simplelog::WriteLogger::init(
-            simplelog::LevelFilter::Debug,
-            simplelog::ConfigBuilder::new()
+        WriteLogger::init(
+            LevelFilter::Debug,
+            ConfigBuilder::new()
                 .set_time_format_custom(time::macros::format_description!(
                     "[year]-[month]-[day] [hour]:[minute]:[second]"
                 ))
@@ -55,7 +57,7 @@ fn main() -> Result<()> {
     execute!(
         stdout,
         EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
+        EnableMouseCapture
     )?;
 
     let backend = CrosstermBackend::new(stdout);
@@ -82,7 +84,7 @@ fn main() -> Result<()> {
         let needs_draw = app.any_dirty();
 
         if !host_mouse_captured {
-            execute!(terminal.backend_mut(), crossterm::event::EnableMouseCapture)?;
+            execute!(terminal.backend_mut(), EnableMouseCapture)?;
             host_mouse_captured = true;
         }
 
@@ -104,7 +106,7 @@ fn main() -> Result<()> {
                             execute!(
                                 terminal.backend_mut(),
                                 LeaveAlternateScreen,
-                                crossterm::event::DisableMouseCapture
+                                DisableMouseCapture
                             )?;
                             terminal.show_cursor()?;
                             return Ok(());

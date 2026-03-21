@@ -1,7 +1,10 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::UNIX_EPOCH,
 };
+
+use time::OffsetDateTime;
 
 // ---------------------------------------------------------------------------
 // ANSI stripping
@@ -189,7 +192,7 @@ pub fn scrape_transfer_progress(lines: &[String]) -> Option<String> {
 
 /// Decompose a Unix timestamp into (year, month, day, hour, minute).
 pub fn epoch_to_ymd(secs: u64) -> (u32, u32, u32, u32, u32) {
-    let Ok(dt) = time::OffsetDateTime::from_unix_timestamp(secs as i64) else {
+    let Ok(dt) = OffsetDateTime::from_unix_timestamp(secs as i64) else {
         return (1970, 1, 1, 0, 0);
     };
     let (y, mo, d) = dt.to_calendar_date();
@@ -240,7 +243,7 @@ pub fn read_local_dir(path: &Path) -> Vec<FsEntry> {
                 .and_then(|m| m.modified().ok())
                 .map(|t| {
                     let secs = t
-                        .duration_since(std::time::UNIX_EPOCH)
+                        .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
                     let (y, mo, d, h, mi) = epoch_to_ymd(secs);

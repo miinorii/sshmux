@@ -1,6 +1,7 @@
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use crossterm::event::KeyCode;
 use log::{info, warn};
 use ratatui::{
     buffer::Buffer,
@@ -83,7 +84,7 @@ pub struct BrowserCore {
     pub drive_picker: Option<(Vec<PathBuf>, ListState)>,
     pub status_color: Color,
     pub cmd_start: Option<Instant>,
-    pub last_duration: Option<std::time::Duration>,
+    pub last_duration: Option<Duration>,
     pub local_scroll_x: usize,
     pub remote_scroll_x: usize,
     pub prompt_stable: u8,
@@ -279,7 +280,7 @@ impl BrowserCore {
         }
     }
 
-    pub fn format_duration(d: std::time::Duration) -> String {
+    pub fn format_duration(d: Duration) -> String {
         let ms = d.as_millis();
         if ms < 1000 {
             format!("{}ms", ms)
@@ -701,8 +702,6 @@ impl BrowserCore {
 // ---------------------------------------------------------------------------
 // Key handling helper
 // ---------------------------------------------------------------------------
-
-use crossterm::event::KeyCode;
 
 /// Handle a key event for a browser in idle mode (not connecting, not waiting
 /// for password). Navigation keys are handled directly on `core`; actions that

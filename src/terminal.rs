@@ -15,6 +15,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
 };
+use vt100::{MouseProtocolMode, Parser};
 
 /// Count the number of Device Status Report sequences (`ESC [ 6 n`) in `data`.
 pub fn count_dsr(data: &[u8]) -> usize {
@@ -34,7 +35,7 @@ pub fn count_dsr(data: &[u8]) -> usize {
 
 /// A single pseudo-terminal session driven by an arbitrary command.
 pub struct EmbeddedTerminal {
-    pub parser: Arc<Mutex<vt100::Parser>>,
+    pub parser: Arc<Mutex<Parser>>,
     pub master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pub dirty: Arc<AtomicBool>,
@@ -62,7 +63,7 @@ impl EmbeddedTerminal {
         let child_handle = pair.slave.spawn_command(cmd)?;
         drop(pair.slave); // drop slave so PTY EOF is signalled on Windows when child exits
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
+        let parser = Arc::new(Mutex::new(Parser::new(rows, cols, 1000)));
         let dirty = Arc::new(AtomicBool::new(false));
         let raw_output = Arc::new(Mutex::new(Vec::<u8>::new()));
         let exited = Arc::new(AtomicBool::new(false));
@@ -203,7 +204,7 @@ impl EmbeddedTerminal {
         };
         !matches!(
             p.screen().mouse_protocol_mode(),
-            vt100::MouseProtocolMode::None
+            MouseProtocolMode::None
         )
     }
 
