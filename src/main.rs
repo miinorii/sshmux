@@ -20,7 +20,7 @@ mod ssh_config;
 mod tab;
 mod terminal;
 
-use app::{App, content_area};
+use app::App;
 use browser::{BrowserFocus, SftpState, SshBrowserState};
 use pane::{Pane, Split, pane_inner};
 
@@ -31,17 +31,10 @@ use pane::{Pane, Split, pane_inner};
 fn main() -> Result<()> {
     let is_debug = std::env::args().any(|a| a == "--debug");
     if is_debug {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let secs = now.as_secs();
-        // Convert epoch to YYYYMMDD_HHMMSS (UTC)
-        let s = secs % 60;
-        let m = (secs / 60) % 60;
-        let h = (secs / 3600) % 24;
-        let days = secs / 86400;
-        // Simple date from days since epoch
-        let (y, mo, d) = epoch_days_to_ymd(days);
+        let now = time::OffsetDateTime::now_utc();
+        let (y, mo, d) = now.to_calendar_date();
+        let (h, m, s) = now.to_hms();
+        let mo = mo as u8;
         let filename = format!("sshmux-debug-{y:04}{mo:02}{d:02}_{h:02}{m:02}{s:02}.log");
         let file = std::fs::File::create(&filename)?;
         simplelog::WriteLogger::init(
@@ -132,11 +125,11 @@ fn main() -> Result<()> {
                             KeyCode::Char('t') => app.new_tab(),
                             KeyCode::Char('-') => {
                                 let area = last_area;
-                                app.tab_mut().split(Split::Vertical, content_area(area));
+                                app.tab_mut().split(Split::Vertical, pane_inner(area));
                             }
                             KeyCode::Char('+') => {
                                 let area = last_area;
-                                app.tab_mut().split(Split::Horizontal, content_area(area));
+                                app.tab_mut().split(Split::Horizontal, pane_inner(area));
                             }
                             _ => {}
                         }
@@ -709,7 +702,7 @@ fn main() -> Result<()> {
                 }
 
                 Event::Mouse(mouse) => {
-                    let content = content_area(last_area);
+                    let content = pane_inner(last_area);
                     let areas = app.tabs[app.selected_tab].root.leaf_areas(content);
 
                     let clicked_pane = areas
@@ -954,52 +947,11 @@ fn main() -> Result<()> {
                     app.resize_all(last_area);
                 }
                 app.render(last_area, f.buffer_mut());
-                let content = content_area(last_area);
+                let content = pane_inner(last_area);
                 if let Some((cx, cy)) = app.tabs[app.selected_tab].focused_cursor(content) {
                     f.set_cursor_position((cx, cy));
                 }
             })?;
         }
     }
-}
-
-/// Convert days since Unix epoch to (year, month, day).
-fn epoch_days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    let mut y = 1970;
-    loop {
-        let year_days = if is_leap(y) { 366 } else { 365 };
-        if days < year_days {
-            break;
-        }
-        days -= year_days;
-        y += 1;
-    }
-    let leap = is_leap(y);
-    let month_days = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut mo = 1u64;
-    for &md in &month_days {
-        if days < md {
-            break;
-        }
-        days -= md;
-        mo += 1;
-    }
-    (y, mo, days + 1)
-}
-
-fn is_leap(y: u64) -> bool {
-    y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400))
 }

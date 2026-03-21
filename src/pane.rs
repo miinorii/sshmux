@@ -242,22 +242,7 @@ impl Pane {
                 let is_focus = *my_idx == focus_idx;
                 *my_idx += 1;
 
-                let inner = if leaf_count > 1 {
-                    let border_style = if is_focus {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    };
-                    let block = Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(border_style)
-                        .title(" connect ");
-                    let inner = block.inner(area);
-                    block.render(area, buf);
-                    inner
-                } else {
-                    area
-                };
+                let inner = render_pane_border(area, buf, is_focus, leaf_count, Some(" connect "));
 
                 let list_area = Rect {
                     x: inner.x,
@@ -375,9 +360,7 @@ impl Pane {
                     };
                     let display = format!("{}_", input);
                     let paragraph = Paragraph::new(vec![
-                        Line::from(
-                            Span::raw(display).style(Style::default().fg(Color::White)),
-                        ),
+                        Line::from(Span::raw(display).style(Style::default().fg(Color::White))),
                         Line::from(
                             Span::raw("e.g. -o StrictHostKeyChecking=no user@host")
                                 .style(Style::default().fg(Color::DarkGray)),
@@ -401,21 +384,7 @@ impl Pane {
                 let is_focus = *my_idx == focus_idx;
                 *my_idx += 1;
 
-                let inner = if leaf_count > 1 {
-                    let border_style = if is_focus {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    };
-                    let block = Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(border_style);
-                    let inner = block.inner(area);
-                    block.render(area, buf);
-                    inner
-                } else {
-                    area
-                };
+                let inner = render_pane_border(area, buf, is_focus, leaf_count, None);
                 terminal.render_into(inner, buf);
 
                 if terminal.process_exited() {
@@ -497,12 +466,41 @@ pub fn split_areas(area: Rect, kind: &Split, count: usize) -> Vec<Rect> {
 }
 
 // ---------------------------------------------------------------------------
-// pane_inner
+// pane_inner / render_pane_border
 // ---------------------------------------------------------------------------
 
 /// The drawable area inside a pane's own border (1-cell inset on all sides).
 pub fn pane_inner(area: Rect) -> Rect {
     Block::default().borders(Borders::ALL).inner(area)
+}
+
+/// Render a pane border when in multi-pane mode and return the inner area.
+/// In single-pane mode the full area is returned unchanged.
+pub fn render_pane_border(
+    area: Rect,
+    buf: &mut Buffer,
+    is_focus: bool,
+    leaf_count: usize,
+    title: Option<&str>,
+) -> Rect {
+    if leaf_count > 1 {
+        let border_style = if is_focus {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let mut block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style);
+        if let Some(t) = title {
+            block = block.title(t);
+        }
+        let inner = block.inner(area);
+        block.render(area, buf);
+        inner
+    } else {
+        area
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -542,7 +540,6 @@ pub fn remove_leaf(pane: &mut Pane, n: usize) {
         *pane = children.remove(0);
     }
 }
-
 
 #[cfg(test)]
 mod tests {

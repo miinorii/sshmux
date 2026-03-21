@@ -129,13 +129,13 @@ impl App {
     }
 
     pub fn focused_pane_area(&self, full: Rect) -> Rect {
-        let content = content_area(full);
+        let content = pane_inner(full);
         let areas = self.tab().root.leaf_areas(content);
         areas.get(self.tab().focus_idx).copied().unwrap_or(content)
     }
 
     pub fn resize_all(&mut self, full: Rect) {
-        let content = content_area(full);
+        let content = pane_inner(full);
         for tab in &mut self.tabs {
             let multi = tab.leaf_count() > 1;
             tab.root.resize_all(content, multi);
@@ -191,15 +191,5 @@ impl App {
         self.tabs[self.selected_tab]
             .root
             .render(content, buf, hosts, focus_idx, leaf_count, &mut idx);
-    }
-}
-
-/// The drawable area inside the outer application border (1-cell inset on all sides).
-pub fn content_area(full: Rect) -> Rect {
-    Rect {
-        x: full.x + 1,
-        y: full.y + 1,
-        width: full.width.saturating_sub(2),
-        height: full.height.saturating_sub(2),
     }
 }

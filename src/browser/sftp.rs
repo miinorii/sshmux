@@ -10,10 +10,12 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, StatefulWidget, Widget},
 };
 
+use super::browser_layout;
 use super::parse::{
     FsEntry, list_drives, parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress,
     shell_quote, strip_ansi,
 };
+use crate::pane::{pane_inner, render_pane_border};
 use crate::terminal::EmbeddedTerminal;
 
 // ---------------------------------------------------------------------------
@@ -659,36 +661,18 @@ impl FileBrowser {
 
     /// Select the list item under the mouse click, mirroring the render layout.
     pub fn click_select(&mut self, col: u16, row: u16, pane_area: Rect, leaf_count: usize) {
-        // Replicate the outer block from render()
         let outer_inner = if leaf_count > 1 {
-            Rect {
-                x: pane_area.x + 1,
-                y: pane_area.y + 1,
-                width: pane_area.width.saturating_sub(2),
-                height: pane_area.height.saturating_sub(2),
-            }
+            pane_inner(pane_area)
         } else {
             pane_area
         };
 
-        let panels_area = Rect {
-            height: outer_inner.height.saturating_sub(2), // status bar + gap
-            ..outer_inner
-        };
-
-        let half = panels_area.width / 2;
-        let in_remote = col >= panels_area.x + half;
+        let layout = browser_layout(outer_inner);
+        let in_remote = col >= layout.remote_panel.x;
         let panel_area = if in_remote {
-            Rect {
-                x: panels_area.x + half,
-                width: panels_area.width - half,
-                ..panels_area
-            }
+            layout.remote_panel
         } else {
-            Rect {
-                width: half,
-                ..panels_area
-            }
+            layout.local_panel
         };
 
         // Each panel has its own block border (1-cell inset)
@@ -728,49 +712,13 @@ impl FileBrowser {
     // ---- render ------------------------------------------------------------
 
     pub fn render(&mut self, area: Rect, buf: &mut Buffer, is_focus: bool, leaf_count: usize) {
-        let inner = if leaf_count > 1 {
-            let border_style = if is_focus {
-                Style::default().fg(Color::Cyan)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            let title = format!(" sftp: {} ", self.host);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(border_style)
-                .title(title.as_str());
-            let inner = block.inner(area);
-            block.render(area, buf);
-            inner
-        } else {
-            area
-        };
+        let title = format!(" sftp: {} ", self.host);
+        let inner = render_pane_border(area, buf, is_focus, leaf_count, Some(&title));
+        let layout = browser_layout(inner);
 
-        let status_h = 1u16;
-        let panels_area = Rect {
-            height: inner.height.saturating_sub(status_h),
-            ..inner
-        };
-        let status_area = Rect {
-            y: inner.y + inner.height.saturating_sub(status_h),
-            height: status_h,
-            ..inner
-        };
-
-        let half = panels_area.width / 2;
-        let local_area = Rect {
-            width: half,
-            ..panels_area
-        };
-        let remote_area = Rect {
-            x: panels_area.x + half,
-            width: panels_area.width - half,
-            ..panels_area
-        };
-
-        self.render_panel(local_area, buf, BrowserFocus::Local, is_focus);
-        self.render_panel(remote_area, buf, BrowserFocus::Remote, is_focus);
-        self.render_status(status_area, buf);
+        self.render_panel(layout.local_panel, buf, BrowserFocus::Local, is_focus);
+        self.render_panel(layout.remote_panel, buf, BrowserFocus::Remote, is_focus);
+        self.render_status(layout.status, buf);
     }
 
     fn render_panel(
