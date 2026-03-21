@@ -702,8 +702,22 @@ fn main() -> Result<()> {
                                 mouse.kind,
                                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                             );
-                            if is_scroll && !in_alt_screen {
-                                if let Some(Pane::Session { terminal }) =
+                            if is_scroll {
+                                if in_alt_screen {
+                                    // In alternate screen (vim, less, htop…),
+                                    // translate scroll into arrow keys
+                                    let use_app = app.focused_pane_app_cursor();
+                                    let seq = match (mouse.kind, use_app) {
+                                        (MouseEventKind::ScrollUp, true) => "\x1bOA",
+                                        (MouseEventKind::ScrollUp, false) => "\x1b[A",
+                                        (MouseEventKind::ScrollDown, true) => "\x1bOB",
+                                        (MouseEventKind::ScrollDown, false) => "\x1b[B",
+                                        _ => "",
+                                    };
+                                    if !seq.is_empty() {
+                                        app.send_str(seq);
+                                    }
+                                } else if let Some(Pane::Session { terminal }) =
                                     app.tabs[app.selected_tab].root.leaf_mut(pane_idx)
                                 {
                                     match mouse.kind {
