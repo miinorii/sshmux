@@ -28,7 +28,7 @@ pub fn browser_layout(inner: Rect) -> BrowserLayout {
         height: status_h,
         ..inner
     };
-    let half = panels_area.width / 2;
+    let half = (panels_area.width as f32 / 2.0).round() as u16;
     let local_panel = Rect {
         width: half,
         ..panels_area
