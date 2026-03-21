@@ -46,6 +46,7 @@ pub struct EmbeddedTerminal {
     pub raw_output: Arc<Mutex<Vec<u8>>>,
     pub exited: Arc<AtomicBool>,
     pub child: Option<Arc<Mutex<Box<dyn Child + Send + Sync>>>>,
+    pub scroll_offset: usize,
 }
 
 impl EmbeddedTerminal {
@@ -64,7 +65,7 @@ impl EmbeddedTerminal {
         let child_handle = pair.slave.spawn_command(cmd)?;
         drop(pair.slave); // drop slave so PTY EOF is signalled on Windows when child exits
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
         let dirty = Arc::new(AtomicBool::new(false));
         let mouse_active = Arc::new(AtomicBool::new(false));
         let app_cursor = Arc::new(AtomicBool::new(false));
@@ -201,6 +202,7 @@ impl EmbeddedTerminal {
             raw_output,
             exited,
             child: Some(Arc::new(Mutex::new(child_handle))),
+            scroll_offset: 0,
         })
     }
 
@@ -259,12 +261,38 @@ impl EmbeddedTerminal {
         }
         if let Ok(mut p) = self.parser.lock() {
             let snapshot = p.screen().contents_formatted();
-            let mut np = vt100::Parser::new(rows, cols, 0);
+            let mut np = vt100::Parser::new(rows, cols, 1000);
             np.process(&snapshot);
             *p = np;
         }
         self.rows = rows;
         self.cols = cols;
+    }
+
+    pub fn scroll_up(&mut self, n: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_add(n);
+        if let Ok(mut p) = self.parser.lock() {
+            p.screen_mut().set_scrollback(self.scroll_offset);
+        }
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    pub fn scroll_down(&mut self, n: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(n);
+        if let Ok(mut p) = self.parser.lock() {
+            p.screen_mut().set_scrollback(self.scroll_offset);
+        }
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    pub fn reset_scroll(&mut self) {
+        if self.scroll_offset > 0 {
+            self.scroll_offset = 0;
+            if let Ok(mut p) = self.parser.lock() {
+                p.screen_mut().set_scrollback(0);
+            }
+            self.dirty.store(true, Ordering::Release);
+        }
     }
 
     pub fn render_into(&self, area: Rect, buf: &mut Buffer) {

@@ -450,6 +450,13 @@ fn main() -> Result<()> {
                         continue;
                     }
 
+                    // Reset scrollback on any keypress to a session
+                    if let Some(Pane::Session { terminal }) =
+                        app.tab_mut().focused_pane_mut()
+                    {
+                        terminal.reset_scroll();
+                    }
+
                     // ---- Session: Ctrl+Arrow word-jump ----
                     if ctrl && !alt {
                         match key.code {
@@ -676,6 +683,26 @@ fn main() -> Result<()> {
                                 }
                             })
                             .unwrap_or(false);
+
+                        // Scrollback when remote app doesn't capture mouse
+                        if !pane_wants_mouse {
+                            let is_scroll = matches!(
+                                mouse.kind,
+                                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                            );
+                            if is_scroll {
+                                if let Some(Pane::Session { terminal }) =
+                                    app.tabs[app.selected_tab].root.leaf_mut(pane_idx)
+                                {
+                                    match mouse.kind {
+                                        MouseEventKind::ScrollUp => terminal.scroll_up(3),
+                                        MouseEventKind::ScrollDown => terminal.scroll_down(3),
+                                        _ => {}
+                                    }
+                                }
+                                continue;
+                            }
+                        }
 
                         if same_pane && pane_wants_mouse {
                             let leaf_count = app.tabs[app.selected_tab].root.leaf_count();
