@@ -368,7 +368,7 @@ impl Pane {
                 // Connect input overlay
                 if let Some(input) = connect_input {
                     let input_w = 50u16.min(inner.width.saturating_sub(2));
-                    let input_h = 3u16;
+                    let input_h = 4u16;
                     let cx = inner.x + inner.width.saturating_sub(input_w) / 2;
                     let cy = inner.y + inner.height.saturating_sub(input_h) / 2;
                     let input_area = Rect {
@@ -389,6 +389,15 @@ impl Pane {
                         text_area.x,
                         text_area.y,
                         &Line::from(Span::raw(&display).style(Style::default().fg(Color::White))),
+                        text_area.width,
+                    );
+                    buf.set_line(
+                        text_area.x,
+                        text_area.y + 1,
+                        &Line::from(
+                            Span::raw("e.g. -o StrictHostKeyChecking=no user@host")
+                                .style(Style::default().fg(Color::DarkGray)),
+                        ),
                         text_area.width,
                     );
                 }
