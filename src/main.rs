@@ -105,8 +105,9 @@ fn main() -> Result<()> {
                     }
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                     let alt = key.modifiers.contains(KeyModifiers::ALT);
+                    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
-                    match input::handle_key(&mut app, key.code, ctrl, alt, last_area) {
+                    match input::handle_key(&mut app, key.code, ctrl, alt, shift, last_area) {
                         Action::Continue => {}
                         Action::Quit => {
                             disable_raw_mode()?;

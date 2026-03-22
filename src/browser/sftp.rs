@@ -114,9 +114,19 @@ impl FileBrowser {
                         self.core.status_color = Color::Green;
                     }
                     self.core.needs_redraw = true;
-                    // Chain next queued drop-upload if any
+                    // Chain next queued transfer if any
                     if !self.core.pending_uploads.is_empty() {
                         self.upload_pending_paths();
+                    } else if !self.core.pending_transfers.is_empty() {
+                        let direction = self.core.last_transfer.as_ref()
+                            .map(|t| t.direction)
+                            .unwrap_or(TransferDirection::Upload);
+                        match direction {
+                            TransferDirection::Upload => self.upload(),
+                            TransferDirection::Download => self.download(),
+                        }
+                    } else if self.core.pop_pending_delete() {
+                        self.confirm_delete_yes();
                     }
                 }
             }
@@ -177,6 +187,7 @@ impl FileBrowser {
                             warn!("SFTP delete failed: {}", name);
                             self.core.status_msg = format!("Delete failed: {}", name);
                             self.core.status_color = Color::Red;
+                            self.core.pending_deletes.clear();
                         } else {
                             self.core.status_msg = format!("Deleted remote: {}", name);
                             self.core.status_color = Color::Green;
@@ -268,70 +279,98 @@ impl FileBrowser {
         if self.sftp_state != SftpState::Idle {
             return;
         }
-        if let Some(i) = self.core.remote_sel.selected() {
-            let Some(entry) = self.core.remote_entries.get(i).cloned() else {
-                return;
-            };
-            let local_dest = self.core.local_path.to_string_lossy().replace('\\', "/");
-            let flag = if entry.is_dir { "-r " } else { "" };
-            let remote_file = format!(
-                "{}/{}",
-                self.core.remote_path.trim_end_matches('/'),
-                entry.name
-            );
-            let cmd = format!(
-                "get {}{} {}/\r\n",
-                flag,
-                shell_quote(&remote_file),
-                local_dest
-            );
-            self.core.last_transfer = Some(TransferStatus {
-                filename: entry.name.clone(),
-                direction: TransferDirection::Download,
-                is_dir: entry.is_dir,
-                done: false,
-                progress: "0%".to_string(),
-                file_count: 0,
-            });
-            self.core.status_msg = format!("Downloading {}...", entry.name);
-            self.core.status_color = Color::Yellow;
-            info!("SFTP get {} -> {}", entry.name, local_dest);
-            self.sftp.send_str(&cmd);
-            self.sftp_state = SftpState::Transferring;
+        let idx = if !self.core.pending_transfers.is_empty() {
+            self.core.pending_transfers.remove(0)
+        } else if let Some(i) = self.core.remote_sel.selected() {
+            i
+        } else {
+            return;
+        };
+        let Some(entry) = self.core.remote_entries.get(idx).cloned() else {
+            return;
+        };
+        if entry.name == ".." {
+            return;
         }
+        let local_dest = self.core.local_path.to_string_lossy().replace('\\', "/");
+        let flag = if entry.is_dir { "-r " } else { "" };
+        let remote_file = format!(
+            "{}/{}",
+            self.core.remote_path.trim_end_matches('/'),
+            entry.name
+        );
+        let remaining = self.core.pending_transfers.len();
+        let suffix = if remaining > 0 {
+            format!(" ({} more queued)", remaining)
+        } else {
+            String::new()
+        };
+        let cmd = format!(
+            "get {}{} {}/\r\n",
+            flag,
+            shell_quote(&remote_file),
+            local_dest
+        );
+        self.core.last_transfer = Some(TransferStatus {
+            filename: entry.name.clone(),
+            direction: TransferDirection::Download,
+            is_dir: entry.is_dir,
+            done: false,
+            progress: "0%".to_string(),
+            file_count: 0,
+        });
+        self.core.status_msg = format!("Downloading {}...{}", entry.name, suffix);
+        self.core.status_color = Color::Yellow;
+        info!("SFTP get {} -> {}", entry.name, local_dest);
+        self.sftp.send_str(&cmd);
+        self.sftp_state = SftpState::Transferring;
     }
 
     pub fn upload(&mut self) {
         if self.sftp_state != SftpState::Idle {
             return;
         }
-        if let Some(i) = self.core.local_sel.selected() {
-            let Some(entry) = self.core.local_entries.get(i).cloned() else {
-                return;
-            };
-            let local_path = self.core.local_path.join(&entry.name);
-            let local_str = local_path.to_string_lossy().replace('\\', "/");
-            let flag = if entry.is_dir { "-r " } else { "" };
-            let cmd = format!(
-                "put {}{} {}/\r\n",
-                flag,
-                shell_quote(&local_str),
-                shell_quote(&self.core.remote_path)
-            );
-            self.core.last_transfer = Some(TransferStatus {
-                filename: entry.name.clone(),
-                direction: TransferDirection::Upload,
-                is_dir: entry.is_dir,
-                done: false,
-                progress: "0%".to_string(),
-                file_count: 0,
-            });
-            self.core.status_msg = format!("Uploading {}...", entry.name);
-            self.core.status_color = Color::Yellow;
-            info!("SFTP put {}", local_str);
-            self.sftp.send_str(&cmd);
-            self.sftp_state = SftpState::Transferring;
+        let idx = if !self.core.pending_transfers.is_empty() {
+            self.core.pending_transfers.remove(0)
+        } else if let Some(i) = self.core.local_sel.selected() {
+            i
+        } else {
+            return;
+        };
+        let Some(entry) = self.core.local_entries.get(idx).cloned() else {
+            return;
+        };
+        if entry.name == ".." {
+            return;
         }
+        let local_path = self.core.local_path.join(&entry.name);
+        let local_str = local_path.to_string_lossy().replace('\\', "/");
+        let flag = if entry.is_dir { "-r " } else { "" };
+        let remaining = self.core.pending_transfers.len();
+        let suffix = if remaining > 0 {
+            format!(" ({} more queued)", remaining)
+        } else {
+            String::new()
+        };
+        let cmd = format!(
+            "put {}{} {}/\r\n",
+            flag,
+            shell_quote(&local_str),
+            shell_quote(&self.core.remote_path)
+        );
+        self.core.last_transfer = Some(TransferStatus {
+            filename: entry.name.clone(),
+            direction: TransferDirection::Upload,
+            is_dir: entry.is_dir,
+            done: false,
+            progress: "0%".to_string(),
+            file_count: 0,
+        });
+        self.core.status_msg = format!("Uploading {}...{}", entry.name, suffix);
+        self.core.status_color = Color::Yellow;
+        info!("SFTP put {}", local_str);
+        self.sftp.send_str(&cmd);
+        self.sftp_state = SftpState::Transferring;
     }
 
     // ---- drop upload -------------------------------------------------------
@@ -388,23 +427,62 @@ impl FileBrowser {
 
     pub fn delete_focused(&mut self) {
         match self.core.focus {
-            BrowserFocus::Local => self.core.local_delete_focused(),
+            BrowserFocus::Local => {
+                let indices = self.core.selected_indices();
+                if indices.len() > 1 {
+                    self.core.local_delete_selected();
+                } else {
+                    self.core.clear_selection();
+                    self.core.local_delete_focused();
+                }
+            }
             BrowserFocus::Remote => {
-                if let Some(i) = self.core.remote_sel.selected() {
-                    let Some(entry) = self.core.remote_entries.get(i).cloned() else {
-                        return;
-                    };
-                    if entry.name == ".." || self.sftp_state != SftpState::Idle {
-                        return;
+                if self.sftp_state != SftpState::Idle {
+                    return;
+                }
+                let indices = self.core.selected_indices();
+                if indices.len() > 1 {
+                    let mut tags: Vec<String> = Vec::new();
+                    for &i in &indices {
+                        let Some(entry) = self.core.remote_entries.get(i) else {
+                            continue;
+                        };
+                        if entry.name == ".." {
+                            continue;
+                        }
+                        let remote_file = format!(
+                            "{}/{}",
+                            self.core.remote_path.trim_end_matches('/'),
+                            entry.name
+                        );
+                        let kind = if entry.is_dir { "dir" } else { "file" };
+                        tags.push(format!("remote:{}:{}", kind, remote_file));
                     }
-                    let remote_file = format!(
-                        "{}/{}",
-                        self.core.remote_path.trim_end_matches('/'),
-                        entry.name
-                    );
-                    let kind = if entry.is_dir { "dir" } else { "file" };
-                    self.core.confirm_delete = Some(format!("remote:{}:{}", kind, remote_file));
-                    self.core.needs_redraw = true;
+                    self.core.clear_selection();
+                    if let Some(first) = tags.first().cloned() {
+                        self.core.pending_deletes = tags[1..].to_vec();
+                        self.core.confirm_delete = Some(first);
+                        self.core.needs_redraw = true;
+                    }
+                } else {
+                    self.core.clear_selection();
+                    if let Some(i) = self.core.remote_sel.selected() {
+                        let Some(entry) = self.core.remote_entries.get(i).cloned() else {
+                            return;
+                        };
+                        if entry.name == ".." {
+                            return;
+                        }
+                        let remote_file = format!(
+                            "{}/{}",
+                            self.core.remote_path.trim_end_matches('/'),
+                            entry.name
+                        );
+                        let kind = if entry.is_dir { "dir" } else { "file" };
+                        self.core.confirm_delete =
+                            Some(format!("remote:{}:{}", kind, remote_file));
+                        self.core.needs_redraw = true;
+                    }
                 }
             }
         }

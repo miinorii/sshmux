@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -90,6 +91,12 @@ pub struct BrowserCore {
     pub remote_scroll_x: usize,
     pub prompt_stable: u8,
     pub prev_raw_len: usize,
+    // ---- multi-select ----
+    pub selected: BTreeSet<usize>,
+    pub select_anchor: Option<usize>,
+    // ---- multi-transfer queues ----
+    pub pending_transfers: Vec<usize>, // indices to transfer (upload or download)
+    pub pending_deletes: Vec<String>,  // tagged delete strings queued for batch delete
     // ---- drag-and-drop paste detection ----
     pub paste_buf: String,
     pub paste_deadline: Option<Instant>,
@@ -131,6 +138,10 @@ impl BrowserCore {
             remote_scroll_x: 0,
             prompt_stable: 0,
             prev_raw_len: 0,
+            selected: BTreeSet::new(),
+            select_anchor: None,
+            pending_transfers: vec![],
+            pending_deletes: vec![],
             paste_buf: String::new(),
             paste_deadline: None,
             pending_uploads: vec![],
@@ -142,8 +153,55 @@ impl BrowserCore {
 
     // ---- navigation --------------------------------------------------------
 
+    pub fn clear_selection(&mut self) {
+        if !self.selected.is_empty() || self.select_anchor.is_some() {
+            self.selected.clear();
+            self.select_anchor = None;
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Returns the currently focused index for the active panel.
+    pub fn focused_index(&self) -> Option<usize> {
+        match self.focus {
+            BrowserFocus::Local => self.local_sel.selected(),
+            BrowserFocus::Remote => self.remote_sel.selected(),
+        }
+    }
+
+    /// Returns the indices to operate on: the multi-select set if non-empty,
+    /// otherwise the single focused index (excluding `..` at index 0).
+    pub fn selected_indices(&self) -> Vec<usize> {
+        if !self.selected.is_empty() {
+            self.selected.iter().copied().collect()
+        } else if let Some(i) = self.focused_index() {
+            if i == 0 { vec![] } else { vec![i] }
+        } else {
+            vec![]
+        }
+    }
+
+    /// Update selection range between anchor and current cursor position.
+    /// Skips index 0 (`..`).
+    pub fn update_selection(&mut self) {
+        let Some(anchor) = self.select_anchor else {
+            return;
+        };
+        let Some(cursor) = self.focused_index() else {
+            return;
+        };
+        let lo = anchor.min(cursor).max(1); // skip ".."
+        let hi = anchor.max(cursor);
+        self.selected.clear();
+        for i in lo..=hi {
+            self.selected.insert(i);
+        }
+        self.needs_redraw = true;
+    }
+
     pub fn toggle_focus(&mut self) {
         self.dismiss_drive_picker();
+        self.clear_selection();
         self.focus = match self.focus {
             BrowserFocus::Local => BrowserFocus::Remote,
             BrowserFocus::Remote => BrowserFocus::Local,
@@ -397,6 +455,7 @@ impl BrowserCore {
             warn!("local delete failed: {:?}: {}", path, e);
             self.status_msg = format!("Delete failed: {}", e);
             self.status_color = Color::Red;
+            self.pending_deletes.clear();
         } else {
             info!("local delete ok: {}", full_path);
             self.status_msg = format!("Deleted: {}", full_path);
@@ -405,12 +464,59 @@ impl BrowserCore {
         }
         self.confirm_delete = None;
         self.last_duration = None;
+        // Chain next pending local delete
+        if self.pop_pending_delete() {
+            // Auto-confirm: execute immediately without re-prompting
+            self.local_confirm_delete();
+        }
         self.needs_redraw = true;
         true
     }
 
+    /// Build tagged delete strings for local multi-select deletion.
+    /// Queues all selected items and shows confirmation for the first one.
+    pub fn local_delete_selected(&mut self) {
+        let indices = self.selected_indices();
+        if indices.len() <= 1 {
+            self.clear_selection();
+            self.local_delete_focused();
+            return;
+        }
+        let mut tags: Vec<String> = Vec::new();
+        for &i in &indices {
+            let Some(entry) = self.local_entries.get(i) else {
+                continue;
+            };
+            if entry.name == ".." {
+                continue;
+            }
+            let full_path = self.local_path.join(&entry.name);
+            let kind = if entry.is_dir { "dir" } else { "file" };
+            tags.push(format!("local:{}:{}", kind, full_path.to_string_lossy()));
+        }
+        self.clear_selection();
+        if let Some(first) = tags.first().cloned() {
+            self.pending_deletes = tags[1..].to_vec();
+            self.confirm_delete = Some(first);
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Pop the next pending delete and set it as confirm_delete.
+    /// Returns true if there was a next item to delete.
+    pub fn pop_pending_delete(&mut self) -> bool {
+        if let Some(next) = self.pending_deletes.first().cloned() {
+            self.pending_deletes.remove(0);
+            self.confirm_delete = Some(next);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn confirm_delete_no(&mut self) {
         self.confirm_delete = None;
+        self.pending_deletes.clear();
         self.status_msg = String::from("Deletion cancelled.");
         self.status_color = Color::Yellow;
         self.needs_redraw = true;
@@ -642,9 +748,12 @@ impl BrowserCore {
         }
         let sx = *scroll_x;
 
+        let is_sel_panel = self.focus == side;
         let items: Vec<ListItem> = entries
             .iter()
-            .map(|e| {
+            .enumerate()
+            .map(|(idx, e)| {
+                let selected = is_sel_panel && self.selected.contains(&idx);
                 let name_col = if e.is_dir { Color::Cyan } else { Color::White };
                 let display_name = if e.is_dir {
                     format!("{}/", e.name)
@@ -666,18 +775,27 @@ impl BrowserCore {
                     0
                 };
 
+                let sel_style = Style::default()
+                    .fg(Color::Black)
+                    .bg(if is_active { Color::Cyan } else { Color::DarkGray })
+                    .add_modifier(Modifier::BOLD);
                 if visible_name_chars == 0 {
-                    let line =
-                        Line::from(Span::styled(padded, Style::default().fg(Color::DarkGray)));
-                    ListItem::new(line)
+                    let style = if selected { sel_style } else { Style::default().fg(Color::DarkGray) };
+                    ListItem::new(Line::from(Span::styled(padded, style)))
                 } else {
                     let name_part: String = padded.chars().take(visible_name_chars).collect();
                     let rest: String = padded.chars().skip(visible_name_chars).collect();
-                    let line = Line::from(vec![
-                        Span::styled(name_part, Style::default().fg(name_col)),
-                        Span::styled(rest, Style::default().fg(Color::DarkGray)),
-                    ]);
-                    ListItem::new(line)
+                    if selected {
+                        ListItem::new(Line::from(vec![
+                            Span::styled(name_part, sel_style),
+                            Span::styled(rest, sel_style),
+                        ]))
+                    } else {
+                        ListItem::new(Line::from(vec![
+                            Span::styled(name_part, Style::default().fg(name_col)),
+                            Span::styled(rest, Style::default().fg(Color::DarkGray)),
+                        ]))
+                    }
                 }
             })
             .collect();
@@ -708,7 +826,15 @@ impl BrowserCore {
             ("", tagged.as_str())
         };
         let name = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
-        let msg = format!("  Delete {} '{}'?  [y] Yes   [n] No", side, name);
+        let remaining = self.pending_deletes.len();
+        let msg = if remaining > 0 {
+            format!(
+                "  Delete {} '{}' (+{} more)?  [y] Yes   [n] No",
+                side, name, remaining
+            )
+        } else {
+            format!("  Delete {} '{}'?  [y] Yes   [n] No", side, name)
+        };
         let span = Span::styled(
             msg,
             Style::default()
@@ -875,7 +1001,7 @@ impl BrowserCore {
 /// Handle a key event for a browser in idle mode (not connecting, not waiting
 /// for password). Navigation keys are handled directly on `core`; actions that
 /// need browser-specific logic are returned as a `BrowserKeyAction`.
-pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode) -> BrowserKeyAction {
+pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode, shift: bool) -> BrowserKeyAction {
     // ---- Upload confirmation overlay ----
     if !core.pending_uploads.is_empty() {
         match code {
@@ -959,11 +1085,29 @@ pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode) -> BrowserKeyAc
             BrowserKeyAction::Handled
         }
         KeyCode::Up => {
-            core.nav_up();
+            if shift {
+                if core.select_anchor.is_none() {
+                    core.select_anchor = core.focused_index();
+                }
+                core.nav_up();
+                core.update_selection();
+            } else {
+                core.clear_selection();
+                core.nav_up();
+            }
             BrowserKeyAction::Handled
         }
         KeyCode::Down => {
-            core.nav_down();
+            if shift {
+                if core.select_anchor.is_none() {
+                    core.select_anchor = core.focused_index();
+                }
+                core.nav_down();
+                core.update_selection();
+            } else {
+                core.clear_selection();
+                core.nav_down();
+            }
             BrowserKeyAction::Handled
         }
         KeyCode::Left => {
@@ -974,12 +1118,25 @@ pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode) -> BrowserKeyAc
             core.scroll_right();
             BrowserKeyAction::Handled
         }
-        KeyCode::Char(' ') | KeyCode::Enter => BrowserKeyAction::Enter,
-        KeyCode::Backspace => BrowserKeyAction::GoUp,
-        KeyCode::Char('t') => match core.focus {
-            BrowserFocus::Remote => BrowserKeyAction::Download,
-            BrowserFocus::Local => BrowserKeyAction::Upload,
-        },
+        KeyCode::Char(' ') | KeyCode::Enter => {
+            core.clear_selection();
+            BrowserKeyAction::Enter
+        }
+        KeyCode::Backspace => {
+            core.clear_selection();
+            BrowserKeyAction::GoUp
+        }
+        KeyCode::Char('t') => {
+            let indices = core.selected_indices();
+            if indices.len() > 1 {
+                core.pending_transfers = indices;
+                core.clear_selection();
+            }
+            match core.focus {
+                BrowserFocus::Remote => BrowserKeyAction::Download,
+                BrowserFocus::Local => BrowserKeyAction::Upload,
+            }
+        }
         KeyCode::Delete => BrowserKeyAction::Delete,
         // Unrecognized char: start paste accumulation (no redraw to avoid
         // hundreds of draws while characters stream in from a file drop)
@@ -1334,7 +1491,7 @@ mod tests {
     fn key_tab_toggles_focus() {
         let mut core = BrowserCore::new("host");
         assert_eq!(core.focus, BrowserFocus::Local);
-        let action = handle_browser_key(&mut core, KeyCode::Tab);
+        let action = handle_browser_key(&mut core, KeyCode::Tab, false);
         assert!(matches!(action, BrowserKeyAction::Handled));
         assert_eq!(core.focus, BrowserFocus::Remote);
     }
@@ -1343,7 +1500,7 @@ mod tests {
     fn key_enter_returns_enter_action() {
         let mut core = BrowserCore::new("host");
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::Enter),
+            handle_browser_key(&mut core, KeyCode::Enter, false),
             BrowserKeyAction::Enter
         ));
     }
@@ -1352,7 +1509,7 @@ mod tests {
     fn key_space_returns_enter_action() {
         let mut core = BrowserCore::new("host");
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::Char(' ')),
+            handle_browser_key(&mut core, KeyCode::Char(' '), false),
             BrowserKeyAction::Enter
         ));
     }
@@ -1361,7 +1518,7 @@ mod tests {
     fn key_backspace_returns_go_up() {
         let mut core = BrowserCore::new("host");
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::Backspace),
+            handle_browser_key(&mut core, KeyCode::Backspace, false),
             BrowserKeyAction::GoUp
         ));
     }
@@ -1371,7 +1528,7 @@ mod tests {
         let mut core = BrowserCore::new("host");
         core.focus = BrowserFocus::Remote;
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::Char('t')),
+            handle_browser_key(&mut core, KeyCode::Char('t'), false),
             BrowserKeyAction::Download
         ));
     }
@@ -1381,7 +1538,7 @@ mod tests {
         let mut core = BrowserCore::new("host");
         core.focus = BrowserFocus::Local;
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::Char('t')),
+            handle_browser_key(&mut core, KeyCode::Char('t'), false),
             BrowserKeyAction::Upload
         ));
     }
@@ -1390,7 +1547,7 @@ mod tests {
     fn key_delete_returns_delete() {
         let mut core = BrowserCore::new("host");
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::Delete),
+            handle_browser_key(&mut core, KeyCode::Delete, false),
             BrowserKeyAction::Delete
         ));
     }
@@ -1399,7 +1556,7 @@ mod tests {
     fn key_unknown_returns_handled() {
         let mut core = BrowserCore::new("host");
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::F(5)),
+            handle_browser_key(&mut core, KeyCode::F(5), false),
             BrowserKeyAction::Handled
         ));
     }
@@ -1411,7 +1568,7 @@ mod tests {
         let mut core = BrowserCore::new("host");
         core.confirm_delete = Some("remote:file:/tmp/x".to_string());
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::Char('y')),
+            handle_browser_key(&mut core, KeyCode::Char('y'), false),
             BrowserKeyAction::ConfirmDeleteYes
         ));
     }
@@ -1420,7 +1577,7 @@ mod tests {
     fn key_n_during_confirm_cancels() {
         let mut core = BrowserCore::new("host");
         core.confirm_delete = Some("remote:file:/tmp/x".to_string());
-        let action = handle_browser_key(&mut core, KeyCode::Char('n'));
+        let action = handle_browser_key(&mut core, KeyCode::Char('n'), false);
         assert!(matches!(action, BrowserKeyAction::Handled));
         assert!(core.confirm_delete.is_none());
     }
@@ -1429,7 +1586,7 @@ mod tests {
     fn key_esc_during_confirm_cancels() {
         let mut core = BrowserCore::new("host");
         core.confirm_delete = Some("remote:file:/tmp/x".to_string());
-        let action = handle_browser_key(&mut core, KeyCode::Esc);
+        let action = handle_browser_key(&mut core, KeyCode::Esc, false);
         assert!(matches!(action, BrowserKeyAction::Handled));
         assert!(core.confirm_delete.is_none());
     }
@@ -1438,7 +1595,7 @@ mod tests {
     fn key_random_during_confirm_is_swallowed() {
         let mut core = BrowserCore::new("host");
         core.confirm_delete = Some("remote:file:/tmp/x".to_string());
-        let action = handle_browser_key(&mut core, KeyCode::Char('z'));
+        let action = handle_browser_key(&mut core, KeyCode::Char('z'), false);
         assert!(matches!(action, BrowserKeyAction::Handled));
         // confirm_delete is still active
         assert!(core.confirm_delete.is_some());

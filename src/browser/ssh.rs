@@ -287,6 +287,16 @@ impl SshBrowser {
                     // Chain next queued drop-upload if any
                     if !self.core.pending_uploads.is_empty() {
                         self.upload_pending_paths();
+                    } else if !self.core.pending_transfers.is_empty() {
+                        let direction = self.core.last_transfer.as_ref()
+                            .map(|t| t.direction)
+                            .unwrap_or(TransferDirection::Upload);
+                        match direction {
+                            TransferDirection::Upload => self.upload(),
+                            TransferDirection::Download => self.download(),
+                        }
+                    } else if self.core.pop_pending_delete() {
+                        self.confirm_delete_yes();
                     }
                 }
             }
@@ -315,6 +325,7 @@ impl SshBrowser {
                             warn!("SSH delete failed: {}", name);
                             self.core.status_msg = format!("Delete failed: {}", name);
                             self.core.status_color = Color::Red;
+                            self.core.pending_deletes.clear();
                         } else {
                             self.core.status_msg = format!("Deleted remote: {}", name);
                             self.core.status_color = Color::Green;
@@ -432,114 +443,142 @@ impl SshBrowser {
         if self.ssh_state != SshBrowserState::Idle {
             return;
         }
-        if let Some(i) = self.core.remote_sel.selected() {
-            let Some(entry) = self.core.remote_entries.get(i).cloned() else {
-                return;
-            };
-            let local_dest = self.core.local_path.to_string_lossy().replace('\\', "/");
-            let remote_file = format!(
-                "{}/{}",
-                self.core.remote_path.trim_end_matches('/'),
-                entry.name
-            );
-
-            let mut cmd = CommandBuilder::new("scp");
-            cmd.arg("-O");
-            if entry.is_dir {
-                cmd.arg("-r");
-            }
-            cmd.arg(format!("{}:{}", self.core.host, remote_file));
-            cmd.arg(&*local_dest);
-            cmd.env("TERM", "xterm");
-            info!(
-                "SCP download: {}:{} -> {}",
-                self.core.host, remote_file, local_dest
-            );
-
-            match EmbeddedTerminal::new(24, 80, cmd, true) {
-                Ok(term) => {
-                    self.scp_pty = Some(term);
-                    self.core.last_transfer = Some(TransferStatus {
-                        filename: entry.name.clone(),
-                        direction: TransferDirection::Download,
-                        is_dir: entry.is_dir,
-                        done: false,
-                        progress: "0%".to_string(),
-                        file_count: 0,
-                    });
-                    self.core.status_msg = format!("Downloading {}...", entry.name);
-                    self.core.status_color = Color::Yellow;
-                    self.ssh_state = SshBrowserState::Transferring;
-                    self.password_prompts_seen = 0;
-                    self.waiting_password = false;
-                    info!("SCP get {} started", entry.name);
-                }
-                Err(e) => {
-                    error!("SCP spawn failed: {}", e);
-                    self.core.status_msg = format!("SCP error: {}", e);
-                    self.core.status_color = Color::Red;
-                }
-            }
-            self.core.needs_redraw = true;
+        let idx = if !self.core.pending_transfers.is_empty() {
+            self.core.pending_transfers.remove(0)
+        } else if let Some(i) = self.core.remote_sel.selected() {
+            i
+        } else {
+            return;
+        };
+        let Some(entry) = self.core.remote_entries.get(idx).cloned() else {
+            return;
+        };
+        if entry.name == ".." {
+            return;
         }
+        let local_dest = self.core.local_path.to_string_lossy().replace('\\', "/");
+        let remote_file = format!(
+            "{}/{}",
+            self.core.remote_path.trim_end_matches('/'),
+            entry.name
+        );
+        let remaining = self.core.pending_transfers.len();
+        let suffix = if remaining > 0 {
+            format!(" ({} more queued)", remaining)
+        } else {
+            String::new()
+        };
+
+        let mut cmd = CommandBuilder::new("scp");
+        cmd.arg("-O");
+        if entry.is_dir {
+            cmd.arg("-r");
+        }
+        cmd.arg(format!("{}:{}", self.core.host, remote_file));
+        cmd.arg(&*local_dest);
+        cmd.env("TERM", "xterm");
+        info!(
+            "SCP download: {}:{} -> {}",
+            self.core.host, remote_file, local_dest
+        );
+
+        match EmbeddedTerminal::new(24, 80, cmd, true) {
+            Ok(term) => {
+                self.scp_pty = Some(term);
+                self.core.last_transfer = Some(TransferStatus {
+                    filename: entry.name.clone(),
+                    direction: TransferDirection::Download,
+                    is_dir: entry.is_dir,
+                    done: false,
+                    progress: "0%".to_string(),
+                    file_count: 0,
+                });
+                self.core.status_msg = format!("Downloading {}...{}", entry.name, suffix);
+                self.core.status_color = Color::Yellow;
+                self.ssh_state = SshBrowserState::Transferring;
+                self.password_prompts_seen = 0;
+                self.waiting_password = false;
+                info!("SCP get {} started", entry.name);
+            }
+            Err(e) => {
+                error!("SCP spawn failed: {}", e);
+                self.core.status_msg = format!("SCP error: {}", e);
+                self.core.status_color = Color::Red;
+            }
+        }
+        self.core.needs_redraw = true;
     }
 
     pub fn upload(&mut self) {
         if self.ssh_state != SshBrowserState::Idle {
             return;
         }
-        if let Some(i) = self.core.local_sel.selected() {
-            let Some(entry) = self.core.local_entries.get(i).cloned() else {
-                return;
-            };
-            let local_path = self.core.local_path.join(&entry.name);
-            let local_str = local_path.to_string_lossy().replace('\\', "/");
-
-            let mut cmd = CommandBuilder::new("scp");
-            cmd.arg("-O");
-            if entry.is_dir {
-                cmd.arg("-r");
-            }
-            cmd.arg(&*local_str);
-            cmd.arg(format!(
-                "{}:{}",
-                self.core.host,
-                self.core.remote_path.trim_end_matches('/')
-            ));
-            cmd.env("TERM", "xterm");
-            info!(
-                "SCP upload: {} -> {}:{}",
-                local_str,
-                self.core.host,
-                self.core.remote_path.trim_end_matches('/')
-            );
-
-            match EmbeddedTerminal::new(24, 80, cmd, true) {
-                Ok(term) => {
-                    self.scp_pty = Some(term);
-                    self.core.last_transfer = Some(TransferStatus {
-                        filename: entry.name.clone(),
-                        direction: TransferDirection::Upload,
-                        is_dir: entry.is_dir,
-                        done: false,
-                        progress: "0%".to_string(),
-                        file_count: 0,
-                    });
-                    self.core.status_msg = format!("Uploading {}...", entry.name);
-                    self.core.status_color = Color::Yellow;
-                    self.ssh_state = SshBrowserState::Transferring;
-                    self.password_prompts_seen = 0;
-                    self.waiting_password = false;
-                    info!("SCP put {} started", local_str);
-                }
-                Err(e) => {
-                    error!("SCP spawn failed: {}", e);
-                    self.core.status_msg = format!("SCP error: {}", e);
-                    self.core.status_color = Color::Red;
-                }
-            }
-            self.core.needs_redraw = true;
+        let idx = if !self.core.pending_transfers.is_empty() {
+            self.core.pending_transfers.remove(0)
+        } else if let Some(i) = self.core.local_sel.selected() {
+            i
+        } else {
+            return;
+        };
+        let Some(entry) = self.core.local_entries.get(idx).cloned() else {
+            return;
+        };
+        if entry.name == ".." {
+            return;
         }
+        let local_path = self.core.local_path.join(&entry.name);
+        let local_str = local_path.to_string_lossy().replace('\\', "/");
+        let remaining = self.core.pending_transfers.len();
+        let suffix = if remaining > 0 {
+            format!(" ({} more queued)", remaining)
+        } else {
+            String::new()
+        };
+
+        let mut cmd = CommandBuilder::new("scp");
+        cmd.arg("-O");
+        if entry.is_dir {
+            cmd.arg("-r");
+        }
+        cmd.arg(&*local_str);
+        cmd.arg(format!(
+            "{}:{}",
+            self.core.host,
+            self.core.remote_path.trim_end_matches('/')
+        ));
+        cmd.env("TERM", "xterm");
+        info!(
+            "SCP upload: {} -> {}:{}",
+            local_str,
+            self.core.host,
+            self.core.remote_path.trim_end_matches('/')
+        );
+
+        match EmbeddedTerminal::new(24, 80, cmd, true) {
+            Ok(term) => {
+                self.scp_pty = Some(term);
+                self.core.last_transfer = Some(TransferStatus {
+                    filename: entry.name.clone(),
+                    direction: TransferDirection::Upload,
+                    is_dir: entry.is_dir,
+                    done: false,
+                    progress: "0%".to_string(),
+                    file_count: 0,
+                });
+                self.core.status_msg = format!("Uploading {}...{}", entry.name, suffix);
+                self.core.status_color = Color::Yellow;
+                self.ssh_state = SshBrowserState::Transferring;
+                self.password_prompts_seen = 0;
+                self.waiting_password = false;
+                info!("SCP put {} started", local_str);
+            }
+            Err(e) => {
+                error!("SCP spawn failed: {}", e);
+                self.core.status_msg = format!("SCP error: {}", e);
+                self.core.status_color = Color::Red;
+            }
+        }
+        self.core.needs_redraw = true;
     }
 
     // ---- drop upload -------------------------------------------------------
@@ -657,23 +696,62 @@ impl SshBrowser {
 
     pub fn delete_focused(&mut self) {
         match self.core.focus {
-            BrowserFocus::Local => self.core.local_delete_focused(),
+            BrowserFocus::Local => {
+                let indices = self.core.selected_indices();
+                if indices.len() > 1 {
+                    self.core.local_delete_selected();
+                } else {
+                    self.core.clear_selection();
+                    self.core.local_delete_focused();
+                }
+            }
             BrowserFocus::Remote => {
-                if let Some(i) = self.core.remote_sel.selected() {
-                    let Some(entry) = self.core.remote_entries.get(i).cloned() else {
-                        return;
-                    };
-                    if entry.name == ".." || self.ssh_state != SshBrowserState::Idle {
-                        return;
+                if self.ssh_state != SshBrowserState::Idle {
+                    return;
+                }
+                let indices = self.core.selected_indices();
+                if indices.len() > 1 {
+                    let mut tags: Vec<String> = Vec::new();
+                    for &i in &indices {
+                        let Some(entry) = self.core.remote_entries.get(i) else {
+                            continue;
+                        };
+                        if entry.name == ".." {
+                            continue;
+                        }
+                        let full_path = format!(
+                            "{}/{}",
+                            self.core.remote_path.trim_end_matches('/'),
+                            entry.name
+                        );
+                        let kind = if entry.is_dir { "dir" } else { "file" };
+                        tags.push(format!("remote:{}:{}", kind, full_path));
                     }
-                    let full_path = format!(
-                        "{}/{}",
-                        self.core.remote_path.trim_end_matches('/'),
-                        entry.name
-                    );
-                    let kind = if entry.is_dir { "dir" } else { "file" };
-                    self.core.confirm_delete = Some(format!("remote:{}:{}", kind, full_path));
-                    self.core.needs_redraw = true;
+                    self.core.clear_selection();
+                    if let Some(first) = tags.first().cloned() {
+                        self.core.pending_deletes = tags[1..].to_vec();
+                        self.core.confirm_delete = Some(first);
+                        self.core.needs_redraw = true;
+                    }
+                } else {
+                    self.core.clear_selection();
+                    if let Some(i) = self.core.remote_sel.selected() {
+                        let Some(entry) = self.core.remote_entries.get(i).cloned() else {
+                            return;
+                        };
+                        if entry.name == ".." {
+                            return;
+                        }
+                        let full_path = format!(
+                            "{}/{}",
+                            self.core.remote_path.trim_end_matches('/'),
+                            entry.name
+                        );
+                        let kind = if entry.is_dir { "dir" } else { "file" };
+                        self.core.confirm_delete =
+                            Some(format!("remote:{}:{}", kind, full_path));
+                        self.core.needs_redraw = true;
+                    }
                 }
             }
         }

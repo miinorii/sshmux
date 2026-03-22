@@ -21,7 +21,7 @@ pub enum Action {
 // Key handling
 // ---------------------------------------------------------------------------
 
-pub fn handle_key(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, last_area: Rect) -> Action {
+pub fn handle_key(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, shift: bool, last_area: Rect) -> Action {
     let focused_pane_has_app_cursor = app.focused_pane_app_cursor();
 
     // ---- Global shortcuts (Alt+…) ----
@@ -68,12 +68,12 @@ pub fn handle_key(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, last_area
     }
 
     // ---- FileBrowser pane ----
-    if let Some(action) = handle_sftp_browser_key(app, code) {
+    if let Some(action) = handle_sftp_browser_key(app, code, shift) {
         return action;
     }
 
     // ---- SshBrowser pane ----
-    if let Some(action) = handle_ssh_browser_key(app, code) {
+    if let Some(action) = handle_ssh_browser_key(app, code, shift) {
         return action;
     }
 
@@ -410,7 +410,7 @@ fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect)
 // ---------------------------------------------------------------------------
 
 /// Returns `Some(Action)` if the focused pane is a FileBrowser.
-fn handle_sftp_browser_key(app: &mut App, code: KeyCode) -> Option<Action> {
+fn handle_sftp_browser_key(app: &mut App, code: KeyCode, shift: bool) -> Option<Action> {
     let focus_idx = app.tabs[app.selected_tab].focus_idx;
     if !matches!(
         app.tabs[app.selected_tab].root.leaf(focus_idx),
@@ -431,7 +431,7 @@ fn handle_sftp_browser_key(app: &mut App, code: KeyCode) -> Option<Action> {
             return Some(Action::Continue);
         }
 
-        match handle_browser_key(&mut browser.core, code) {
+        match handle_browser_key(&mut browser.core, code, shift) {
             BrowserKeyAction::Enter => browser.enter(),
             BrowserKeyAction::GoUp => browser.go_up(),
             BrowserKeyAction::Download => browser.download(),
@@ -452,7 +452,7 @@ fn handle_sftp_browser_key(app: &mut App, code: KeyCode) -> Option<Action> {
 // ---------------------------------------------------------------------------
 
 /// Returns `Some(Action)` if the focused pane is an SshBrowser.
-fn handle_ssh_browser_key(app: &mut App, code: KeyCode) -> Option<Action> {
+fn handle_ssh_browser_key(app: &mut App, code: KeyCode, shift: bool) -> Option<Action> {
     let focus_idx = app.tabs[app.selected_tab].focus_idx;
     if !matches!(
         app.tabs[app.selected_tab].root.leaf(focus_idx),
@@ -500,7 +500,7 @@ fn handle_ssh_browser_key(app: &mut App, code: KeyCode) -> Option<Action> {
             return Some(Action::Continue);
         }
 
-        match handle_browser_key(&mut browser.core, code) {
+        match handle_browser_key(&mut browser.core, code, shift) {
             BrowserKeyAction::Enter => browser.enter(),
             BrowserKeyAction::GoUp => browser.go_up(),
             BrowserKeyAction::Download => browser.download(),
@@ -781,6 +781,11 @@ fn handle_browser_mouse(
     if let MouseEventKind::Up(MouseButton::Left) = kind {
         if is_sftp {
             if let Some(Pane::FileBrowser { browser }) = app.tab_mut().focused_pane_mut() {
+                let indices = browser.core.selected_indices();
+                if indices.len() > 1 {
+                    browser.core.pending_transfers = indices;
+                    browser.core.clear_selection();
+                }
                 match browser
                     .core
                     .handle_drag_release(column, pane_area, leaf_count)
@@ -791,6 +796,11 @@ fn handle_browser_mouse(
                 }
             }
         } else if let Some(Pane::SshBrowser { browser }) = app.tab_mut().focused_pane_mut() {
+            let indices = browser.core.selected_indices();
+            if indices.len() > 1 {
+                browser.core.pending_transfers = indices;
+                browser.core.clear_selection();
+            }
             match browser
                 .core
                 .handle_drag_release(column, pane_area, leaf_count)
