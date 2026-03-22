@@ -679,6 +679,22 @@ pub fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16, 
         };
         let col = (column as i32 - inner.x as i32).max(0) as u16;
         let r = (row as i32 - inner.y as i32).max(0) as u16;
+
+        // Check if remote app wants motion events (AnyMotion / mode 1003)
+        let wants_motion = app.tabs[app.selected_tab]
+            .root
+            .leaf(pane_idx)
+            .map(|p| {
+                if let Pane::Session { terminal, .. } = p {
+                    terminal.mouse_wants_motion()
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+
+        // SGR extended mouse encoding: \x1b[<Cb;Cx;CyM (press) / m (release)
+        // Button codes: 0=left, 1=middle, 2=right, 32+=motion flag, 64/65=scroll
         let seq = match kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 format!("\x1b[<0;{};{}M", col + 1, r + 1)
@@ -706,6 +722,15 @@ pub fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16, 
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 format!("\x1b[<32;{};{}M", col + 1, r + 1)
+            }
+            MouseEventKind::Drag(MouseButton::Right) => {
+                format!("\x1b[<34;{};{}M", col + 1, r + 1)
+            }
+            MouseEventKind::Drag(MouseButton::Middle) => {
+                format!("\x1b[<33;{};{}M", col + 1, r + 1)
+            }
+            MouseEventKind::Moved if wants_motion => {
+                format!("\x1b[<35;{};{}M", col + 1, r + 1)
             }
             _ => String::new(),
         };
