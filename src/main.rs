@@ -2,7 +2,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyEventKind, KeyModifiers,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -54,7 +57,12 @@ fn main() -> Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -102,7 +110,8 @@ fn main() -> Result<()> {
                             execute!(
                                 terminal.backend_mut(),
                                 LeaveAlternateScreen,
-                                DisableMouseCapture
+                                DisableMouseCapture,
+                                DisableBracketedPaste
                             )?;
                             terminal.show_cursor()?;
                             return Ok(());
@@ -112,6 +121,10 @@ fn main() -> Result<()> {
 
                 Event::Mouse(mouse) => {
                     input::handle_mouse(&mut app, mouse.kind, mouse.column, mouse.row, last_area);
+                }
+
+                Event::Paste(text) => {
+                    input::handle_paste(&mut app, &text);
                 }
 
                 Event::Resize(w, h) => {

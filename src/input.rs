@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
-use log::error;
+use log::{debug, error};
 use ratatui::{layout::Rect, style::Color, widgets::ListState};
 
 use crate::app::App;
@@ -763,5 +763,20 @@ fn handle_browser_mouse(
                 None => {}
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Paste handling (bracketed paste for SSH sessions)
+// ---------------------------------------------------------------------------
+
+pub fn handle_paste(app: &mut App, text: &str) {
+    debug!("handle_paste: text={:?}", text);
+    if matches!(app.tab().focused_pane(), Some(Pane::Session { .. })) {
+        debug!("handle_paste: forwarding to session as bracketed paste");
+        let bracketed = format!("\x1b[200~{}\x1b[201~", text);
+        app.send_str(&bracketed);
+    } else {
+        debug!("handle_paste: ignored (not a session pane)");
     }
 }
