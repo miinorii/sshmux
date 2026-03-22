@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cargo build --release        # Release binary at target/release/sshmux
 cargo build                  # Debug build
-cargo test                   # Run all tests (~125 tests, inline in source files)
+cargo test                   # Run all tests (~190 tests, inline in source files)
 cargo test pane::tests       # Run tests for a specific module
 cargo test test_name         # Run a single test by name
 cargo clippy --release       # Lint — keep at zero warnings
@@ -63,6 +63,10 @@ Both use prompt-stability detection: raw PTY buffer byte count unchanged for N t
 - No external SSH libraries (ssh2, russh). Must use system binaries only.
 - Must work on both Windows (ConPTY) and Linux.
 - ConPTY on Windows has known quirks: spurious SIGWINCH on mouse mode changes causes double-prompt artifacts in some remote shells. No clean fix found yet.
+
+## Code review expectations
+
+When asked for a code sanity check or review, go beyond lint and formatting. Review logic: are there race conditions, off-by-one errors, unreachable states, dead paths, redundant work, or things that silently fail? Look for duplicated code that should be shared, inconsistent patterns between similar modules, and places where the control flow is unnecessarily convoluted. Suggest concrete improvements, not vague advice.
 
 ## Logging conventions
 
