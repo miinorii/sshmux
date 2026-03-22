@@ -2,13 +2,14 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::KeyCode;
-use log::{info, warn};
+use log::{debug, info, warn};
 use ratatui::{
     buffer::Buffer,
+    layout::Alignment,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, StatefulWidget, Widget},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Widget},
 };
 
 use super::browser_layout;
@@ -48,6 +49,7 @@ pub enum BrowserKeyAction {
     GoUp,
     Download,
     Upload,
+    UploadPaths,
     Delete,
     ConfirmDeleteYes,
 }
@@ -88,6 +90,11 @@ pub struct BrowserCore {
     pub remote_scroll_x: usize,
     pub prompt_stable: u8,
     pub prev_raw_len: usize,
+    // ---- drag-and-drop paste detection ----
+    pub paste_buf: String,
+    pub paste_deadline: Option<Instant>,
+    pub pending_uploads: Vec<PathBuf>,
+    pub upload_scroll_x: usize,
 }
 
 impl BrowserCore {
@@ -122,6 +129,10 @@ impl BrowserCore {
             remote_scroll_x: 0,
             prompt_stable: 0,
             prev_raw_len: 0,
+            paste_buf: String::new(),
+            paste_deadline: None,
+            pending_uploads: vec![],
+            upload_scroll_x: 0,
         }
     }
 
@@ -293,6 +304,55 @@ impl BrowserCore {
                 format!("{}h", secs / 3600)
             }
         }
+    }
+
+    // ---- paste / drag-and-drop detection ------------------------------------
+
+    /// Called each tick. If the paste deadline has expired, parse the buffer
+    /// for valid file paths and populate `pending_uploads`.
+    pub fn check_paste_deadline(&mut self) {
+        let expired = self
+            .paste_deadline
+            .map(|d| Instant::now() >= d)
+            .unwrap_or(false);
+        if !expired {
+            return;
+        }
+        let text = std::mem::take(&mut self.paste_buf);
+        self.paste_deadline = None;
+        debug!(
+            "paste deadline expired: {} chars, text={:?}",
+            text.len(),
+            &text[..text.len().min(200)]
+        );
+
+        let parse_start = Instant::now();
+        let paths = parse_dropped_paths(&text);
+        let parse_elapsed = parse_start.elapsed();
+        debug!(
+            "parse_dropped_paths took {:?}, found {} path(s)",
+            parse_elapsed,
+            paths.len()
+        );
+
+        if paths.is_empty() {
+            self.status_msg.clear();
+            self.needs_redraw = true;
+            return;
+        }
+        info!(
+            "drag-drop detected: {} file(s): {:?}",
+            paths.len(),
+            paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+        );
+        self.pending_uploads = paths;
+        self.upload_scroll_x = 0;
+        self.status_msg = format!("{} file(s) ready to upload", self.pending_uploads.len());
+        self.status_color = Color::Cyan;
+        self.needs_redraw = true;
     }
 
     // ---- delete (local) ----------------------------------------------------
@@ -655,6 +715,86 @@ impl BrowserCore {
         true
     }
 
+    /// Render the upload confirmation overlay when files are pending.
+    /// Returns true if the overlay was rendered (callers can skip status bar).
+    pub fn render_upload_confirm(&self, inner: Rect, buf: &mut Buffer) -> bool {
+        if self.pending_uploads.is_empty() {
+            return false;
+        }
+
+        let count = self.pending_uploads.len();
+        let scroll_x = self.upload_scroll_x;
+
+        // Build file list lines
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            format!(" Upload {} file(s)? ", count),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        for path in &self.pending_uploads {
+            let full = format!("  {}", path.display());
+            let display = if scroll_x > 0 && scroll_x < full.len() {
+                format!("…{}", &full[scroll_x + 1..])
+            } else {
+                full
+            };
+            lines.push(Line::from(Span::styled(
+                display,
+                Style::default().fg(Color::Cyan),
+            )));
+        }
+        lines.push(Line::from(""));
+
+        let hint_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        let dim = Style::default().fg(Color::DarkGray);
+        lines.push(Line::from(vec![
+            Span::styled("[y]", hint_style),
+            Span::styled(" Upload  ", dim),
+            Span::styled("[n]", hint_style),
+            Span::styled(" Cancel  ", dim),
+            Span::styled("[←→]", hint_style),
+            Span::styled(" Scroll", dim),
+        ]));
+
+        let box_h = (lines.len() as u16 + 2).min(inner.height);
+        let box_w = 60u16.min(inner.width.saturating_sub(4));
+        let cx = inner.x + inner.width.saturating_sub(box_w) / 2;
+        let cy = inner.y + inner.height.saturating_sub(box_h) / 2;
+        let overlay = Rect {
+            x: cx,
+            y: cy,
+            width: box_w,
+            height: box_h,
+        };
+
+        // Clear the area
+        for y in overlay.y..overlay.y + overlay.height {
+            for x in overlay.x..overlay.x + overlay.width {
+                if x < buf.area().width && y < buf.area().height {
+                    buf[(x, y)].reset();
+                }
+            }
+        }
+
+        let paragraph = Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .style(Style::default().bg(Color::Black))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan).bg(Color::Black))
+                    .title(" Drop Upload ")
+                    .title_alignment(Alignment::Center),
+            );
+        paragraph.render(overlay, buf);
+        true
+    }
+
     /// Render the normal status bar (state badge + message + shortcuts).
     pub fn render_normal_status(
         &self,
@@ -706,16 +846,70 @@ impl BrowserCore {
 /// for password). Navigation keys are handled directly on `core`; actions that
 /// need browser-specific logic are returned as a `BrowserKeyAction`.
 pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode) -> BrowserKeyAction {
+    // ---- Upload confirmation overlay ----
+    if !core.pending_uploads.is_empty() {
+        match code {
+            KeyCode::Left => {
+                core.upload_scroll_x = core.upload_scroll_x.saturating_sub(1);
+                core.needs_redraw = true;
+            }
+            KeyCode::Right => {
+                // Clamp: only scroll if the longest path overflows the overlay.
+                // Use 58 (60 - 2 borders) as content width — matches render's box_w.
+                let content_w = 58usize;
+                let longest = core
+                    .pending_uploads
+                    .iter()
+                    .map(|p| format!("  {}", p.display()).len())
+                    .max()
+                    .unwrap_or(0);
+                let max_scroll = longest.saturating_sub(content_w);
+                if core.upload_scroll_x < max_scroll {
+                    core.upload_scroll_x += 1;
+                    core.needs_redraw = true;
+                }
+            }
+            KeyCode::Char('y') => {
+                return BrowserKeyAction::UploadPaths;
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                core.pending_uploads.clear();
+                core.upload_scroll_x = 0;
+                core.status_msg = "File drop canceled".to_string();
+                core.status_color = Color::Yellow;
+                core.needs_redraw = true;
+            }
+            _ => {}
+        }
+        return BrowserKeyAction::Handled;
+    }
+
+    // ---- Paste accumulation: capture all chars while buffer is active ----
+    if !core.paste_buf.is_empty()
+        && let KeyCode::Char(c) = code
+    {
+        core.paste_buf.push(c);
+        core.paste_deadline = Some(Instant::now() + Duration::from_millis(150));
+        debug!(
+            "paste accumulating: {} chars total",
+            core.paste_buf.len()
+        );
+        return BrowserKeyAction::Handled;
+    }
+
+    // ---- Delete confirmation ----
     if core.confirm_delete.is_some() {
         match code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => return BrowserKeyAction::ConfirmDeleteYes,
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            KeyCode::Char('y') => return BrowserKeyAction::ConfirmDeleteYes,
+            KeyCode::Char('n') | KeyCode::Esc => {
                 core.confirm_delete_no();
                 return BrowserKeyAction::Handled;
             }
             _ => return BrowserKeyAction::Handled,
         }
     }
+
+    // ---- Normal mode ----
     match code {
         KeyCode::Tab => {
             core.toggle_focus();
@@ -748,8 +942,79 @@ pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode) -> BrowserKeyAc
             BrowserFocus::Local => BrowserKeyAction::Upload,
         },
         KeyCode::Delete => BrowserKeyAction::Delete,
+        // Unrecognized char: start paste accumulation (no redraw to avoid
+        // hundreds of draws while characters stream in from a file drop)
+        KeyCode::Char(c) => {
+            debug!("paste accumulation started with char {:?}", c);
+            core.paste_buf.push(c);
+            core.paste_deadline = Some(Instant::now() + Duration::from_millis(150));
+            BrowserKeyAction::Handled
+        }
         _ => BrowserKeyAction::Handled,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Path parsing for drag-and-drop detection
+// ---------------------------------------------------------------------------
+
+/// Parse file paths from text pasted by the OS (drag-and-drop).
+/// Handles quoted paths (for names with spaces) and multiple paths.
+/// Only returns paths that actually exist on disk.
+fn parse_dropped_paths(text: &str) -> Vec<PathBuf> {
+    let text = text.trim();
+    let mut paths = Vec::new();
+    let mut rest = text;
+
+    while !rest.is_empty() {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        let token = if rest.starts_with('"') {
+            let inner = &rest[1..];
+            if let Some(end) = inner.find('"') {
+                let tok = &inner[..end];
+                rest = &inner[end + 1..];
+                tok
+            } else {
+                rest = "";
+                inner
+            }
+        } else if let Some(split_pos) = find_path_boundary(rest) {
+            let tok = &rest[..split_pos];
+            rest = &rest[split_pos..];
+            tok.trim_end()
+        } else {
+            let tok = rest;
+            rest = "";
+            tok
+        };
+
+        let path = std::path::Path::new(token);
+        if path.exists() {
+            paths.push(path.to_path_buf());
+        }
+    }
+
+    paths
+}
+
+/// Find where one unquoted path ends and the next begins.
+/// Looks for ` X:\` or ` /` boundaries that signal a new absolute path.
+fn find_path_boundary(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    for i in 1..bytes.len() {
+        if bytes[i] == b' ' && i + 1 < bytes.len() {
+            let after = &s[i + 1..];
+            if (after.len() >= 3 && after.as_bytes()[1] == b':' && after.as_bytes()[2] == b'\\')
+                || after.starts_with('/')
+            {
+                return Some(i);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

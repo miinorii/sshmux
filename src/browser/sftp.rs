@@ -45,6 +45,7 @@ impl FileBrowser {
     }
 
     pub fn tick(&mut self) {
+        self.core.check_paste_deadline();
         let cur_len = self.sftp.raw_len();
         if cur_len != self.core.prev_raw_len {
             self.core.prompt_stable = 0;
@@ -113,6 +114,10 @@ impl FileBrowser {
                         self.core.status_color = Color::Green;
                     }
                     self.core.needs_redraw = true;
+                    // Chain next queued drop-upload if any
+                    if !self.core.pending_uploads.is_empty() {
+                        self.upload_pending_paths();
+                    }
                 }
             }
             SftpState::Transferring => {
@@ -329,6 +334,54 @@ impl FileBrowser {
         }
     }
 
+    // ---- drop upload -------------------------------------------------------
+
+    pub fn upload_pending_paths(&mut self) {
+        if self.sftp_state != SftpState::Idle {
+            return;
+        }
+        let Some(path) = self.core.pending_uploads.first().cloned() else {
+            return;
+        };
+        self.core.pending_uploads.remove(0);
+        self.core.upload_scroll_x = 0;
+        let remaining = self.core.pending_uploads.len();
+
+        let is_dir = path.is_dir();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let local_str = path.to_string_lossy().replace('\\', "/");
+        let flag = if is_dir { "-r " } else { "" };
+        let cmd = format!(
+            "put {}{} {}/\r\n",
+            flag,
+            shell_quote(&local_str),
+            shell_quote(&self.core.remote_path)
+        );
+        self.core.last_transfer = Some(TransferStatus {
+            filename: name.clone(),
+            direction: TransferDirection::Upload,
+            is_dir,
+            done: false,
+            progress: "0%".to_string(),
+            file_count: 0,
+        });
+        let suffix = if remaining > 0 {
+            format!(" (+{} queued)", remaining)
+        } else {
+            String::new()
+        };
+        self.core.status_msg = format!("Uploading {}...{}", name, suffix);
+        self.core.status_color = Color::Yellow;
+        self.core.upload_scroll_x = 0;
+        info!("SFTP put (drop) {}", local_str);
+        self.sftp.send_str(&cmd);
+        self.sftp_state = SftpState::Transferring;
+    }
+
     // ---- delete ------------------------------------------------------------
 
     pub fn delete_focused(&mut self) {
@@ -392,6 +445,7 @@ impl FileBrowser {
             self.core
                 .render_normal_status(status_area, buf, label, color, &progress);
         }
+        self.core.render_upload_confirm(area, buf);
     }
 
     fn state_label(&self) -> (&str, Color) {

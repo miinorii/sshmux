@@ -57,6 +57,16 @@ impl App {
         }
     }
 
+    /// Returns true when the focused browser pane is accumulating paste chars.
+    /// Used to suppress unnecessary redraws during file-drop detection.
+    pub fn paste_accumulating(&self) -> bool {
+        match self.tab().focused_pane() {
+            Some(Pane::FileBrowser { browser }) => !browser.core.paste_buf.is_empty(),
+            Some(Pane::SshBrowser { browser }) => !browser.core.paste_buf.is_empty(),
+            _ => false,
+        }
+    }
+
     pub fn open_session(&mut self, host_idx: usize, area: Rect) -> Result<()> {
         let host = self
             .hosts

@@ -63,6 +63,7 @@ impl SshBrowser {
     }
 
     pub fn tick(&mut self) {
+        self.core.check_paste_deadline();
         // --- SCP transfer monitoring ---
         if self.ssh_state == SshBrowserState::Transferring {
             if self.waiting_password {
@@ -283,6 +284,10 @@ impl SshBrowser {
                         self.core.status_color = Color::Green;
                     }
                     self.core.needs_redraw = true;
+                    // Chain next queued drop-upload if any
+                    if !self.core.pending_uploads.is_empty() {
+                        self.upload_pending_paths();
+                    }
                 }
             }
             SshBrowserState::WaitingDelete => {
@@ -537,6 +542,79 @@ impl SshBrowser {
         }
     }
 
+    // ---- drop upload -------------------------------------------------------
+
+    pub fn upload_pending_paths(&mut self) {
+        if self.ssh_state != SshBrowserState::Idle {
+            return;
+        }
+        let Some(path) = self.core.pending_uploads.first().cloned() else {
+            return;
+        };
+        self.core.pending_uploads.remove(0);
+        self.core.upload_scroll_x = 0;
+        let remaining = self.core.pending_uploads.len();
+
+        let is_dir = path.is_dir();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let local_str = path.to_string_lossy().replace('\\', "/");
+
+        let mut cmd = CommandBuilder::new("scp");
+        cmd.arg("-O");
+        if is_dir {
+            cmd.arg("-r");
+        }
+        cmd.arg(&*local_str);
+        cmd.arg(format!(
+            "{}:{}",
+            self.core.host,
+            self.core.remote_path.trim_end_matches('/')
+        ));
+        cmd.env("TERM", "xterm");
+        info!(
+            "SCP upload (drop): {} -> {}:{}",
+            local_str,
+            self.core.host,
+            self.core.remote_path.trim_end_matches('/')
+        );
+
+        match EmbeddedTerminal::new(24, 80, cmd, true) {
+            Ok(term) => {
+                self.scp_pty = Some(term);
+                self.core.last_transfer = Some(TransferStatus {
+                    filename: name.clone(),
+                    direction: TransferDirection::Upload,
+                    is_dir,
+                    done: false,
+                    progress: "0%".to_string(),
+                    file_count: 0,
+                });
+                let suffix = if remaining > 0 {
+                    format!(" (+{} queued)", remaining)
+                } else {
+                    String::new()
+                };
+                self.core.status_msg = format!("Uploading {}...{}", name, suffix);
+                self.core.status_color = Color::Yellow;
+                self.core.upload_scroll_x = 0;
+                self.ssh_state = SshBrowserState::Transferring;
+                self.password_prompts_seen = 0;
+                self.waiting_password = false;
+                info!("SCP put (drop) {} started", name);
+            }
+            Err(e) => {
+                error!("SCP spawn failed: {}", e);
+                self.core.status_msg = format!("SCP error: {}", e);
+                self.core.status_color = Color::Red;
+            }
+        }
+        self.core.needs_redraw = true;
+    }
+
     // ---- password input for SCP auth ----------------------------------------
 
     pub fn password_char(&mut self, c: char) {
@@ -643,6 +721,7 @@ impl SshBrowser {
                     .render_normal_status(status_area, buf, label, color, &progress);
             }
         }
+        self.core.render_upload_confirm(area, buf);
     }
 
     fn render_password_status(&self, area: Rect, buf: &mut Buffer) {

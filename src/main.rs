@@ -81,7 +81,9 @@ fn main() -> Result<()> {
     let mut first_frame = true;
 
     loop {
-        std::thread::sleep(Duration::from_millis(5));
+        if !app.paste_accumulating() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
 
         app.tick_browsers();
 
@@ -141,7 +143,7 @@ fn main() -> Result<()> {
             }
         }
 
-        if needs_draw || had_event || first_frame {
+        if (needs_draw || had_event || first_frame) && !app.paste_accumulating() {
             first_frame = false;
             terminal.draw(|f| {
                 last_area = f.area();

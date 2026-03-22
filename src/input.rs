@@ -436,6 +436,7 @@ fn handle_sftp_browser_key(app: &mut App, code: KeyCode) -> Option<Action> {
             BrowserKeyAction::GoUp => browser.go_up(),
             BrowserKeyAction::Download => browser.download(),
             BrowserKeyAction::Upload => browser.upload(),
+            BrowserKeyAction::UploadPaths => browser.upload_pending_paths(),
             BrowserKeyAction::Delete => browser.delete_focused(),
             BrowserKeyAction::ConfirmDeleteYes => browser.confirm_delete_yes(),
 
@@ -504,6 +505,7 @@ fn handle_ssh_browser_key(app: &mut App, code: KeyCode) -> Option<Action> {
             BrowserKeyAction::GoUp => browser.go_up(),
             BrowserKeyAction::Download => browser.download(),
             BrowserKeyAction::Upload => browser.upload(),
+            BrowserKeyAction::UploadPaths => browser.upload_pending_paths(),
             BrowserKeyAction::Delete => browser.delete_focused(),
             BrowserKeyAction::ConfirmDeleteYes => browser.confirm_delete_yes(),
 
@@ -726,6 +728,16 @@ fn handle_browser_mouse(
     is_sftp: bool,
 ) {
     let leaf_count = app.tabs[app.selected_tab].root.leaf_count();
+
+    // Block all mouse events when the upload confirmation overlay is active
+    let overlay_active = if is_sftp {
+        matches!(app.tab().focused_pane(), Some(Pane::FileBrowser { browser }) if !browser.core.pending_uploads.is_empty())
+    } else {
+        matches!(app.tab().focused_pane(), Some(Pane::SshBrowser { browser }) if !browser.core.pending_uploads.is_empty())
+    };
+    if overlay_active {
+        return;
+    }
 
     if let MouseEventKind::Down(MouseButton::Left) = kind {
         if is_sftp {
