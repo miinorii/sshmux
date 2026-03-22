@@ -21,7 +21,14 @@ pub enum Action {
 // Key handling
 // ---------------------------------------------------------------------------
 
-pub fn handle_key(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, shift: bool, last_area: Rect) -> Action {
+pub fn handle_key(
+    app: &mut App,
+    code: KeyCode,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    last_area: Rect,
+) -> Action {
     let focused_pane_has_app_cursor = app.focused_pane_app_cursor();
 
     // ---- Global shortcuts (Alt+…) ----
@@ -783,7 +790,7 @@ fn handle_browser_mouse(
             if let Some(Pane::FileBrowser { browser }) = app.tab_mut().focused_pane_mut() {
                 let indices = browser.core.selected_indices();
                 if indices.len() > 1 {
-                    browser.core.pending_transfers = indices;
+                    browser.core.queue_transfers_from_indices(&indices);
                     browser.core.clear_selection();
                 }
                 match browser
@@ -798,7 +805,7 @@ fn handle_browser_mouse(
         } else if let Some(Pane::SshBrowser { browser }) = app.tab_mut().focused_pane_mut() {
             let indices = browser.core.selected_indices();
             if indices.len() > 1 {
-                browser.core.pending_transfers = indices;
+                browser.core.queue_transfers_from_indices(&indices);
                 browser.core.clear_selection();
             }
             match browser

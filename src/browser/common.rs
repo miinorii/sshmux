@@ -95,8 +95,8 @@ pub struct BrowserCore {
     pub selected: BTreeSet<usize>,
     pub select_anchor: Option<usize>,
     // ---- multi-transfer queues ----
-    pub pending_transfers: Vec<usize>, // indices to transfer (upload or download)
-    pub pending_deletes: Vec<String>,  // tagged delete strings queued for batch delete
+    pub pending_transfers: Vec<String>, // filenames queued for batch transfer
+    pub pending_deletes: Vec<String>,   // tagged delete strings queued for batch delete
     // ---- drag-and-drop paste detection ----
     pub paste_buf: String,
     pub paste_deadline: Option<Instant>,
@@ -437,37 +437,37 @@ impl BrowserCore {
 
     /// Execute a confirmed local delete. Returns true if handled.
     pub fn local_confirm_delete(&mut self) -> bool {
-        let Some(ref tagged) = self.confirm_delete else {
-            return false;
-        };
-        let Some(rest) = tagged.strip_prefix("local:") else {
-            return false;
-        };
-        let is_dir = rest.starts_with("dir:");
-        let full_path = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
-        let path = PathBuf::from(full_path);
-        let result = if is_dir {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
-        if let Err(e) = result {
-            warn!("local delete failed: {:?}: {}", path, e);
-            self.status_msg = format!("Delete failed: {}", e);
-            self.status_color = Color::Red;
-            self.pending_deletes.clear();
-        } else {
-            info!("local delete ok: {}", full_path);
-            self.status_msg = format!("Deleted: {}", full_path);
-            self.status_color = Color::Green;
-            self.local_entries = read_local_dir(&self.local_path);
-        }
-        self.confirm_delete = None;
-        self.last_duration = None;
-        // Chain next pending local delete
-        if self.pop_pending_delete() {
-            // Auto-confirm: execute immediately without re-prompting
-            self.local_confirm_delete();
+        loop {
+            let Some(ref tagged) = self.confirm_delete else {
+                return false;
+            };
+            let Some(rest) = tagged.strip_prefix("local:") else {
+                return false;
+            };
+            let is_dir = rest.starts_with("dir:");
+            let full_path = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
+            let path = PathBuf::from(full_path);
+            let result = if is_dir {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if let Err(e) = result {
+                warn!("local delete failed: {:?}: {}", path, e);
+                self.status_msg = format!("Delete failed: {}", e);
+                self.status_color = Color::Red;
+                self.pending_deletes.clear();
+            } else {
+                info!("local delete ok: {}", full_path);
+                self.status_msg = format!("Deleted: {}", full_path);
+                self.status_color = Color::Green;
+                self.local_entries = read_local_dir(&self.local_path);
+            }
+            self.confirm_delete = None;
+            self.last_duration = None;
+            if !self.pop_pending_delete() {
+                break;
+            }
         }
         self.needs_redraw = true;
         true
@@ -514,12 +514,85 @@ impl BrowserCore {
         }
     }
 
+    /// Convert selected indices to filenames and store in `pending_transfers`.
+    pub fn queue_transfers_from_indices(&mut self, indices: &[usize]) {
+        let entries = match self.focus {
+            BrowserFocus::Local => &self.local_entries,
+            BrowserFocus::Remote => &self.remote_entries,
+        };
+        self.pending_transfers = indices
+            .iter()
+            .filter_map(|&i| entries.get(i))
+            .filter(|e| e.name != "..")
+            .map(|e| e.name.clone())
+            .collect();
+    }
+
+    /// Pop the next pending transfer filename and find its index in the current
+    /// entry list. Returns `Some(index)` if found, `None` if name no longer exists.
+    pub fn pop_pending_transfer(&mut self) -> Option<usize> {
+        while let Some(name) = self.pending_transfers.first().cloned() {
+            self.pending_transfers.remove(0);
+            let entries = match self.focus {
+                BrowserFocus::Local => &self.local_entries,
+                BrowserFocus::Remote => &self.remote_entries,
+            };
+            if let Some(idx) = entries.iter().position(|e| e.name == name) {
+                return Some(idx);
+            }
+            warn!("pending transfer '{}' no longer in listing, skipping", name);
+        }
+        None
+    }
+
     pub fn confirm_delete_no(&mut self) {
         self.confirm_delete = None;
         self.pending_deletes.clear();
         self.status_msg = String::from("Deletion cancelled.");
         self.status_color = Color::Yellow;
         self.needs_redraw = true;
+    }
+
+    /// Build tagged delete strings for remote multi-select or single-item deletion.
+    /// Sets `confirm_delete` for the first item and queues the rest in `pending_deletes`.
+    pub fn remote_delete_focused(&mut self) {
+        let indices = self.selected_indices();
+        if indices.len() > 1 {
+            let mut tags: Vec<String> = Vec::new();
+            for &i in &indices {
+                let Some(entry) = self.remote_entries.get(i) else {
+                    continue;
+                };
+                if entry.name == ".." {
+                    continue;
+                }
+                let full_path =
+                    format!("{}/{}", self.remote_path.trim_end_matches('/'), entry.name);
+                let kind = if entry.is_dir { "dir" } else { "file" };
+                tags.push(format!("remote:{}:{}", kind, full_path));
+            }
+            self.clear_selection();
+            if let Some(first) = tags.first().cloned() {
+                self.pending_deletes = tags[1..].to_vec();
+                self.confirm_delete = Some(first);
+                self.needs_redraw = true;
+            }
+        } else {
+            self.clear_selection();
+            if let Some(i) = self.remote_sel.selected() {
+                let Some(entry) = self.remote_entries.get(i).cloned() else {
+                    return;
+                };
+                if entry.name == ".." {
+                    return;
+                }
+                let full_path =
+                    format!("{}/{}", self.remote_path.trim_end_matches('/'), entry.name);
+                let kind = if entry.is_dir { "dir" } else { "file" };
+                self.confirm_delete = Some(format!("remote:{}:{}", kind, full_path));
+                self.needs_redraw = true;
+            }
+        }
     }
 
     // ---- click / drag ------------------------------------------------------
@@ -777,10 +850,18 @@ impl BrowserCore {
 
                 let sel_style = Style::default()
                     .fg(Color::Black)
-                    .bg(if is_active { Color::Cyan } else { Color::DarkGray })
+                    .bg(if is_active {
+                        Color::Cyan
+                    } else {
+                        Color::DarkGray
+                    })
                     .add_modifier(Modifier::BOLD);
                 if visible_name_chars == 0 {
-                    let style = if selected { sel_style } else { Style::default().fg(Color::DarkGray) };
+                    let style = if selected {
+                        sel_style
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
                     ListItem::new(Line::from(Span::styled(padded, style)))
                 } else {
                     let name_part: String = padded.chars().take(visible_name_chars).collect();
@@ -1129,7 +1210,7 @@ pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode, shift: bool) ->
         KeyCode::Char('t') => {
             let indices = core.selected_indices();
             if indices.len() > 1 {
-                core.pending_transfers = indices;
+                core.queue_transfers_from_indices(&indices);
                 core.clear_selection();
             }
             match core.focus {

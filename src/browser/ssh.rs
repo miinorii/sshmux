@@ -288,7 +288,10 @@ impl SshBrowser {
                     if !self.core.pending_uploads.is_empty() {
                         self.upload_pending_paths();
                     } else if !self.core.pending_transfers.is_empty() {
-                        let direction = self.core.last_transfer.as_ref()
+                        let direction = self
+                            .core
+                            .last_transfer
+                            .as_ref()
                             .map(|t| t.direction)
                             .unwrap_or(TransferDirection::Upload);
                         match direction {
@@ -444,7 +447,10 @@ impl SshBrowser {
             return;
         }
         let idx = if !self.core.pending_transfers.is_empty() {
-            self.core.pending_transfers.remove(0)
+            let Some(i) = self.core.pop_pending_transfer() else {
+                return;
+            };
+            i
         } else if let Some(i) = self.core.remote_sel.selected() {
             i
         } else {
@@ -514,7 +520,10 @@ impl SshBrowser {
             return;
         }
         let idx = if !self.core.pending_transfers.is_empty() {
-            self.core.pending_transfers.remove(0)
+            let Some(i) = self.core.pop_pending_transfer() else {
+                return;
+            };
+            i
         } else if let Some(i) = self.core.local_sel.selected() {
             i
         } else {
@@ -709,50 +718,7 @@ impl SshBrowser {
                 if self.ssh_state != SshBrowserState::Idle {
                     return;
                 }
-                let indices = self.core.selected_indices();
-                if indices.len() > 1 {
-                    let mut tags: Vec<String> = Vec::new();
-                    for &i in &indices {
-                        let Some(entry) = self.core.remote_entries.get(i) else {
-                            continue;
-                        };
-                        if entry.name == ".." {
-                            continue;
-                        }
-                        let full_path = format!(
-                            "{}/{}",
-                            self.core.remote_path.trim_end_matches('/'),
-                            entry.name
-                        );
-                        let kind = if entry.is_dir { "dir" } else { "file" };
-                        tags.push(format!("remote:{}:{}", kind, full_path));
-                    }
-                    self.core.clear_selection();
-                    if let Some(first) = tags.first().cloned() {
-                        self.core.pending_deletes = tags[1..].to_vec();
-                        self.core.confirm_delete = Some(first);
-                        self.core.needs_redraw = true;
-                    }
-                } else {
-                    self.core.clear_selection();
-                    if let Some(i) = self.core.remote_sel.selected() {
-                        let Some(entry) = self.core.remote_entries.get(i).cloned() else {
-                            return;
-                        };
-                        if entry.name == ".." {
-                            return;
-                        }
-                        let full_path = format!(
-                            "{}/{}",
-                            self.core.remote_path.trim_end_matches('/'),
-                            entry.name
-                        );
-                        let kind = if entry.is_dir { "dir" } else { "file" };
-                        self.core.confirm_delete =
-                            Some(format!("remote:{}:{}", kind, full_path));
-                        self.core.needs_redraw = true;
-                    }
-                }
+                self.core.remote_delete_focused();
             }
         }
     }
