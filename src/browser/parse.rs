@@ -99,14 +99,7 @@ pub fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
     }];
     for line in lines {
         let line = line.trim();
-        if line.is_empty()
-            || line.starts_with("sftp>")
-            || line.starts_with("SSHMUX>")
-            || line.starts_with("Remote")
-            || line.starts_with("Changing")
-            || line.starts_with("total")
-            || line.starts_with("ls")
-        {
+        if line.is_empty() {
             continue;
         }
 
@@ -116,6 +109,10 @@ pub fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
         }
 
         let perms = tokens[0];
+        if perms.len() < 10 {
+            continue;
+        }
+
         let is_dir = perms.starts_with('d');
         let is_link = perms.starts_with('l');
         if !perms.starts_with('-') && !is_dir && !is_link {
@@ -783,6 +780,32 @@ mod tests {
     fn parse_ls_only_noise() {
         let e = parse_ls(&ls("sftp>\ntotal 0\nls -la /tmp"));
         assert_eq!(e.len(), 1);
+    }
+
+    // ---- parse_ls (previously-dropped filenames) ----------------------------
+
+    #[test]
+    fn parse_ls_dir_named_total() {
+        let e = parse_ls(&ls("drwxr-xr-x    ? u g 4096 Jan  1  2020 total-sales"));
+        assert!(e.iter().any(|x| x.name == "total-sales"));
+    }
+
+    #[test]
+    fn parse_ls_dir_named_remote() {
+        let e = parse_ls(&ls("drwxr-xr-x    ? u g 4096 Jan  1  2020 Remote-backups"));
+        assert!(e.iter().any(|x| x.name == "Remote-backups"));
+    }
+
+    #[test]
+    fn parse_ls_file_named_ls_output() {
+        let e = parse_ls(&ls("-rw-r--r--    ? u g 100 Jan  1  2020 ls-output.log"));
+        assert!(e.iter().any(|x| x.name == "ls-output.log"));
+    }
+
+    #[test]
+    fn parse_ls_dir_named_changing() {
+        let e = parse_ls(&ls("drwxr-xr-x    ? u g 4096 Jan  1  2020 Changing-config"));
+        assert!(e.iter().any(|x| x.name == "Changing-config"));
     }
 
     // ---- strip_ansi (additional edge cases) --------------------------------
