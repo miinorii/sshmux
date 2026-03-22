@@ -14,7 +14,7 @@ cargo clippy --release       # Lint — keep at zero warnings
 cargo fmt                    # Format — run before every commit
 ```
 
-Debug logging: `sshmux --debug` creates a timestamped log file in the current directory.
+Debug logging: `sshmux --log=LEVEL` (trace/debug/info/warn/error).
 
 ## Architecture
 

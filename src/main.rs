@@ -35,16 +35,30 @@ use pane::pane_inner;
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<()> {
-    let is_debug = std::env::args().any(|a| a == "--debug");
-    if is_debug {
+    let log_level = std::env::args().find_map(|a| a.strip_prefix("--log=").map(String::from));
+    if let Some(level_str) = log_level {
+        let level = match level_str.to_lowercase().as_str() {
+            "trace" => LevelFilter::Trace,
+            "debug" => LevelFilter::Debug,
+            "info" => LevelFilter::Info,
+            "warn" => LevelFilter::Warn,
+            "error" => LevelFilter::Error,
+            other => {
+                eprintln!(
+                    "unknown log level '{}', expected: trace, debug, info, warn, error",
+                    other
+                );
+                std::process::exit(1);
+            }
+        };
         let now = OffsetDateTime::now_utc();
         let (y, mo, d) = now.to_calendar_date();
         let (h, m, s) = now.to_hms();
         let mo = mo as u8;
-        let filename = format!("sshmux-debug-{y:04}{mo:02}{d:02}_{h:02}{m:02}{s:02}.log");
+        let filename = format!("sshmux-{level_str}-{y:04}{mo:02}{d:02}_{h:02}{m:02}{s:02}.log");
         let file = std::fs::File::create(&filename)?;
         WriteLogger::init(
-            LevelFilter::Debug,
+            level,
             ConfigBuilder::new()
                 .set_time_format_custom(time::macros::format_description!(
                     "[year]-[month]-[day] [hour]:[minute]:[second]"

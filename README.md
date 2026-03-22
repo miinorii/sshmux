@@ -268,12 +268,17 @@ Binary: `target/release/sshmux`
 ## Logging
 
 ```
-sshmux --debug
+sshmux --log=LEVEL
 ```
 
-Creates a timestamped log file (`sshmux-debug-YYYYMMDD_HHMMSS.log`) in the current directory. Log levels:
+Where `LEVEL` is one of: `trace`, `debug`, `info`, `warn`, `error`.
 
+Creates a timestamped log file (`sshmux-LEVEL-YYYYMMDD_HHMMSS.log`) in the current directory.
+
+Log levels:
+
+- **trace** — very verbose, all internal events
+- **debug** — internal diagnostics (resize events, state machine details)
 - **info** — session lifecycle (connect, disconnect, transfers, deletes)
 - **warn** — recoverable issues (password rejected, delete failed)
 - **error** — failures (PTY errors, spawn failures)
-- **debug** — internal diagnostics (resize events, state machine details)
