@@ -60,11 +60,12 @@ mod tests {
     }
 
     #[test]
-    fn layout_odd_width_gives_extra_to_remote() {
+    fn layout_odd_width_gives_extra_to_local() {
         let inner = Rect::new(0, 0, 101, 40);
         let layout = browser_layout(inner);
-        assert_eq!(layout.local_panel.width, 50);
-        assert_eq!(layout.remote_panel.width, 51);
+        // round(101/2) = 51 → local gets the extra pixel
+        assert_eq!(layout.local_panel.width, 51);
+        assert_eq!(layout.remote_panel.width, 50);
     }
 
     #[test]
