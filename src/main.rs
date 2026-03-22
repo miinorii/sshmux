@@ -81,6 +81,7 @@ fn main() -> Result<()> {
     let mut first_frame = true;
 
     loop {
+        // Skip sleep during paste accumulation to drain chars fast.
         if !app.paste_accumulating() {
             std::thread::sleep(Duration::from_millis(5));
         }
