@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::Result;
-use log::{error, info};
+use log::{debug, error, info};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::{
     buffer::Buffer,
@@ -349,8 +349,9 @@ impl EmbeddedTerminal {
         }
         if let Some(ref child) = self.child
             && let Ok(mut c) = child.lock()
-            && let Ok(Some(_status)) = c.try_wait()
+            && let Ok(Some(status)) = c.try_wait()
         {
+            debug!("child process exited: {:?}", status);
             self.exited.store(true, Ordering::Release);
             return true;
         }
