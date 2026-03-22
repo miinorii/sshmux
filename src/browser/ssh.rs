@@ -553,6 +553,7 @@ impl SshBrowser {
         };
         self.core.pending_uploads.remove(0);
         self.core.upload_scroll_x = 0;
+        self.core.upload_scroll_y = 0;
         let remaining = self.core.pending_uploads.len();
 
         let is_dir = path.is_dir();
@@ -601,6 +602,7 @@ impl SshBrowser {
                 self.core.status_msg = format!("Uploading {}...{}", name, suffix);
                 self.core.status_color = Color::Yellow;
                 self.core.upload_scroll_x = 0;
+                self.core.upload_scroll_y = 0;
                 self.ssh_state = SshBrowserState::Transferring;
                 self.password_prompts_seen = 0;
                 self.waiting_password = false;

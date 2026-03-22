@@ -345,6 +345,7 @@ impl FileBrowser {
         };
         self.core.pending_uploads.remove(0);
         self.core.upload_scroll_x = 0;
+        self.core.upload_scroll_y = 0;
         let remaining = self.core.pending_uploads.len();
 
         let is_dir = path.is_dir();
@@ -377,6 +378,7 @@ impl FileBrowser {
         self.core.status_msg = format!("Uploading {}...{}", name, suffix);
         self.core.status_color = Color::Yellow;
         self.core.upload_scroll_x = 0;
+        self.core.upload_scroll_y = 0;
         info!("SFTP put (drop) {}", local_str);
         self.sftp.send_str(&cmd);
         self.sftp_state = SftpState::Transferring;

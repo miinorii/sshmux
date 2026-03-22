@@ -156,12 +156,10 @@ pub fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
             modified,
         });
     }
-    entries.sort_by(|a, b| {
-        match (a.name.as_str(), b.name.as_str()) {
-            ("..", _) => std::cmp::Ordering::Less,
-            (_, "..") => std::cmp::Ordering::Greater,
-            _ => b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)),
-        }
+    entries.sort_by(|a, b| match (a.name.as_str(), b.name.as_str()) {
+        ("..", _) => std::cmp::Ordering::Less,
+        (_, "..") => std::cmp::Ordering::Greater,
+        _ => b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)),
     });
     entries
 }

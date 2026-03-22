@@ -95,6 +95,8 @@ pub struct BrowserCore {
     pub paste_deadline: Option<Instant>,
     pub pending_uploads: Vec<PathBuf>,
     pub upload_scroll_x: usize,
+    pub upload_scroll_y: usize,
+    pub last_inner: Rect,
 }
 
 impl BrowserCore {
@@ -133,6 +135,8 @@ impl BrowserCore {
             paste_deadline: None,
             pending_uploads: vec![],
             upload_scroll_x: 0,
+            upload_scroll_y: 0,
+            last_inner: Rect::default(),
         }
     }
 
@@ -350,6 +354,7 @@ impl BrowserCore {
         );
         self.pending_uploads = paths;
         self.upload_scroll_x = 0;
+        self.upload_scroll_y = 0;
         self.status_msg = format!("{} file(s) ready to upload", self.pending_uploads.len());
         self.status_color = Color::Cyan;
         self.needs_redraw = true;
@@ -717,13 +722,25 @@ impl BrowserCore {
 
     /// Render the upload confirmation overlay when files are pending.
     /// Returns true if the overlay was rendered (callers can skip status bar).
-    pub fn render_upload_confirm(&self, inner: Rect, buf: &mut Buffer) -> bool {
+    pub fn render_upload_confirm(&mut self, inner: Rect, buf: &mut Buffer) -> bool {
         if self.pending_uploads.is_empty() {
             return false;
         }
 
         let count = self.pending_uploads.len();
         let scroll_x = self.upload_scroll_x;
+        let scroll_y = self.upload_scroll_y;
+
+        self.last_inner = inner;
+        let box_w = 60u16.min(inner.width.saturating_sub(4));
+        // Fixed lines: title + blank + indicator/blank + hints = 4, borders = 2
+        let max_file_rows = 5.min((inner.height as usize).saturating_sub(6));
+        let visible_files: Vec<_> = self
+            .pending_uploads
+            .iter()
+            .skip(scroll_y)
+            .take(max_file_rows.max(1))
+            .collect();
 
         // Build file list lines
         let mut lines: Vec<Line> = Vec::new();
@@ -734,7 +751,7 @@ impl BrowserCore {
                 .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(""));
-        for path in &self.pending_uploads {
+        for path in &visible_files {
             let full = format!("  {}", path.display());
             let display = if scroll_x > 0 && scroll_x < full.len() {
                 format!("…{}", &full[scroll_x + 1..])
@@ -746,7 +763,21 @@ impl BrowserCore {
                 Style::default().fg(Color::Cyan),
             )));
         }
-        lines.push(Line::from(""));
+        // Show scroll indicator if not all files are visible
+        if count > visible_files.len() {
+            let indicator = format!(
+                "  [{}-{} of {}] ↑↓ to scroll",
+                scroll_y + 1,
+                scroll_y + visible_files.len(),
+                count
+            );
+            lines.push(Line::from(Span::styled(
+                indicator,
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            lines.push(Line::from(""));
+        }
 
         let hint_style = Style::default()
             .fg(Color::Yellow)
@@ -762,7 +793,6 @@ impl BrowserCore {
         ]));
 
         let box_h = (lines.len() as u16 + 2).min(inner.height);
-        let box_w = 60u16.min(inner.width.saturating_sub(4));
         let cx = inner.x + inner.width.saturating_sub(box_w) / 2;
         let cy = inner.y + inner.height.saturating_sub(box_h) / 2;
         let overlay = Rect {
@@ -849,14 +879,25 @@ pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode) -> BrowserKeyAc
     // ---- Upload confirmation overlay ----
     if !core.pending_uploads.is_empty() {
         match code {
+            KeyCode::Up => {
+                core.upload_scroll_y = core.upload_scroll_y.saturating_sub(1);
+                core.needs_redraw = true;
+            }
+            KeyCode::Down => {
+                let max_rows = 5.min((core.last_inner.height as usize).saturating_sub(6));
+                let max_y = core.pending_uploads.len().saturating_sub(max_rows);
+                if core.upload_scroll_y < max_y {
+                    core.upload_scroll_y += 1;
+                    core.needs_redraw = true;
+                }
+            }
             KeyCode::Left => {
                 core.upload_scroll_x = core.upload_scroll_x.saturating_sub(1);
                 core.needs_redraw = true;
             }
             KeyCode::Right => {
-                // Clamp: only scroll if the longest path overflows the overlay.
-                // Use 58 (60 - 2 borders) as content width — matches render's box_w.
-                let content_w = 58usize;
+                let box_w = 60u16.min(core.last_inner.width.saturating_sub(4));
+                let content_w = (box_w as usize).saturating_sub(2);
                 let longest = core
                     .pending_uploads
                     .iter()
@@ -875,6 +916,7 @@ pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode) -> BrowserKeyAc
             KeyCode::Char('n') | KeyCode::Esc => {
                 core.pending_uploads.clear();
                 core.upload_scroll_x = 0;
+                core.upload_scroll_y = 0;
                 core.status_msg = "File drop canceled".to_string();
                 core.status_color = Color::Yellow;
                 core.needs_redraw = true;
@@ -890,10 +932,7 @@ pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode) -> BrowserKeyAc
     {
         core.paste_buf.push(c);
         core.paste_deadline = Some(Instant::now() + Duration::from_millis(150));
-        debug!(
-            "paste accumulating: {} chars total",
-            core.paste_buf.len()
-        );
+        debug!("paste accumulating: {} chars total", core.paste_buf.len());
         return BrowserKeyAction::Handled;
     }
 
