@@ -9,6 +9,24 @@ SSH session multiplexer that runs inside your local terminal. Tabs, split panes,
 
 ---
 
+## Features
+
+- Tabs and split panes -- run multiple SSH sessions side by side in a single terminal window
+- Two-panel file browsers with both SFTP and SCP backends for remote file management
+- Reads hosts from `~/.ssh/config` -- no separate configuration file needed
+- Uses system `ssh`, `sftp`, and `scp` binaries -- inherits your SSH agent, keys, jump hosts, and proxy settings
+- 1000-line scrollback in interactive sessions, with mouse scroll support
+- Mouse forwarding (SGR encoding) to remote applications that request it
+- File transfers with progress indication (percentage for single files, file count for directories)
+- Batch operations: multi-select files with Shift+Up/Down, then transfer or delete in one action
+- Drag-and-drop upload: drop files from your OS file manager onto a browser pane
+- Recursive directory deletion via the SCP browser (`rm -rf`), which SFTP cannot do
+- SCP browser works on servers without the SFTP subsystem
+- Drive picker on Windows for navigating between local volumes
+- Works on Windows (ConPTY) and Linux
+
+---
+
 ## SSH config
 
 Hosts are read from `~/.ssh/config` at startup. Any non-wildcard `Host` entry is listed in the connect pane. The `ssh` and `sftp` binaries inherit the full system environment including SSH agent, `~/.ssh/config` options, and jump hosts.
@@ -65,15 +83,16 @@ Two browser backends are available from the connect pane menu (`b`):
 |---|---|
 | `Tab` | Toggle local / remote panel focus |
 | `↑` / `↓` | Navigate entries |
+| `Shift+↑` / `Shift+↓` | Extend multi-selection |
 | `←` / `→` | Scroll long file names |
 | `Space` / `Enter` | Enter directory |
 | `Backspace` | Go up one directory |
 | `t` | Transfer: download (remote focus) or upload (local focus) |
-| `Delete` | Delete focused file (confirmation required) |
+| `Delete` | Delete focused file or selection (confirmation required) |
 | `y` | Confirm deletion |
 | `n` / `Esc` | Cancel deletion |
 
-Drag-and-drop: click on one panel and release on the other to transfer.
+Drag-and-drop: click on one panel and release on the other to transfer. Multi-selected files are transferred as a batch. Files dragged from the OS file manager onto a browser pane are queued for upload with a confirmation prompt.
 
 ---
 
