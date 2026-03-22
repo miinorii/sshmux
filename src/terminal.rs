@@ -205,6 +205,16 @@ impl EmbeddedTerminal {
         !matches!(p.screen().mouse_protocol_mode(), MouseProtocolMode::None)
     }
 
+    pub fn mouse_wants_motion(&self) -> bool {
+        let Ok(p) = self.parser.try_lock() else {
+            return false;
+        };
+        matches!(
+            p.screen().mouse_protocol_mode(),
+            MouseProtocolMode::AnyMotion
+        )
+    }
+
     pub fn app_cursor(&self) -> bool {
         let Ok(p) = self.parser.try_lock() else {
             return false;
