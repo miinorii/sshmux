@@ -93,7 +93,6 @@ fn main() -> Result<()> {
     };
     let mut host_mouse_captured = false;
     let mut first_frame = true;
-
     loop {
         // Skip sleep during paste accumulation to drain chars fast.
         if !app.paste_accumulating() {
@@ -112,12 +111,10 @@ fn main() -> Result<()> {
         let mut had_event = false;
         while event::poll(Duration::ZERO)? {
             had_event = true;
-            match event::read()? {
+            let ev = event::read()?;
+            trace!("raw event: {:?}", ev);
+            match ev {
                 Event::Key(key) => {
-                    trace!(
-                        "key event: code={:?} modifiers={:?} kind={:?}",
-                        key.code, key.modifiers, key.kind
-                    );
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
