@@ -75,12 +75,12 @@ pub fn handle_key(
     }
 
     // ---- FileBrowser pane ----
-    if let Some(action) = handle_sftp_browser_key(app, code, shift) {
+    if let Some(action) = handle_sftp_browser_key(app, code, ctrl, alt, shift) {
         return action;
     }
 
     // ---- SshBrowser pane ----
-    if let Some(action) = handle_ssh_browser_key(app, code, shift) {
+    if let Some(action) = handle_ssh_browser_key(app, code, ctrl, alt, shift) {
         return action;
     }
 
@@ -428,7 +428,13 @@ fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect)
 // ---------------------------------------------------------------------------
 
 /// Returns `Some(Action)` if the focused pane is a FileBrowser.
-fn handle_sftp_browser_key(app: &mut App, code: KeyCode, shift: bool) -> Option<Action> {
+fn handle_sftp_browser_key(
+    app: &mut App,
+    code: KeyCode,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+) -> Option<Action> {
     let focus_idx = app.tabs[app.selected_tab].focus_idx;
     if !matches!(
         app.tabs[app.selected_tab].root.leaf(focus_idx),
@@ -446,6 +452,12 @@ fn handle_sftp_browser_key(app: &mut App, code: KeyCode, shift: bool) -> Option<
                 KeyCode::Backspace => browser.sftp.send_str("\x7f"),
                 _ => {}
             }
+            return Some(Action::Continue);
+        }
+
+        // Ignore ctrl/alt chars in idle browser mode — they are not browser
+        // actions and must not trigger paste accumulation.
+        if (ctrl || alt) && matches!(code, KeyCode::Char(_)) {
             return Some(Action::Continue);
         }
 
@@ -470,7 +482,13 @@ fn handle_sftp_browser_key(app: &mut App, code: KeyCode, shift: bool) -> Option<
 // ---------------------------------------------------------------------------
 
 /// Returns `Some(Action)` if the focused pane is an SshBrowser.
-fn handle_ssh_browser_key(app: &mut App, code: KeyCode, shift: bool) -> Option<Action> {
+fn handle_ssh_browser_key(
+    app: &mut App,
+    code: KeyCode,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+) -> Option<Action> {
     let focus_idx = app.tabs[app.selected_tab].focus_idx;
     if !matches!(
         app.tabs[app.selected_tab].root.leaf(focus_idx),
@@ -515,6 +533,10 @@ fn handle_ssh_browser_key(app: &mut App, code: KeyCode, shift: bool) -> Option<A
                 KeyCode::Backspace => browser.ssh.send_str("\x7f"),
                 _ => {}
             }
+            return Some(Action::Continue);
+        }
+
+        if (ctrl || alt) && matches!(code, KeyCode::Char(_)) {
             return Some(Action::Continue);
         }
 
