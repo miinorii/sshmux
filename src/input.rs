@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
-use log::{debug, error};
+use log::{debug, error, trace};
 use ratatui::{layout::Rect, style::Color, widgets::ListState};
 
 use crate::app::App;
@@ -120,7 +120,18 @@ pub fn handle_key(
     // ---- Session: regular keys ----
     match code {
         KeyCode::Char(c) if ctrl && !alt => {
-            let byte = (c as u8).to_ascii_uppercase().wrapping_sub(b'@');
+            // Convert Ctrl+<letter> to the corresponding control byte (0x01..0x1A).
+            // Some terminals report Ctrl+C as Char('\x03') with CONTROL modifier
+            // instead of Char('c') with CONTROL — handle both forms.
+            let byte = if c.is_ascii_control() {
+                c as u8
+            } else {
+                (c as u8).to_ascii_uppercase().wrapping_sub(b'@')
+            };
+            trace!(
+                "ctrl+char: c={:?} (0x{:02X}) -> byte=0x{:02X}",
+                c, c as u32, byte
+            );
             app.send_str(&String::from_utf8_lossy(&[byte]));
         }
         KeyCode::Char(c) => app.send_char(c),
