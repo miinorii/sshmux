@@ -9,7 +9,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use log::debug;
+use log::{debug, trace};
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
 use time::OffsetDateTime;
@@ -114,6 +114,10 @@ fn main() -> Result<()> {
             had_event = true;
             match event::read()? {
                 Event::Key(key) => {
+                    trace!(
+                        "key event: code={:?} modifiers={:?} kind={:?}",
+                        key.code, key.modifiers, key.kind
+                    );
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
