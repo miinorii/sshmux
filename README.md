@@ -22,6 +22,7 @@ SSH session multiplexer that runs inside your local terminal. Tabs, split panes,
 - Drag-and-drop upload: drop files from your OS file manager onto a browser pane
 - Recursive directory deletion via the SCP browser (`rm -rf`), which SFTP cannot do
 - SCP browser works on servers without the SFTP subsystem
+- Right-click context menu for quick access to tab/split/quit actions
 - Drive picker on Windows for navigating between local volumes
 - Works on Windows (ConPTY) and Linux
 
@@ -44,6 +45,7 @@ Hosts are read from `~/.ssh/config` at startup. Any non-wildcard `Host` entry is
 | `Alt+↑` / `Alt+↓` | Cycle focus between panes |
 | `Alt+←` / `Alt+→` | Switch tabs |
 | `Alt+Q` | Quit |
+| Right-click | Context menu (new tab, close, split, exit) |
 
 ### Connect pane
 

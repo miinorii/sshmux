@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cargo build --release        # Release binary at target/release/sshmux
 cargo build                  # Debug build
-cargo test                   # Run all tests (~190 tests, inline in source files)
+cargo test                   # Run all tests (~200 tests, inline in source files)
 cargo test pane::tests       # Run tests for a specific module
 cargo test test_name         # Run a single test by name
 cargo clippy --release       # Lint — keep at zero warnings
@@ -55,6 +55,7 @@ Both use prompt-stability detection: raw PTY buffer byte count unchanged for N t
 - `dirty: Arc<AtomicBool>` and `exited: Arc<AtomicBool>` for cross-thread state
 - `raw_output: Arc<Mutex<Vec<u8>>>` — browsers scrape PTY output by reading and draining this buffer
 - Connect pane has three mutually exclusive overlays: `browser_menu`, `connect_input`, `show_help`
+- Right-click context menu lives on `App` (not per-pane): `context_menu: Option<ContextMenu>`. Opens on right-click Down, tracks hover via Drag, executes on Up, dismissed by any keypress or resize. Right-click is intercepted before pane dispatch so it is never forwarded to remote apps.
 - Browser focus toggle (`Tab` key) switches between local and remote panels
 - `pane_inner()` computes render area by subtracting tab bar and shortcut bar
 
