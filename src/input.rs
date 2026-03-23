@@ -12,6 +12,7 @@ use crate::pane::{Pane, Split, pane_inner};
 // Action — returned by input handlers to signal the main loop
 // ---------------------------------------------------------------------------
 
+#[derive(PartialEq)]
 pub enum Action {
     Continue,
     Quit,
@@ -29,6 +30,12 @@ pub fn handle_key(
     shift: bool,
     last_area: Rect,
 ) -> Action {
+    // ---- Dismiss context menu on any keypress ----
+    if app.context_menu.is_some() {
+        app.context_menu = None;
+        return Action::Continue;
+    }
+
     let focused_pane_has_app_cursor = app.focused_pane_app_cursor();
 
     // ---- Global shortcuts (Alt+…) ----
@@ -613,10 +620,96 @@ fn handle_session_exit_key(app: &mut App, code: KeyCode, last_area: Rect) -> boo
 }
 
 // ---------------------------------------------------------------------------
+// Context menu mouse
+// ---------------------------------------------------------------------------
+
+fn context_menu_hit(
+    col: u16,
+    row: u16,
+    last_area: Rect,
+    menu: &crate::app::ContextMenu,
+) -> Option<usize> {
+    let rect = crate::app::context_menu_rect(menu.col, menu.row, last_area);
+    // Inner area (inside border)
+    let inner_x = rect.x + 1;
+    let inner_y = rect.y + 1;
+    let inner_w = rect.width.saturating_sub(2);
+    let inner_h = crate::app::CONTEXT_MENU_ITEMS.len() as u16;
+    if col >= inner_x && col < inner_x + inner_w && row >= inner_y && row < inner_y + inner_h {
+        Some((row - inner_y) as usize)
+    } else {
+        None
+    }
+}
+
+fn handle_context_menu_mouse(
+    app: &mut App,
+    kind: MouseEventKind,
+    col: u16,
+    row: u16,
+    last_area: Rect,
+) -> Action {
+    let menu = app.context_menu.as_ref().unwrap();
+    match kind {
+        MouseEventKind::Drag(MouseButton::Right) | MouseEventKind::Moved => {
+            let hit = context_menu_hit(col, row, last_area, menu);
+            app.context_menu.as_mut().unwrap().selected = hit;
+            Action::Continue
+        }
+        MouseEventKind::Up(MouseButton::Right) => {
+            let selected = context_menu_hit(col, row, last_area, menu);
+            app.context_menu = None;
+            if let Some(idx) = selected {
+                execute_context_menu_action(app, idx, last_area)
+            } else {
+                Action::Continue
+            }
+        }
+        // Any other event dismisses the menu
+        _ => {
+            app.context_menu = None;
+            Action::Continue
+        }
+    }
+}
+
+fn execute_context_menu_action(app: &mut App, idx: usize, last_area: Rect) -> Action {
+    match idx {
+        0 => app.new_tab(),
+        1 => {
+            let was_last = app.tab().leaf_count() == 1;
+            if was_last {
+                app.close_tab();
+            } else {
+                app.tab_mut().close_focused();
+                app.resize_all(last_area);
+            }
+        }
+        2 => app
+            .tab_mut()
+            .split(Split::Horizontal, pane_inner(last_area)),
+        3 => app.tab_mut().split(Split::Vertical, pane_inner(last_area)),
+        4 => return Action::Quit,
+        _ => {}
+    }
+    Action::Continue
+}
+
+// ---------------------------------------------------------------------------
 // Mouse handling
 // ---------------------------------------------------------------------------
 
-pub fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16, last_area: Rect) {
+pub fn handle_mouse(
+    app: &mut App,
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+    last_area: Rect,
+) -> Action {
+    // ---- Context menu intercept ----
+    if app.context_menu.is_some() {
+        return handle_context_menu_mouse(app, kind, column, row, last_area);
+    }
     let content = pane_inner(last_area);
     let areas = app.tabs[app.selected_tab].root.leaf_areas(content);
 
@@ -632,13 +725,23 @@ pub fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16, 
         .map(|(i, area)| (i, *area));
 
     let Some((pane_idx, pane_area)) = clicked_pane else {
-        return;
+        return Action::Continue;
     };
 
     let prev_focus = app.tabs[app.selected_tab].focus_idx;
 
     if matches!(kind, MouseEventKind::Down(_)) {
         app.tabs[app.selected_tab].focus_idx = pane_idx;
+    }
+
+    // Right-click: open context menu (after focus is set)
+    if matches!(kind, MouseEventKind::Down(MouseButton::Right)) {
+        app.context_menu = Some(crate::app::ContextMenu {
+            col: column,
+            row,
+            selected: None,
+        });
+        return Action::Continue;
     }
 
     // ---- Browser mouse (shared for both SFTP and SCP) ----
@@ -653,7 +756,7 @@ pub fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16, 
 
     if is_browser || is_ssh_browser {
         handle_browser_mouse(app, kind, column, row, pane_area, is_browser);
-        return;
+        return Action::Continue;
     }
 
     // ---- Session mouse forwarding ----
@@ -706,7 +809,7 @@ pub fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16, 
                     _ => {}
                 }
             }
-            return;
+            return Action::Continue;
         }
     }
 
@@ -742,12 +845,6 @@ pub fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16, 
             MouseEventKind::Up(MouseButton::Left) => {
                 format!("\x1b[<0;{};{}m", col + 1, r + 1)
             }
-            MouseEventKind::Down(MouseButton::Right) => {
-                format!("\x1b[<2;{};{}M", col + 1, r + 1)
-            }
-            MouseEventKind::Up(MouseButton::Right) => {
-                format!("\x1b[<2;{};{}m", col + 1, r + 1)
-            }
             MouseEventKind::Down(MouseButton::Middle) => {
                 format!("\x1b[<1;{};{}M", col + 1, r + 1)
             }
@@ -763,9 +860,6 @@ pub fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16, 
             MouseEventKind::Drag(MouseButton::Left) => {
                 format!("\x1b[<32;{};{}M", col + 1, r + 1)
             }
-            MouseEventKind::Drag(MouseButton::Right) => {
-                format!("\x1b[<34;{};{}M", col + 1, r + 1)
-            }
             MouseEventKind::Drag(MouseButton::Middle) => {
                 format!("\x1b[<33;{};{}M", col + 1, r + 1)
             }
@@ -778,6 +872,7 @@ pub fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16, 
             app.send_str(&seq);
         }
     }
+    Action::Continue
 }
 
 // ---------------------------------------------------------------------------

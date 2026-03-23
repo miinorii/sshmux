@@ -109,6 +109,7 @@ fn main() -> Result<()> {
         }
 
         let mut had_event = false;
+        let mut quit = false;
         while event::poll(Duration::ZERO)? {
             had_event = true;
             let ev = event::read()?;
@@ -122,24 +123,21 @@ fn main() -> Result<()> {
                     let alt = key.modifiers.contains(KeyModifiers::ALT);
                     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
-                    match input::handle_key(&mut app, key.code, ctrl, alt, shift, last_area) {
-                        Action::Continue => {}
-                        Action::Quit => {
-                            disable_raw_mode()?;
-                            execute!(
-                                terminal.backend_mut(),
-                                LeaveAlternateScreen,
-                                DisableMouseCapture,
-                                DisableBracketedPaste
-                            )?;
-                            terminal.show_cursor()?;
-                            return Ok(());
-                        }
+                    if input::handle_key(&mut app, key.code, ctrl, alt, shift, last_area)
+                        == Action::Quit
+                    {
+                        quit = true;
+                        break;
                     }
                 }
 
                 Event::Mouse(mouse) => {
-                    input::handle_mouse(&mut app, mouse.kind, mouse.column, mouse.row, last_area);
+                    if input::handle_mouse(&mut app, mouse.kind, mouse.column, mouse.row, last_area)
+                        == Action::Quit
+                    {
+                        quit = true;
+                        break;
+                    }
                 }
 
                 Event::Paste(text) => {
@@ -153,11 +151,15 @@ fn main() -> Result<()> {
                         width: w,
                         height: h,
                     };
+                    app.context_menu = None;
                     app.resize_all(last_area);
                     debug!("resize {}x{}", w, h);
                 }
                 _ => {}
             }
+        }
+        if quit {
+            break;
         }
 
         if (needs_draw || had_event || first_frame) && !app.paste_accumulating() {
@@ -175,4 +177,14 @@ fn main() -> Result<()> {
             })?;
         }
     }
+
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    )?;
+    terminal.show_cursor()?;
+    Ok(())
 }
