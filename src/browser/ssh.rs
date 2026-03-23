@@ -433,7 +433,7 @@ impl SshBrowser {
 
     fn send_ls(&mut self) {
         let cmd = format!(
-            "ls -la --quoting-style=literal {}\r\n",
+            "ls -la {}\r\n",
             shell_quote(&self.core.remote_path)
         );
         self.core.cmd_start = Some(Instant::now());
