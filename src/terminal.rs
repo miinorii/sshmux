@@ -369,6 +369,22 @@ impl EmbeddedTerminal {
     }
 }
 
+impl Drop for EmbeddedTerminal {
+    fn drop(&mut self) {
+        // Move the child handle to a background thread so that the blocking
+        // wait() call (from portable_pty's Child drop) doesn't freeze the UI.
+        if let Some(child) = self.child.take() {
+            thread::spawn(move || {
+                if let Ok(mut c) = child.lock() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+                debug!("background child cleanup finished");
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
