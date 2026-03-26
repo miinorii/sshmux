@@ -461,7 +461,7 @@ impl SshBrowser {
             return;
         }
         let idx = if !self.core.pending_transfers.is_empty() {
-            let Some(i) = self.core.pop_pending_transfer() else {
+            let Some(i) = self.core.pop_pending_transfer(BrowserFocus::Remote) else {
                 return;
             };
             i
@@ -534,7 +534,7 @@ impl SshBrowser {
             return;
         }
         let idx = if !self.core.pending_transfers.is_empty() {
-            let Some(i) = self.core.pop_pending_transfer() else {
+            let Some(i) = self.core.pop_pending_transfer(BrowserFocus::Local) else {
                 return;
             };
             i

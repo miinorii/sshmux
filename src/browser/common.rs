@@ -27,7 +27,7 @@ pub enum BrowserFocus {
     Remote,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransferDirection {
     Download,
     Upload,
@@ -578,22 +578,34 @@ impl BrowserCore {
             .filter(|e| e.name != "..")
             .map(|e| e.name.clone())
             .collect();
+        info!(
+            "queued {} transfers: {:?}",
+            self.pending_transfers.len(),
+            self.pending_transfers
+        );
     }
 
-    /// Pop the next pending transfer filename and find its index in the current
-    /// entry list. Returns `Some(index)` if found, `None` if name no longer exists.
-    pub fn pop_pending_transfer(&mut self) -> Option<usize> {
+    /// Pop the next pending transfer filename and find its index in the
+    /// specified panel's entry list. Returns `Some(index)` if found.
+    pub fn pop_pending_transfer(&mut self, panel: BrowserFocus) -> Option<usize> {
         while let Some(name) = self.pending_transfers.first().cloned() {
             self.pending_transfers.remove(0);
-            let entries = match self.focus {
+            let entries = match panel {
                 BrowserFocus::Local => &self.local_entries,
                 BrowserFocus::Remote => &self.remote_entries,
             };
             if let Some(idx) = entries.iter().position(|e| e.name == name) {
+                debug!(
+                    "pop_pending_transfer: '{}' -> idx {}, {} remaining",
+                    name,
+                    idx,
+                    self.pending_transfers.len()
+                );
                 return Some(idx);
             }
             warn!("pending transfer '{}' no longer in listing, skipping", name);
         }
+        debug!("pop_pending_transfer: queue empty");
         None
     }
 

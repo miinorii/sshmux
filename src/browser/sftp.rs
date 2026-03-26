@@ -138,9 +138,16 @@ impl FileBrowser {
                     }
                     self.core.needs_redraw = true;
                     // Chain next queued transfer if any
+                    debug!(
+                        "SFTP WaitingLs done: pending_uploads={}, pending_transfers={}, pending_deletes={}",
+                        self.core.pending_uploads.len(),
+                        self.core.pending_transfers.len(),
+                        self.core.pending_deletes.len(),
+                    );
                     if !self.core.pending_uploads.is_empty() {
                         self.upload_pending_paths();
                     } else if !self.core.pending_transfers.is_empty() {
+                        debug!("SFTP chaining next transfer, direction={:?}", self.core.last_transfer_direction());
                         match self.core.last_transfer_direction() {
                             TransferDirection::Upload => self.upload(),
                             TransferDirection::Download => self.download(),
@@ -167,7 +174,10 @@ impl FileBrowser {
                         self.core.status_color = Color::Green;
                     }
                     self.core.local_entries = read_local_dir(&self.core.local_path);
-                    info!("SFTP transfer complete");
+                    info!(
+                        "SFTP transfer complete, pending_transfers={}",
+                        self.core.pending_transfers.len()
+                    );
                     self.sftp.drain_raw();
                     self.core.prev_raw_len = 0;
                     self.send_ls();
@@ -297,10 +307,11 @@ impl FileBrowser {
 
     pub fn download(&mut self) {
         if self.sftp_state != SftpState::Idle {
+            debug!("SFTP download: skipped, state={:?}", self.sftp_state);
             return;
         }
         let idx = if !self.core.pending_transfers.is_empty() {
-            let Some(i) = self.core.pop_pending_transfer() else {
+            let Some(i) = self.core.pop_pending_transfer(BrowserFocus::Remote) else {
                 return;
             };
             i
@@ -351,10 +362,11 @@ impl FileBrowser {
 
     pub fn upload(&mut self) {
         if self.sftp_state != SftpState::Idle {
+            debug!("SFTP upload: skipped, state={:?}", self.sftp_state);
             return;
         }
         let idx = if !self.core.pending_transfers.is_empty() {
-            let Some(i) = self.core.pop_pending_transfer() else {
+            let Some(i) = self.core.pop_pending_transfer(BrowserFocus::Local) else {
                 return;
             };
             i
