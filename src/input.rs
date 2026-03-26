@@ -755,7 +755,7 @@ pub fn handle_mouse(
     );
 
     if is_browser || is_ssh_browser {
-        handle_browser_mouse(app, kind, column, row, pane_area, is_browser);
+        handle_browser_mouse(app, kind, column, row, pane_area);
         return Action::Continue;
     }
 
@@ -885,65 +885,22 @@ fn handle_browser_mouse(
     column: u16,
     row: u16,
     pane_area: Rect,
-    is_sftp: bool,
 ) {
     let leaf_count = app.tabs[app.selected_tab].root.leaf_count();
 
-    // Block all mouse events when the upload confirmation overlay is active
-    let overlay_active = if is_sftp {
-        matches!(app.tab().focused_pane(), Some(Pane::FileBrowser { browser }) if !browser.core.pending_uploads.is_empty())
-    } else {
-        matches!(app.tab().focused_pane(), Some(Pane::SshBrowser { browser }) if !browser.core.pending_uploads.is_empty())
-    };
-    if overlay_active {
+    let Some(browser) = app.tab_mut().focused_pane_mut().and_then(|p| p.as_browser_mut()) else {
         return;
-    }
+    };
+    let action = browser.core_mut().handle_mouse(kind, column, row, pane_area, leaf_count);
 
-    if let MouseEventKind::Down(MouseButton::Left) = kind {
-        if is_sftp {
-            if let Some(Pane::FileBrowser { browser }) = app.tab_mut().focused_pane_mut() {
-                browser
-                    .core
-                    .handle_click(column, row, pane_area, leaf_count);
-            }
-        } else if let Some(Pane::SshBrowser { browser }) = app.tab_mut().focused_pane_mut() {
-            browser
-                .core
-                .handle_click(column, row, pane_area, leaf_count);
-        }
-    }
-
-    if let MouseEventKind::Up(MouseButton::Left) = kind {
-        if is_sftp {
-            if let Some(Pane::FileBrowser { browser }) = app.tab_mut().focused_pane_mut() {
-                let indices = browser.core.selected_indices();
-                if indices.len() > 1 {
-                    browser.core.queue_transfers_from_indices(&indices);
-                    browser.core.clear_selection();
-                }
-                match browser
-                    .core
-                    .handle_drag_release(column, pane_area, leaf_count)
-                {
-                    Some(DragAction::LocalToRemote) => browser.upload(),
-                    Some(DragAction::RemoteToLocal) => browser.download(),
-                    None => {}
-                }
-            }
-        } else if let Some(Pane::SshBrowser { browser }) = app.tab_mut().focused_pane_mut() {
-            let indices = browser.core.selected_indices();
-            if indices.len() > 1 {
-                browser.core.queue_transfers_from_indices(&indices);
-                browser.core.clear_selection();
-            }
-            match browser
-                .core
-                .handle_drag_release(column, pane_area, leaf_count)
-            {
-                Some(DragAction::LocalToRemote) => browser.upload(),
-                Some(DragAction::RemoteToLocal) => browser.download(),
-                None => {}
-            }
+    if let Some(drag_action) = action {
+        let Some(browser) = app.tab_mut().focused_pane_mut().and_then(|p| p.as_browser_mut())
+        else {
+            return;
+        };
+        match drag_action {
+            DragAction::LocalToRemote => browser.upload(),
+            DragAction::RemoteToLocal => browser.download(),
         }
     }
 }

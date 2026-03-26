@@ -4,7 +4,7 @@ use anyhow::Result;
 use log::{debug, info, warn};
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
-use super::common::{BrowserCore, BrowserFocus, TransferDirection, TransferStatus};
+use super::common::{Browser, BrowserCore, BrowserFocus, TransferDirection, TransferStatus};
 use super::parse::{
     parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote, strip_ansi,
 };
@@ -495,6 +495,8 @@ impl FileBrowser {
                 .render_normal_status(status_area, buf, label, color, &progress);
         }
         self.core.render_upload_confirm(area, buf);
+        self.core.render_drag_arrow(area, buf, leaf_count);
+        self.core.render_drag_ghost(buf);
     }
 
     fn state_label(&self) -> (&str, Color) {
@@ -523,5 +525,17 @@ impl FileBrowser {
         } else {
             String::new()
         }
+    }
+}
+
+impl Browser for FileBrowser {
+    fn core_mut(&mut self) -> &mut BrowserCore {
+        &mut self.core
+    }
+    fn upload(&mut self) {
+        self.upload();
+    }
+    fn download(&mut self) {
+        self.download();
     }
 }

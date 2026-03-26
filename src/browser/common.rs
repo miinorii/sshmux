@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 use log::{debug, info, warn};
 use ratatui::{
     buffer::Buffer,
@@ -61,6 +61,21 @@ pub enum DragAction {
     RemoteToLocal,
 }
 
+/// State tracked during a left-button drag gesture in a browser pane.
+pub struct DragState {
+    pub origin: BrowserFocus,
+    pub label: String,
+    pub mouse_col: u16,
+    pub mouse_row: u16,
+}
+
+/// Shared interface for browser panes (SFTP and SCP).
+pub trait Browser {
+    fn core_mut(&mut self) -> &mut BrowserCore;
+    fn upload(&mut self);
+    fn download(&mut self);
+}
+
 // ---------------------------------------------------------------------------
 // BrowserCore — shared state for both SFTP and SCP browsers
 // ---------------------------------------------------------------------------
@@ -104,6 +119,8 @@ pub struct BrowserCore {
     pub upload_scroll_x: usize,
     pub upload_scroll_y: usize,
     pub last_inner: Rect,
+    // ---- drag visual feedback ----
+    pub drag: Option<DragState>,
 }
 
 impl BrowserCore {
@@ -148,6 +165,7 @@ impl BrowserCore {
             upload_scroll_x: 0,
             upload_scroll_y: 0,
             last_inner: Rect::default(),
+            drag: None,
         }
     }
 
@@ -178,6 +196,23 @@ impl BrowserCore {
             if i == 0 { vec![] } else { vec![i] }
         } else {
             vec![]
+        }
+    }
+
+    /// Build a drag label from the current selection. Returns None if nothing to drag.
+    pub fn drag_label(&self) -> Option<String> {
+        let indices = self.selected_indices();
+        if indices.is_empty() {
+            return None;
+        }
+        let entries = match self.focus {
+            BrowserFocus::Local => &self.local_entries,
+            BrowserFocus::Remote => &self.remote_entries,
+        };
+        if indices.len() > 1 {
+            Some(format!("{} files", indices.len()))
+        } else {
+            entries.get(indices[0]).map(|e| e.name.clone())
         }
     }
 
@@ -661,6 +696,53 @@ impl BrowserCore {
         self.click_select(col, row, pane_area, leaf_count);
     }
 
+    /// Handle all mouse events for browser panes. Returns `Some(DragAction)`
+    /// on mouse-up when the drag crossed panels (caller should trigger transfer).
+    pub fn handle_mouse(
+        &mut self,
+        kind: MouseEventKind,
+        col: u16,
+        row: u16,
+        pane_area: Rect,
+        leaf_count: usize,
+    ) -> Option<DragAction> {
+        if !self.pending_uploads.is_empty() {
+            return None;
+        }
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.handle_click(col, row, pane_area, leaf_count);
+                if let Some(label) = self.drag_label() {
+                    self.drag = Some(DragState {
+                        origin: self.focus,
+                        label,
+                        mouse_col: col,
+                        mouse_row: row,
+                    });
+                }
+                None
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(ref mut d) = self.drag {
+                    d.mouse_col = col;
+                    d.mouse_row = row;
+                    self.needs_redraw = true;
+                }
+                None
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.drag = None;
+                let indices = self.selected_indices();
+                if indices.len() > 1 {
+                    self.queue_transfers_from_indices(&indices);
+                    self.clear_selection();
+                }
+                self.handle_drag_release(col, pane_area, leaf_count)
+            }
+            _ => None,
+        }
+    }
+
     pub fn handle_drag_release(
         &mut self,
         col: u16,
@@ -1030,6 +1112,80 @@ impl BrowserCore {
             );
         paragraph.render(overlay, buf);
         true
+    }
+
+    /// Render directional arrows at the panel divider during a cross-panel drag.
+    pub fn render_drag_arrow(&self, area: Rect, buf: &mut Buffer, leaf_count: usize) {
+        let drag = match self.drag {
+            Some(ref d) => d,
+            None => return,
+        };
+        let inner = if leaf_count > 1 {
+            pane_inner(area)
+        } else {
+            area
+        };
+        let layout = browser_layout(inner);
+        let in_remote = drag.mouse_col >= layout.remote_panel.x;
+        let crossing = match drag.origin {
+            BrowserFocus::Local => in_remote,
+            BrowserFocus::Remote => !in_remote,
+        };
+        if !crossing {
+            return;
+        }
+        let arrow = if in_remote { ">>>" } else { "<<<" };
+        let x = layout.remote_panel.x.saturating_sub(2);
+        let y = drag.mouse_row;
+        let Rect {
+            x: bx,
+            y: by,
+            width: bw,
+            height: bh,
+        } = *buf.area();
+        if y < by || y >= by + bh {
+            return;
+        }
+        let style = Style::default()
+            .fg(Color::Yellow)
+            .bg(Color::Black)
+            .add_modifier(Modifier::BOLD);
+        for (i, ch) in arrow.chars().enumerate() {
+            let cx = x + i as u16;
+            if cx >= bx && cx < bx + bw {
+                buf[(cx, y)].set_char(ch).set_style(style);
+            }
+        }
+    }
+
+    /// Render a ghost label near the cursor during a drag gesture.
+    pub fn render_drag_ghost(&self, buf: &mut Buffer) {
+        let drag = match self.drag {
+            Some(ref d) => d,
+            None => return,
+        };
+        let label = format!(" {} ", drag.label);
+        let x = drag.mouse_col + 2;
+        let y = drag.mouse_row;
+        let Rect {
+            x: bx,
+            y: by,
+            width: bw,
+            height: bh,
+        } = *buf.area();
+        if y < by || y >= by + bh {
+            return;
+        }
+        let style = Style::default()
+            .fg(Color::White)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC);
+        for (i, ch) in label.chars().enumerate() {
+            let cx = x + i as u16;
+            if cx >= bx && cx < bx + bw {
+                buf[(cx, y)].set_char(ch).set_style(style);
+            }
+        }
     }
 
     /// Render the normal status bar (state badge + message + shortcuts).

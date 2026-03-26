@@ -8,6 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListState, Paragraph, StatefulWidget, Widget},
 };
 
+use crate::browser::common::Browser;
 use crate::browser::{FileBrowser, SshBrowser};
 use crate::ssh_config::SshHost;
 use crate::terminal::EmbeddedTerminal;
@@ -58,6 +59,15 @@ impl Pane {
             browser_menu: None,
             connect_input: None,
             show_help: false,
+        }
+    }
+
+    /// Returns this pane as a `&mut dyn Browser` if it is a browser pane.
+    pub fn as_browser_mut(&mut self) -> Option<&mut dyn Browser> {
+        match self {
+            Pane::FileBrowser { browser } => Some(browser),
+            Pane::SshBrowser { browser } => Some(browser),
+            _ => None,
         }
     }
 
