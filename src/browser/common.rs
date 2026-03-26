@@ -188,6 +188,17 @@ impl BrowserCore {
         }
     }
 
+    /// Clear multi-selection and deselect the cursor in the clicked panel.
+    fn deselect_all(&mut self, in_remote: bool) {
+        self.clear_selection();
+        if in_remote {
+            self.remote_sel.select(None);
+        } else {
+            self.local_sel.select(None);
+        }
+        self.needs_redraw = true;
+    }
+
     /// Returns the currently focused index for the active panel.
     pub fn focused_index(&self) -> Option<usize> {
         match self.focus {
@@ -681,6 +692,7 @@ impl BrowserCore {
         let list_height = panel_area.height.saturating_sub(2);
 
         if row < list_y || row >= list_y + list_height {
+            self.deselect_all(in_remote);
             return;
         }
 
@@ -692,6 +704,8 @@ impl BrowserCore {
             if idx < self.remote_entries.len() {
                 self.remote_sel.select(Some(idx));
                 self.needs_redraw = true;
+            } else {
+                self.deselect_all(in_remote);
             }
         } else if let Some((drives, drive_sel)) = &mut self.drive_picker {
             let offset = drive_sel.offset();
@@ -706,6 +720,8 @@ impl BrowserCore {
             if idx < self.local_entries.len() {
                 self.local_sel.select(Some(idx));
                 self.needs_redraw = true;
+            } else {
+                self.deselect_all(false);
             }
         }
     }
