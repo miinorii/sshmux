@@ -1114,7 +1114,7 @@ impl BrowserCore {
         true
     }
 
-    /// Render directional arrows at the panel divider during a cross-panel drag.
+    /// Render directional arrows on the panel border during a cross-panel drag.
     pub fn render_drag_arrow(&self, area: Rect, buf: &mut Buffer, leaf_count: usize) {
         let drag = match self.drag {
             Some(ref d) => d,
@@ -1126,33 +1126,22 @@ impl BrowserCore {
             area
         };
         let layout = browser_layout(inner);
-        let in_remote = drag.mouse_col >= layout.remote_panel.x;
-        let crossing = match drag.origin {
-            BrowserFocus::Local => in_remote,
-            BrowserFocus::Remote => !in_remote,
+        // Arrows always show: direction is based on drag origin panel.
+        let chars: [char; 2] = match drag.origin {
+            BrowserFocus::Local => ['>', '>'],
+            BrowserFocus::Remote => ['<', '<'],
         };
-        if !crossing {
-            return;
-        }
-        let arrow = if in_remote { ">>>" } else { "<<<" };
-        let x = layout.remote_panel.x.saturating_sub(2);
-        let y = drag.mouse_row;
-        let Rect {
-            x: bx,
-            y: by,
-            width: bw,
-            height: bh,
-        } = *buf.area();
-        if y < by || y >= by + bh {
-            return;
-        }
+        let x0 = layout.local_panel.x + layout.local_panel.width - 1;
+        let x1 = layout.remote_panel.x;
         let style = Style::default()
             .fg(Color::Yellow)
-            .bg(Color::Black)
             .add_modifier(Modifier::BOLD);
-        for (i, ch) in arrow.chars().enumerate() {
-            let cx = x + i as u16;
-            if cx >= bx && cx < bx + bw {
+        let h = layout.local_panel.height;
+        let count = 3.min(h as usize);
+        let mid = layout.local_panel.y + h / 2;
+        let start = mid.saturating_sub(count as u16 / 2);
+        for y in start..start + count as u16 {
+            for (cx, ch) in [(x0, chars[0]), (x1, chars[1])] {
                 buf[(cx, y)].set_char(ch).set_style(style);
             }
         }
@@ -1176,14 +1165,13 @@ impl BrowserCore {
         if y < by || y >= by + bh {
             return;
         }
-        let style = Style::default()
-            .fg(Color::White)
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC);
         for (i, ch) in label.chars().enumerate() {
             let cx = x + i as u16;
             if cx >= bx && cx < bx + bw {
-                buf[(cx, y)].set_char(ch).set_style(style);
+                let cell = &mut buf[(cx, y)];
+                cell.set_char(ch);
+                cell.fg = Color::Yellow;
+                cell.modifier.insert(Modifier::BOLD);
             }
         }
     }
