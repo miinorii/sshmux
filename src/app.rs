@@ -66,8 +66,8 @@ impl App {
         &mut self.tabs[self.selected_tab]
     }
 
-    pub fn any_dirty(&mut self) -> bool {
-        self.tabs.iter_mut().any(|t| t.root.any_dirty())
+    pub fn take_dirty(&mut self) -> bool {
+        self.tabs.iter_mut().any(|t| t.root.take_dirty())
     }
 
     pub fn tick_browsers(&mut self) {

@@ -74,6 +74,15 @@ pub trait Browser {
     fn core_mut(&mut self) -> &mut BrowserCore;
     fn upload(&mut self);
     fn download(&mut self);
+    fn enter(&mut self);
+    fn go_up(&mut self);
+    fn upload_pending_paths(&mut self);
+    fn delete_focused(&mut self);
+    fn confirm_delete_yes(&mut self);
+    /// True when the browser is in a connecting/auth state that should forward raw keys.
+    fn is_connecting(&self) -> bool;
+    /// Forward a key during the connecting phase.
+    fn send_connect_key(&mut self, code: KeyCode);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +206,14 @@ impl BrowserCore {
         } else {
             vec![]
         }
+    }
+
+    /// Returns the direction of the last completed transfer, defaulting to Upload.
+    pub fn last_transfer_direction(&self) -> TransferDirection {
+        self.last_transfer
+            .as_ref()
+            .map(|t| t.direction)
+            .unwrap_or(TransferDirection::Upload)
     }
 
     /// Build a drag label from the current selection. Returns None if nothing to drag.

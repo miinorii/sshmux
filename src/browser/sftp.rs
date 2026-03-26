@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
+use crossterm::event::KeyCode;
 use log::{debug, info, warn};
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
@@ -9,6 +10,9 @@ use super::parse::{
     parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote, strip_ansi,
 };
 use crate::terminal::EmbeddedTerminal;
+
+/// Bytes to scan from the end of raw PTY output for prompt detection.
+const PROMPT_TAIL_BYTES: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,6 +65,25 @@ impl FileBrowser {
 
         if matches!(self.sftp_state, SftpState::Connecting) {
             self.core.raw_snapshot = self.sftp.raw_lines();
+        }
+
+        // If the SFTP process died mid-operation, recover immediately.
+        if self.sftp_state != SftpState::Idle
+            && self.sftp_state != SftpState::Connecting
+            && self.sftp.process_exited()
+        {
+            warn!(
+                "SFTP process died in state {:?}, recovering",
+                self.sftp_state
+            );
+            self.core.pending_uploads.clear();
+            self.core.pending_transfers.clear();
+            self.core.pending_deletes.clear();
+            self.sftp_state = SftpState::Idle;
+            self.core.status_msg = "SFTP connection lost".to_string();
+            self.core.status_color = Color::Red;
+            self.core.needs_redraw = true;
+            return;
         }
 
         match self.sftp_state {
@@ -118,13 +141,7 @@ impl FileBrowser {
                     if !self.core.pending_uploads.is_empty() {
                         self.upload_pending_paths();
                     } else if !self.core.pending_transfers.is_empty() {
-                        let direction = self
-                            .core
-                            .last_transfer
-                            .as_ref()
-                            .map(|t| t.direction)
-                            .unwrap_or(TransferDirection::Upload);
-                        match direction {
+                        match self.core.last_transfer_direction() {
                             TransferDirection::Upload => self.upload(),
                             TransferDirection::Download => self.download(),
                         }
@@ -211,7 +228,7 @@ impl FileBrowser {
         let Ok(rb) = self.sftp.raw_output.lock() else {
             return false;
         };
-        let start = rb.len().saturating_sub(64);
+        let start = rb.len().saturating_sub(PROMPT_TAIL_BYTES);
         let tail = strip_ansi(&rb[start..]);
         tail.lines()
             .rev()
@@ -464,6 +481,8 @@ impl FileBrowser {
             let is_dir = rest.starts_with("dir:");
             let name = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
             info!("SFTP remote delete: {}", name);
+            // SFTP protocol only supports rmdir (non-recursive). Non-empty dirs will fail.
+            // The SSH/SCP browser uses `rm -rf` via shell, which handles non-empty dirs.
             let cmd = if is_dir {
                 format!("rmdir {}\r\n", shell_quote(name))
             } else {
@@ -537,5 +556,31 @@ impl Browser for FileBrowser {
     }
     fn download(&mut self) {
         self.download();
+    }
+    fn enter(&mut self) {
+        self.enter();
+    }
+    fn go_up(&mut self) {
+        self.go_up();
+    }
+    fn upload_pending_paths(&mut self) {
+        self.upload_pending_paths();
+    }
+    fn delete_focused(&mut self) {
+        self.delete_focused();
+    }
+    fn confirm_delete_yes(&mut self) {
+        self.confirm_delete_yes();
+    }
+    fn is_connecting(&self) -> bool {
+        self.sftp_state == SftpState::Connecting
+    }
+    fn send_connect_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Char(c) => self.sftp.send_char(c),
+            KeyCode::Enter => self.sftp.send_str("\r\n"),
+            KeyCode::Backspace => self.sftp.send_str("\x7f"),
+            _ => {}
+        }
     }
 }

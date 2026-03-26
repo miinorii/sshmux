@@ -6,7 +6,7 @@ pub mod sftp;
 pub mod ssh;
 
 pub use common::{BrowserKeyAction, DragAction, handle_browser_key};
-pub use sftp::{FileBrowser, SftpState};
+pub use sftp::FileBrowser;
 pub use ssh::{SshBrowser, SshBrowserState};
 
 /// Layout areas for the dual-pane browser UI.

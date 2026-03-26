@@ -27,7 +27,7 @@ impl Tab {
 
     pub fn focus_prev(&mut self) {
         if self.focus_idx == 0 {
-            self.focus_idx = self.leaf_count() - 1;
+            self.focus_idx = self.leaf_count().saturating_sub(1);
         } else {
             self.focus_idx -= 1;
         }
@@ -68,8 +68,9 @@ impl Tab {
     pub fn close_focused(&mut self) {
         let target = self.focus_idx;
         remove_leaf(&mut self.root, target);
-        if self.focus_idx >= self.leaf_count().max(1) {
-            self.focus_idx = self.leaf_count().saturating_sub(1);
+        let count = self.leaf_count();
+        if self.focus_idx >= count {
+            self.focus_idx = count.saturating_sub(1);
         }
     }
 
@@ -129,7 +130,7 @@ mod tests {
     #[test]
     fn tab_display_name_multi_pane_shows_number() {
         let mut t = Tab::new("myhost");
-        t.split(Split::Horizontal, r(200, 50));
+        t.split(Split::LeftRight, r(200, 50));
         // multi-pane tabs show the tab name (number), not the host
         assert_eq!(t.display_name(), "myhost");
     }
@@ -137,30 +138,30 @@ mod tests {
     #[test]
     fn tab_split_horizontal() {
         let mut t = Tab::new("1");
-        t.split(Split::Horizontal, r(200, 50));
+        t.split(Split::LeftRight, r(200, 50));
         assert_eq!(t.leaf_count(), 2);
     }
 
     #[test]
     fn tab_split_vertical() {
         let mut t = Tab::new("1");
-        t.split(Split::Vertical, r(200, 50));
+        t.split(Split::TopBottom, r(200, 50));
         assert_eq!(t.leaf_count(), 2);
     }
 
     #[test]
     fn tab_double_split_gives_three_panes() {
         let mut t = Tab::new("1");
-        t.split(Split::Horizontal, r(200, 50));
+        t.split(Split::LeftRight, r(200, 50));
         // focus is already on the new pane (idx 1)
-        t.split(Split::Vertical, r(200, 50));
+        t.split(Split::TopBottom, r(200, 50));
         assert_eq!(t.leaf_count(), 3);
     }
 
     #[test]
     fn tab_focus_next_wraps() {
         let mut t = Tab::new("1");
-        t.split(Split::Horizontal, r(200, 50));
+        t.split(Split::LeftRight, r(200, 50));
         // split moves focus to the new pane (idx 1)
         assert_eq!(t.focus_idx, 1);
         t.focus_next();
@@ -172,7 +173,7 @@ mod tests {
     #[test]
     fn tab_focus_prev_wraps() {
         let mut t = Tab::new("1");
-        t.split(Split::Horizontal, r(200, 50));
+        t.split(Split::LeftRight, r(200, 50));
         // split moves focus to the new pane (idx 1)
         assert_eq!(t.focus_idx, 1);
         t.focus_prev();
@@ -184,7 +185,7 @@ mod tests {
     #[test]
     fn tab_close_focused_reduces_count() {
         let mut t = Tab::new("1");
-        t.split(Split::Horizontal, r(200, 50));
+        t.split(Split::LeftRight, r(200, 50));
         t.close_focused();
         assert_eq!(t.leaf_count(), 1);
     }
@@ -192,7 +193,7 @@ mod tests {
     #[test]
     fn tab_close_focused_clamps_focus_index() {
         let mut t = Tab::new("1");
-        t.split(Split::Horizontal, r(200, 50));
+        t.split(Split::LeftRight, r(200, 50));
         t.focus_idx = 1;
         t.close_focused();
         assert_eq!(t.focus_idx, 0);

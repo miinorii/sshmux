@@ -183,19 +183,24 @@ impl EmbeddedTerminal {
         if rows == self.rows && cols == self.cols {
             return;
         }
-        if let Ok(m) = self.master.lock() {
-            let _ = m.resize(PtySize {
+        let pty_ok = if let Ok(m) = self.master.lock() {
+            m.resize(PtySize {
                 rows,
                 cols,
                 pixel_width: 0,
                 pixel_height: 0,
-            });
+            })
+            .is_ok()
+        } else {
+            false
+        };
+        if pty_ok {
+            if let Ok(mut p) = self.parser.lock() {
+                p.screen_mut().set_size(rows, cols);
+            }
+            self.rows = rows;
+            self.cols = cols;
         }
-        if let Ok(mut p) = self.parser.lock() {
-            p.screen_mut().set_size(rows, cols);
-        }
-        self.rows = rows;
-        self.cols = cols;
     }
 
     pub fn mouse_active(&self) -> bool {

@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
+use crossterm::event::KeyCode;
 use log::{debug, error, info, warn};
 use portable_pty::CommandBuilder;
 use ratatui::{
@@ -31,6 +32,11 @@ pub enum SshBrowserState {
     Idle,
 }
 
+/// Bytes to scan from the end of raw PTY output for prompt detection.
+const PROMPT_TAIL_BYTES: usize = 64;
+/// Larger tail for shell prompt detection (PS1 can be longer than sftp>).
+const PROMPT_TAIL_BYTES_LONG: usize = 128;
+
 // ---------------------------------------------------------------------------
 // SshBrowser
 // ---------------------------------------------------------------------------
@@ -45,6 +51,13 @@ pub struct SshBrowser {
     pub password_buf: String,
     pub waiting_password: bool,
     pub password_prompts_seen: usize,
+}
+
+fn count_password_prompts(lines: &[String]) -> usize {
+    lines
+        .iter()
+        .filter(|l| l.trim().to_lowercase().ends_with("password:"))
+        .count()
 }
 
 impl SshBrowser {
@@ -74,17 +87,16 @@ impl SshBrowser {
                 let lines = scp.raw_lines();
 
                 // Detect password prompt
-                let pw_count = lines
-                    .iter()
-                    .filter(|l| l.trim().to_lowercase().ends_with("password:"))
-                    .count();
+                let pw_count = count_password_prompts(&lines);
                 if pw_count > self.password_prompts_seen {
                     self.password_prompts_seen = pw_count;
                     if let Some(ref pw) = self.saved_password {
                         if pw_count > 1 {
                             warn!("SCP password rejected, re-prompting");
+                            self.scp_pty = None;
                             self.saved_password = None;
                             self.password_buf.clear();
+                            self.password_prompts_seen = 0;
                             self.waiting_password = true;
                             self.core.status_msg = "Wrong password, try again".to_string();
                             self.core.status_color = Color::Red;
@@ -148,6 +160,16 @@ impl SshBrowser {
                     self.ssh_state = SshBrowserState::WaitingLs;
                     self.core.needs_redraw = true;
                 }
+            } else {
+                // scp_pty is None while state is Transferring — recover.
+                warn!("SCP transfer state with no process, recovering");
+                self.core.pending_uploads.clear();
+                self.core.pending_transfers.clear();
+                self.core.pending_deletes.clear();
+                self.ssh_state = SshBrowserState::Idle;
+                self.core.status_msg = "Transfer failed".to_string();
+                self.core.status_color = Color::Red;
+                self.core.needs_redraw = true;
             }
             return;
         }
@@ -166,6 +188,7 @@ impl SshBrowser {
                         warn!("SSH password rejected, re-prompting");
                         self.saved_password = None;
                         self.password_buf.clear();
+                        self.password_prompts_seen = 0;
                         self.waiting_password = true;
                         self.core.status_msg = "Wrong password, try again".to_string();
                         self.core.status_color = Color::Red;
@@ -288,13 +311,7 @@ impl SshBrowser {
                     if !self.core.pending_uploads.is_empty() {
                         self.upload_pending_paths();
                     } else if !self.core.pending_transfers.is_empty() {
-                        let direction = self
-                            .core
-                            .last_transfer
-                            .as_ref()
-                            .map(|t| t.direction)
-                            .unwrap_or(TransferDirection::Upload);
-                        match direction {
+                        match self.core.last_transfer_direction() {
                             TransferDirection::Upload => self.upload(),
                             TransferDirection::Download => self.download(),
                         }
@@ -350,7 +367,7 @@ impl SshBrowser {
         let Ok(rb) = self.ssh.raw_output.lock() else {
             return false;
         };
-        let start = rb.len().saturating_sub(64);
+        let start = rb.len().saturating_sub(PROMPT_TAIL_BYTES);
         let tail = strip_ansi(&rb[start..]);
         tail.lines()
             .rev()
@@ -369,7 +386,7 @@ impl SshBrowser {
         if rb.is_empty() {
             return false;
         }
-        let start = rb.len().saturating_sub(128);
+        let start = rb.len().saturating_sub(PROMPT_TAIL_BYTES_LONG);
         let tail = strip_ansi(&rb[start..]);
         tail.lines()
             .rev()
@@ -818,5 +835,34 @@ impl Browser for SshBrowser {
     }
     fn download(&mut self) {
         self.download();
+    }
+    fn enter(&mut self) {
+        self.enter();
+    }
+    fn go_up(&mut self) {
+        self.go_up();
+    }
+    fn upload_pending_paths(&mut self) {
+        self.upload_pending_paths();
+    }
+    fn delete_focused(&mut self) {
+        self.delete_focused();
+    }
+    fn confirm_delete_yes(&mut self) {
+        self.confirm_delete_yes();
+    }
+    fn is_connecting(&self) -> bool {
+        matches!(
+            self.ssh_state,
+            SshBrowserState::Connecting | SshBrowserState::SettingPrompt
+        )
+    }
+    fn send_connect_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Char(c) => self.ssh.send_char(c),
+            KeyCode::Enter => self.ssh.send_str("\r\n"),
+            KeyCode::Backspace => self.ssh.send_str("\x7f"),
+            _ => {}
+        }
     }
 }

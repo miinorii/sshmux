@@ -3,10 +3,8 @@ use log::{debug, error, trace};
 use ratatui::{layout::Rect, style::Color, widgets::ListState};
 
 use crate::app::App;
-use crate::browser::{
-    BrowserKeyAction, DragAction, SftpState, SshBrowserState, handle_browser_key,
-};
-use crate::pane::{Pane, Split, pane_inner};
+use crate::browser::{BrowserKeyAction, DragAction, SshBrowserState, handle_browser_key};
+use crate::pane::{ConnectOverlay, Pane, Split, pane_inner};
 
 // ---------------------------------------------------------------------------
 // Action — returned by input handlers to signal the main loop
@@ -65,11 +63,10 @@ pub fn handle_key(
             }
             KeyCode::Char('t') => app.new_tab(),
             KeyCode::Char('-') => {
-                app.tab_mut().split(Split::Vertical, pane_inner(last_area));
+                app.tab_mut().split(Split::TopBottom, pane_inner(last_area));
             }
             KeyCode::Char('+') => {
-                app.tab_mut()
-                    .split(Split::Horizontal, pane_inner(last_area));
+                app.tab_mut().split(Split::LeftRight, pane_inner(last_area));
             }
             _ => {}
         }
@@ -81,13 +78,8 @@ pub fn handle_key(
         return action;
     }
 
-    // ---- FileBrowser pane ----
-    if let Some(action) = handle_sftp_browser_key(app, code, ctrl, alt, shift) {
-        return action;
-    }
-
-    // ---- SshBrowser pane ----
-    if let Some(action) = handle_ssh_browser_key(app, code, ctrl, alt, shift) {
+    // ---- Browser pane (SFTP or SCP) ----
+    if let Some(action) = handle_browser_key_dispatch(app, code, ctrl, alt, shift) {
         return action;
     }
 
@@ -221,18 +213,17 @@ fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect)
     }
 
     // Browser menu overlay
-    let menu_open = matches!(
+    if matches!(
         app.tab().focused_pane(),
         Some(Pane::Connect {
-            browser_menu: Some(_),
+            overlay: ConnectOverlay::BrowserMenu(_),
             ..
         })
-    );
-    if menu_open {
+    ) {
         match code {
             KeyCode::Up => {
                 if let Some(Pane::Connect {
-                    browser_menu: Some(ms),
+                    overlay: ConnectOverlay::BrowserMenu(ms),
                     ..
                 }) = app.tab_mut().focused_pane_mut()
                 {
@@ -241,7 +232,7 @@ fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect)
             }
             KeyCode::Down => {
                 if let Some(Pane::Connect {
-                    browser_menu: Some(ms),
+                    overlay: ConnectOverlay::BrowserMenu(ms),
                     ..
                 }) = app.tab_mut().focused_pane_mut()
                 {
@@ -251,16 +242,15 @@ fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect)
             KeyCode::Enter => {
                 let (host_idx, menu_idx) = if let Some(Pane::Connect {
                     list_state,
-                    browser_menu: Some(ms),
-                    ..
+                    overlay: ConnectOverlay::BrowserMenu(ms),
                 }) = app.tab().focused_pane()
                 {
                     (list_state.selected(), ms.selected())
                 } else {
                     (None, None)
                 };
-                if let Some(Pane::Connect { browser_menu, .. }) = app.tab_mut().focused_pane_mut() {
-                    *browser_menu = None;
+                if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
+                    *overlay = ConnectOverlay::None;
                 }
                 if let (Some(idx), Some(mi)) = (host_idx, menu_idx) {
                     match mi {
@@ -279,8 +269,8 @@ fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect)
                 }
             }
             KeyCode::Esc => {
-                if let Some(Pane::Connect { browser_menu, .. }) = app.tab_mut().focused_pane_mut() {
-                    *browser_menu = None;
+                if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
+                    *overlay = ConnectOverlay::None;
                 }
             }
             _ => {}
@@ -289,18 +279,17 @@ fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect)
     }
 
     // Connect input overlay
-    let input_open = matches!(
+    if matches!(
         app.tab().focused_pane(),
         Some(Pane::Connect {
-            connect_input: Some(_),
+            overlay: ConnectOverlay::ConnectInput(_),
             ..
         })
-    );
-    if input_open {
+    ) {
         match code {
             KeyCode::Char(c) if !ctrl => {
                 if let Some(Pane::Connect {
-                    connect_input: Some(input),
+                    overlay: ConnectOverlay::ConnectInput(input),
                     ..
                 }) = app.tab_mut().focused_pane_mut()
                 {
@@ -309,7 +298,7 @@ fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect)
             }
             KeyCode::Backspace => {
                 if let Some(Pane::Connect {
-                    connect_input: Some(input),
+                    overlay: ConnectOverlay::ConnectInput(input),
                     ..
                 }) = app.tab_mut().focused_pane_mut()
                 {
@@ -318,7 +307,7 @@ fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect)
             }
             KeyCode::Enter => {
                 let args = if let Some(Pane::Connect {
-                    connect_input: Some(input),
+                    overlay: ConnectOverlay::ConnectInput(input),
                     ..
                 }) = app.tab().focused_pane()
                 {
@@ -336,19 +325,32 @@ fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect)
                         error!("open_session_raw: {}", e);
                     }
                     app.resize_all(last_area);
-                } else if let Some(Pane::Connect { connect_input, .. }) =
-                    app.tab_mut().focused_pane_mut()
+                } else if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut()
                 {
-                    *connect_input = None;
+                    *overlay = ConnectOverlay::None;
                 }
             }
             KeyCode::Esc => {
-                if let Some(Pane::Connect { connect_input, .. }) = app.tab_mut().focused_pane_mut()
-                {
-                    *connect_input = None;
+                if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
+                    *overlay = ConnectOverlay::None;
                 }
             }
             _ => {}
+        }
+        return Some(Action::Continue);
+    }
+
+    // Help overlay — Esc dismisses, everything else falls through to normal handling
+    if matches!(
+        app.tab().focused_pane(),
+        Some(Pane::Connect {
+            overlay: ConnectOverlay::Help,
+            ..
+        })
+    ) && code == KeyCode::Esc
+    {
+        if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
+            *overlay = ConnectOverlay::None;
         }
         return Some(Action::Continue);
     }
@@ -380,49 +382,29 @@ fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect)
             }
         }
         KeyCode::Char('b') | KeyCode::Char('B') => {
-            if let Some(Pane::Connect {
-                browser_menu,
-                connect_input,
-                show_help,
-                ..
-            }) = app.tab_mut().focused_pane_mut()
-            {
-                *show_help = false;
-                *connect_input = None;
+            if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
                 let mut ms = ListState::default();
                 ms.select(Some(0));
-                *browser_menu = Some(ms);
+                *overlay = ConnectOverlay::BrowserMenu(ms);
             }
         }
         KeyCode::Char('c') | KeyCode::Char('C') => {
-            if let Some(Pane::Connect {
-                browser_menu,
-                connect_input,
-                show_help,
-                ..
-            }) = app.tab_mut().focused_pane_mut()
-            {
-                *show_help = false;
-                *browser_menu = None;
-                *connect_input = Some(String::new());
+            if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
+                *overlay = ConnectOverlay::ConnectInput(String::new());
             }
         }
         KeyCode::Char('h') | KeyCode::Char('H') => {
-            if let Some(Pane::Connect {
-                browser_menu,
-                connect_input,
-                show_help,
-                ..
-            }) = app.tab_mut().focused_pane_mut()
-            {
-                *show_help = !*show_help;
-                *browser_menu = None;
-                *connect_input = None;
+            if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
+                *overlay = if matches!(overlay, ConnectOverlay::Help) {
+                    ConnectOverlay::None
+                } else {
+                    ConnectOverlay::Help
+                };
             }
         }
         KeyCode::Esc => {
-            if let Some(Pane::Connect { show_help, .. }) = app.tab_mut().focused_pane_mut() {
-                *show_help = false;
+            if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
+                *overlay = ConnectOverlay::None;
             }
         }
         _ => {}
@@ -431,133 +413,72 @@ fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect)
 }
 
 // ---------------------------------------------------------------------------
-// SFTP browser keys
+// Browser keys (shared for SFTP and SCP)
 // ---------------------------------------------------------------------------
 
-/// Returns `Some(Action)` if the focused pane is a FileBrowser.
-fn handle_sftp_browser_key(
+/// Returns `Some(Action)` if the focused pane is a browser (FileBrowser or SshBrowser).
+///
+/// SSH password prompts are handled as a special case before the shared path.
+fn handle_browser_key_dispatch(
     app: &mut App,
     code: KeyCode,
     ctrl: bool,
     alt: bool,
     shift: bool,
 ) -> Option<Action> {
-    let focus_idx = app.tabs[app.selected_tab].focus_idx;
-    if !matches!(
-        app.tabs[app.selected_tab].root.leaf(focus_idx),
-        Some(Pane::FileBrowser { .. })
-    ) {
-        return None;
-    }
-
-    if let Some(Pane::FileBrowser { browser }) = app.tab_mut().focused_pane_mut() {
-        // While connecting, forward keystrokes to the SFTP PTY
-        if browser.sftp_state == SftpState::Connecting {
-            match code {
-                KeyCode::Char(c) => browser.sftp.send_char(c),
-                KeyCode::Enter => browser.sftp.send_str("\r\n"),
-                KeyCode::Backspace => browser.sftp.send_str("\x7f"),
-                _ => {}
-            }
-            return Some(Action::Continue);
-        }
-
-        // Ignore ctrl/alt chars in idle browser mode — they are not browser
-        // actions and must not trigger paste accumulation.
-        if (ctrl || alt) && matches!(code, KeyCode::Char(_)) {
-            return Some(Action::Continue);
-        }
-
-        match handle_browser_key(&mut browser.core, code, shift) {
-            BrowserKeyAction::Enter => browser.enter(),
-            BrowserKeyAction::GoUp => browser.go_up(),
-            BrowserKeyAction::Download => browser.download(),
-            BrowserKeyAction::Upload => browser.upload(),
-            BrowserKeyAction::UploadPaths => browser.upload_pending_paths(),
-            BrowserKeyAction::Delete => browser.delete_focused(),
-            BrowserKeyAction::ConfirmDeleteYes => browser.confirm_delete_yes(),
-
-            BrowserKeyAction::Handled => {}
-        }
-    }
-
-    Some(Action::Continue)
-}
-
-// ---------------------------------------------------------------------------
-// SSH/SCP browser keys
-// ---------------------------------------------------------------------------
-
-/// Returns `Some(Action)` if the focused pane is an SshBrowser.
-fn handle_ssh_browser_key(
-    app: &mut App,
-    code: KeyCode,
-    ctrl: bool,
-    alt: bool,
-    shift: bool,
-) -> Option<Action> {
-    let focus_idx = app.tabs[app.selected_tab].focus_idx;
-    if !matches!(
-        app.tabs[app.selected_tab].root.leaf(focus_idx),
-        Some(Pane::SshBrowser { .. })
-    ) {
-        return None;
-    }
-
-    if let Some(Pane::SshBrowser { browser }) = app.tab_mut().focused_pane_mut() {
-        // Password prompt
-        if browser.waiting_password {
-            match code {
-                KeyCode::Char(c) => browser.password_char(c),
-                KeyCode::Backspace => browser.password_backspace(),
-                KeyCode::Enter => browser.submit_password(),
-                KeyCode::Esc => {
-                    browser.waiting_password = false;
-                    browser.password_buf.clear();
-                    browser.core.needs_redraw = true;
-                    if browser.ssh_state == SshBrowserState::Transferring {
-                        browser.scp_pty = None;
-                        browser.ssh_state = SshBrowserState::Idle;
-                        browser.core.status_msg = "Transfer cancelled".to_string();
-                    } else {
-                        browser.core.status_msg = "Password cancelled".to_string();
-                    }
-                    browser.core.status_color = Color::Yellow;
+    // SSH-specific: password prompt must be handled before the generic browser path.
+    if let Some(Pane::SshBrowser { browser }) = app.tab_mut().focused_pane_mut()
+        && browser.waiting_password
+    {
+        match code {
+            KeyCode::Char(c) => browser.password_char(c),
+            KeyCode::Backspace => browser.password_backspace(),
+            KeyCode::Enter => browser.submit_password(),
+            KeyCode::Esc => {
+                browser.waiting_password = false;
+                browser.password_buf.clear();
+                browser.core.needs_redraw = true;
+                if browser.ssh_state == SshBrowserState::Transferring {
+                    browser.scp_pty = None;
+                    browser.ssh_state = SshBrowserState::Idle;
+                    browser.core.status_msg = "Transfer cancelled".to_string();
+                } else {
+                    browser.core.status_msg = "Password cancelled".to_string();
                 }
-                _ => {}
+                browser.core.status_color = Color::Yellow;
             }
-            return Some(Action::Continue);
+            _ => {}
         }
+        return Some(Action::Continue);
+    }
 
-        // During connecting/setting prompt, forward keystrokes to SSH PTY
-        if matches!(
-            browser.ssh_state,
-            SshBrowserState::Connecting | SshBrowserState::SettingPrompt
-        ) {
-            match code {
-                KeyCode::Char(c) => browser.ssh.send_char(c),
-                KeyCode::Enter => browser.ssh.send_str("\r\n"),
-                KeyCode::Backspace => browser.ssh.send_str("\x7f"),
-                _ => {}
-            }
-            return Some(Action::Continue);
-        }
+    // Get a trait-object reference to whichever browser is focused.
+    let browser = app
+        .tab_mut()
+        .focused_pane_mut()
+        .and_then(|p| p.as_browser_mut())?;
 
-        if (ctrl || alt) && matches!(code, KeyCode::Char(_)) {
-            return Some(Action::Continue);
-        }
+    // While connecting/authenticating, forward raw keystrokes.
+    if browser.is_connecting() {
+        browser.send_connect_key(code);
+        return Some(Action::Continue);
+    }
 
-        match handle_browser_key(&mut browser.core, code, shift) {
-            BrowserKeyAction::Enter => browser.enter(),
-            BrowserKeyAction::GoUp => browser.go_up(),
-            BrowserKeyAction::Download => browser.download(),
-            BrowserKeyAction::Upload => browser.upload(),
-            BrowserKeyAction::UploadPaths => browser.upload_pending_paths(),
-            BrowserKeyAction::Delete => browser.delete_focused(),
-            BrowserKeyAction::ConfirmDeleteYes => browser.confirm_delete_yes(),
+    // Ignore ctrl/alt chars — they are not browser actions and must not
+    // trigger paste accumulation.
+    if (ctrl || alt) && matches!(code, KeyCode::Char(_)) {
+        return Some(Action::Continue);
+    }
 
-            BrowserKeyAction::Handled => {}
-        }
+    match handle_browser_key(browser.core_mut(), code, shift) {
+        BrowserKeyAction::Enter => browser.enter(),
+        BrowserKeyAction::GoUp => browser.go_up(),
+        BrowserKeyAction::Download => browser.download(),
+        BrowserKeyAction::Upload => browser.upload(),
+        BrowserKeyAction::UploadPaths => browser.upload_pending_paths(),
+        BrowserKeyAction::Delete => browser.delete_focused(),
+        BrowserKeyAction::ConfirmDeleteYes => browser.confirm_delete_yes(),
+        BrowserKeyAction::Handled => {}
     }
 
     Some(Action::Continue)
@@ -685,10 +606,8 @@ fn execute_context_menu_action(app: &mut App, idx: usize, last_area: Rect) -> Ac
                 app.resize_all(last_area);
             }
         }
-        2 => app
-            .tab_mut()
-            .split(Split::Horizontal, pane_inner(last_area)),
-        3 => app.tab_mut().split(Split::Vertical, pane_inner(last_area)),
+        2 => app.tab_mut().split(Split::LeftRight, pane_inner(last_area)),
+        3 => app.tab_mut().split(Split::TopBottom, pane_inner(last_area)),
         4 => return Action::Quit,
         _ => {}
     }
@@ -745,16 +664,12 @@ pub fn handle_mouse(
     }
 
     // ---- Browser mouse (shared for both SFTP and SCP) ----
-    let is_browser = matches!(
-        app.tabs[app.selected_tab].root.leaf(pane_idx),
-        Some(Pane::FileBrowser { .. })
-    );
-    let is_ssh_browser = matches!(
-        app.tabs[app.selected_tab].root.leaf(pane_idx),
-        Some(Pane::SshBrowser { .. })
-    );
+    let is_browser = app.tabs[app.selected_tab]
+        .root
+        .leaf(pane_idx)
+        .is_some_and(|p| p.is_browser());
 
-    if is_browser || is_ssh_browser {
+    if is_browser {
         handle_browser_mouse(app, kind, column, row, pane_area);
         return Action::Continue;
     }
@@ -888,13 +803,22 @@ fn handle_browser_mouse(
 ) {
     let leaf_count = app.tabs[app.selected_tab].root.leaf_count();
 
-    let Some(browser) = app.tab_mut().focused_pane_mut().and_then(|p| p.as_browser_mut()) else {
+    let Some(browser) = app
+        .tab_mut()
+        .focused_pane_mut()
+        .and_then(|p| p.as_browser_mut())
+    else {
         return;
     };
-    let action = browser.core_mut().handle_mouse(kind, column, row, pane_area, leaf_count);
+    let action = browser
+        .core_mut()
+        .handle_mouse(kind, column, row, pane_area, leaf_count);
 
     if let Some(drag_action) = action {
-        let Some(browser) = app.tab_mut().focused_pane_mut().and_then(|p| p.as_browser_mut())
+        let Some(browser) = app
+            .tab_mut()
+            .focused_pane_mut()
+            .and_then(|p| p.as_browser_mut())
         else {
             return;
         };

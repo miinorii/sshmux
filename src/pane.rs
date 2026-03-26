@@ -18,8 +18,19 @@ use crate::terminal::EmbeddedTerminal;
 // ---------------------------------------------------------------------------
 
 pub enum Split {
-    Horizontal,
-    Vertical,
+    LeftRight,
+    TopBottom,
+}
+
+// ---------------------------------------------------------------------------
+// Connect pane overlay (mutually exclusive states)
+// ---------------------------------------------------------------------------
+
+pub enum ConnectOverlay {
+    None,
+    BrowserMenu(ListState),
+    ConnectInput(String),
+    Help,
 }
 
 // ---------------------------------------------------------------------------
@@ -29,9 +40,7 @@ pub enum Split {
 pub enum Pane {
     Connect {
         list_state: ListState,
-        browser_menu: Option<ListState>,
-        connect_input: Option<String>,
-        show_help: bool,
+        overlay: ConnectOverlay,
     },
     Session {
         terminal: EmbeddedTerminal,
@@ -56,10 +65,13 @@ impl Pane {
         ls.select_first();
         Pane::Connect {
             list_state: ls,
-            browser_menu: None,
-            connect_input: None,
-            show_help: false,
+            overlay: ConnectOverlay::None,
         }
+    }
+
+    /// Returns `true` if this pane is a browser (SFTP or SCP).
+    pub fn is_browser(&self) -> bool {
+        matches!(self, Pane::FileBrowser { .. } | Pane::SshBrowser { .. })
     }
 
     /// Returns this pane as a `&mut dyn Browser` if it is a browser pane.
@@ -150,12 +162,12 @@ impl Pane {
         }
     }
 
-    pub fn split_leaf(&mut self, n: usize, kind: Split) {
+    pub fn split_leaf(&mut self, n: usize, kind: Split) -> bool {
         match self {
             Pane::Connect { .. }
             | Pane::Session { .. }
             | Pane::FileBrowser { .. }
-            | Pane::SshBrowser { .. } => {}
+            | Pane::SshBrowser { .. } => false,
             Pane::Split { children, .. } => {
                 let mut offset = 0;
                 for child in children.iter_mut() {
@@ -170,15 +182,16 @@ impl Pane {
                         } else {
                             child.split_leaf(n - offset, kind);
                         }
-                        break;
+                        return true;
                     }
                     offset += count;
                 }
+                false
             }
         }
     }
 
-    pub fn any_dirty(&mut self) -> bool {
+    pub fn take_dirty(&mut self) -> bool {
         match self {
             Pane::Session { terminal, .. } => terminal.dirty.swap(false, Ordering::AcqRel),
             Pane::FileBrowser { browser } => {
@@ -198,7 +211,7 @@ impl Pane {
                 browser.core.needs_redraw = false;
                 pty_dirty || scp_dirty || state_dirty
             }
-            Pane::Split { children, .. } => children.iter_mut().any(|c| c.any_dirty()),
+            Pane::Split { children, .. } => children.iter_mut().any(|c| c.take_dirty()),
             _ => false,
         }
     }
@@ -245,9 +258,7 @@ impl Pane {
         match self {
             Pane::Connect {
                 list_state,
-                browser_menu,
-                connect_input,
-                show_help,
+                overlay,
             } => {
                 let is_focus = *my_idx == focus_idx;
                 *my_idx += 1;
@@ -283,106 +294,104 @@ impl Pane {
                     inner.width,
                 );
 
-                // Browser type picker overlay
-                if let Some(menu_state) = browser_menu {
-                    let menu_w = 36u16;
-                    let menu_h = 4u16; // border + 2 items + border
-                    let cx = inner.x + inner.width.saturating_sub(menu_w) / 2;
-                    let cy = inner.y + inner.height.saturating_sub(menu_h) / 2;
-                    let menu_area = Rect {
-                        x: cx,
-                        y: cy,
-                        width: menu_w.min(inner.width),
-                        height: menu_h.min(inner.height),
-                    };
-                    let menu_items = vec!["SFTP", "SCP (legacy, linux target)"];
-                    let menu_list = List::new(menu_items)
+                match overlay {
+                    ConnectOverlay::BrowserMenu(menu_state) => {
+                        let menu_w = 36u16;
+                        let menu_h = 4u16; // border + 2 items + border
+                        let cx = inner.x + inner.width.saturating_sub(menu_w) / 2;
+                        let cy = inner.y + inner.height.saturating_sub(menu_h) / 2;
+                        let menu_area = Rect {
+                            x: cx,
+                            y: cy,
+                            width: menu_w.min(inner.width),
+                            height: menu_h.min(inner.height),
+                        };
+                        let menu_items = vec!["SFTP", "SCP (legacy, linux target)"];
+                        let menu_list = List::new(menu_items)
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .border_style(Style::default().fg(Color::Yellow))
+                                    .title(" Browse with "),
+                            )
+                            .style(Style::default().fg(Color::White))
+                            .highlight_style(
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                            .highlight_symbol("> ");
+                        StatefulWidget::render(menu_list, menu_area, buf, menu_state);
+                    }
+                    ConnectOverlay::Help => {
+                        let shortcuts = [
+                            ("Enter", "connect"),
+                            ("C", "connect (manual)"),
+                            ("B", "file browser"),
+                            ("Alt+T", "new tab"),
+                            ("Alt+W", "close pane / tab"),
+                            ("Alt+-", "split top/bottom"),
+                            ("Alt++", "split left/right"),
+                            ("Alt+\u{2191}\u{2193}", "cycle pane focus"),
+                            ("Alt+\u{2190}\u{2192}", "switch tab"),
+                            ("Alt+Q", "quit"),
+                        ];
+                        let help_w = 36u16.min(inner.width.saturating_sub(2));
+                        let help_h = (shortcuts.len() as u16 + 2).min(inner.height);
+                        let cx = inner.x + inner.width.saturating_sub(help_w) / 2;
+                        let cy = inner.y + inner.height.saturating_sub(help_h) / 2;
+                        let help_area = Rect {
+                            x: cx,
+                            y: cy,
+                            width: help_w,
+                            height: help_h,
+                        };
+                        let items: Vec<Line> = shortcuts
+                            .iter()
+                            .map(|(key, desc)| {
+                                Line::from(vec![
+                                    Span::raw(format!(" {:10}", key))
+                                        .style(Style::default().fg(Color::Yellow)),
+                                    Span::raw(*desc).style(Style::default().fg(Color::DarkGray)),
+                                ])
+                            })
+                            .collect();
+                        let help_list = List::new(items).block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(Color::Yellow))
+                                .title(" shortcuts "),
+                        );
+                        Widget::render(help_list, help_area, buf);
+                    }
+                    ConnectOverlay::ConnectInput(input) => {
+                        let input_w = 50u16.min(inner.width.saturating_sub(2));
+                        let input_h = 4u16;
+                        let cx = inner.x + inner.width.saturating_sub(input_w) / 2;
+                        let cy = inner.y + inner.height.saturating_sub(input_h) / 2;
+                        let input_area = Rect {
+                            x: cx,
+                            y: cy,
+                            width: input_w,
+                            height: input_h,
+                        };
+                        let display = format!("{}_", input);
+                        let paragraph = Paragraph::new(vec![
+                            Line::from(Span::raw(display).style(Style::default().fg(Color::White))),
+                            Line::from(
+                                Span::raw("e.g. -o StrictHostKeyChecking=no user@host")
+                                    .style(Style::default().fg(Color::DarkGray)),
+                            ),
+                        ])
                         .block(
                             Block::default()
                                 .borders(Borders::ALL)
                                 .border_style(Style::default().fg(Color::Yellow))
-                                .title(" Browse with "),
-                        )
-                        .style(Style::default().fg(Color::White))
-                        .highlight_style(
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        )
-                        .highlight_symbol("> ");
-                    StatefulWidget::render(menu_list, menu_area, buf, menu_state);
-                }
-
-                // Help overlay
-                if *show_help {
-                    let shortcuts = [
-                        ("Enter", "connect"),
-                        ("C", "connect (manual)"),
-                        ("B", "file browser"),
-                        ("Alt+T", "new tab"),
-                        ("Alt+W", "close pane / tab"),
-                        ("Alt+-", "split top/bottom"),
-                        ("Alt++", "split left/right"),
-                        ("Alt+\u{2191}\u{2193}", "cycle pane focus"),
-                        ("Alt+\u{2190}\u{2192}", "switch tab"),
-                        ("Alt+Q", "quit"),
-                    ];
-                    let help_w = 36u16.min(inner.width.saturating_sub(2));
-                    let help_h = (shortcuts.len() as u16 + 2).min(inner.height);
-                    let cx = inner.x + inner.width.saturating_sub(help_w) / 2;
-                    let cy = inner.y + inner.height.saturating_sub(help_h) / 2;
-                    let help_area = Rect {
-                        x: cx,
-                        y: cy,
-                        width: help_w,
-                        height: help_h,
-                    };
-                    let items: Vec<Line> = shortcuts
-                        .iter()
-                        .map(|(key, desc)| {
-                            Line::from(vec![
-                                Span::raw(format!(" {:10}", key))
-                                    .style(Style::default().fg(Color::Yellow)),
-                                Span::raw(*desc).style(Style::default().fg(Color::DarkGray)),
-                            ])
-                        })
-                        .collect();
-                    let help_list = List::new(items).block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(Color::Yellow))
-                            .title(" shortcuts "),
-                    );
-                    Widget::render(help_list, help_area, buf);
-                }
-
-                // Connect input overlay
-                if let Some(input) = connect_input {
-                    let input_w = 50u16.min(inner.width.saturating_sub(2));
-                    let input_h = 4u16;
-                    let cx = inner.x + inner.width.saturating_sub(input_w) / 2;
-                    let cy = inner.y + inner.height.saturating_sub(input_h) / 2;
-                    let input_area = Rect {
-                        x: cx,
-                        y: cy,
-                        width: input_w,
-                        height: input_h,
-                    };
-                    let display = format!("{}_", input);
-                    let paragraph = Paragraph::new(vec![
-                        Line::from(Span::raw(display).style(Style::default().fg(Color::White))),
-                        Line::from(
-                            Span::raw("e.g. -o StrictHostKeyChecking=no user@host")
-                                .style(Style::default().fg(Color::DarkGray)),
-                        ),
-                    ])
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(Color::Yellow))
-                            .title(" ssh "),
-                    );
-                    paragraph.render(input_area, buf);
+                                .title(" ssh "),
+                        );
+                        paragraph.render(input_area, buf);
+                    }
+                    ConnectOverlay::None => {}
                 }
             }
 
@@ -470,8 +479,8 @@ pub fn split_areas(area: Rect, kind: &Split, count: usize) -> Vec<Rect> {
         return vec![];
     }
     let direction = match kind {
-        Split::Horizontal => Direction::Horizontal,
-        Split::Vertical => Direction::Vertical,
+        Split::LeftRight => Direction::Horizontal,
+        Split::TopBottom => Direction::Vertical,
     };
     let constraints = vec![Constraint::Fill(1); count];
     Layout::default()
@@ -575,13 +584,13 @@ mod tests {
     }
     fn hsplit() -> Pane {
         Pane::Split {
-            kind: Split::Horizontal,
+            kind: Split::LeftRight,
             children: vec![connect(), connect()],
         }
     }
     fn vsplit() -> Pane {
         Pane::Split {
-            kind: Split::Vertical,
+            kind: Split::TopBottom,
             children: vec![connect(), connect()],
         }
     }
@@ -590,7 +599,7 @@ mod tests {
 
     #[test]
     fn split_areas_horizontal_even() {
-        let a = split_areas(r(100, 20), &Split::Horizontal, 2);
+        let a = split_areas(r(100, 20), &Split::LeftRight, 2);
         assert_eq!(
             a[0],
             Rect {
@@ -613,13 +622,13 @@ mod tests {
 
     #[test]
     fn split_areas_horizontal_remainder() {
-        let a = split_areas(r(101, 20), &Split::Horizontal, 2);
+        let a = split_areas(r(101, 20), &Split::LeftRight, 2);
         assert_eq!(a[0].width + a[1].width, 101);
     }
 
     #[test]
     fn split_areas_vertical_even() {
-        let a = split_areas(r(80, 40), &Split::Vertical, 2);
+        let a = split_areas(r(80, 40), &Split::TopBottom, 2);
         assert_eq!(
             a[0],
             Rect {
@@ -642,14 +651,14 @@ mod tests {
 
     #[test]
     fn split_areas_vertical_three() {
-        let a = split_areas(r(80, 30), &Split::Vertical, 3);
+        let a = split_areas(r(80, 30), &Split::TopBottom, 3);
         assert_eq!(a.len(), 3);
         assert_eq!(a.iter().map(|x| x.height).sum::<u16>(), 30);
     }
 
     #[test]
     fn split_areas_empty() {
-        assert!(split_areas(r(80, 40), &Split::Horizontal, 0).is_empty());
+        assert!(split_areas(r(80, 40), &Split::LeftRight, 0).is_empty());
     }
 
     // ---- leaf_count --------------------------------------------------------
@@ -667,7 +676,7 @@ mod tests {
     #[test]
     fn leaf_count_nested() {
         let p = Pane::Split {
-            kind: Split::Horizontal,
+            kind: Split::LeftRight,
             children: vec![connect(), vsplit()],
         };
         assert_eq!(p.leaf_count(), 3);
@@ -703,7 +712,7 @@ mod tests {
     #[test]
     fn leaf_areas_count_matches_leaf_count() {
         let p = Pane::Split {
-            kind: Split::Horizontal,
+            kind: Split::LeftRight,
             children: vec![connect(), vsplit()],
         };
         assert_eq!(p.leaf_areas(r(120, 60)).len(), p.leaf_count());
@@ -728,7 +737,7 @@ mod tests {
     #[test]
     fn remove_leaf_nested() {
         let mut p = Pane::Split {
-            kind: Split::Horizontal,
+            kind: Split::LeftRight,
             children: vec![connect(), vsplit()],
         };
         remove_leaf(&mut p, 1);
@@ -785,7 +794,7 @@ mod tests {
     #[test]
     fn leaf_mut_nested() {
         let mut p = Pane::Split {
-            kind: Split::Horizontal,
+            kind: Split::LeftRight,
             children: vec![connect(), vsplit()],
         };
         assert!(p.leaf_mut(0).is_some());
@@ -809,17 +818,17 @@ mod tests {
     #[test]
     fn split_leaf_increases_count() {
         let mut p = hsplit();
-        p.split_leaf(0, Split::Vertical);
+        p.split_leaf(0, Split::TopBottom);
         assert_eq!(p.leaf_count(), 3);
     }
 
     #[test]
     fn split_leaf_nested() {
         let mut p = Pane::Split {
-            kind: Split::Horizontal,
+            kind: Split::LeftRight,
             children: vec![connect(), vsplit()],
         };
-        p.split_leaf(2, Split::Horizontal);
+        p.split_leaf(2, Split::LeftRight);
         assert_eq!(p.leaf_count(), 4);
     }
 
@@ -827,7 +836,7 @@ mod tests {
     fn split_leaf_noop_on_single() {
         // split_leaf on a non-Split pane is a no-op
         let mut p = connect();
-        p.split_leaf(0, Split::Horizontal);
+        p.split_leaf(0, Split::LeftRight);
         assert_eq!(p.leaf_count(), 1);
     }
 
@@ -845,15 +854,15 @@ mod tests {
     fn remove_leaf_deep_nested() {
         // 4-leaf tree: split(connect, split(connect, split(connect, connect)))
         let mut p = Pane::Split {
-            kind: Split::Horizontal,
+            kind: Split::LeftRight,
             children: vec![
                 connect(),
                 Pane::Split {
-                    kind: Split::Vertical,
+                    kind: Split::TopBottom,
                     children: vec![
                         connect(),
                         Pane::Split {
-                            kind: Split::Horizontal,
+                            kind: Split::LeftRight,
                             children: vec![connect(), connect()],
                         },
                     ],
@@ -869,14 +878,14 @@ mod tests {
 
     #[test]
     fn split_areas_single_element() {
-        let a = split_areas(r(100, 50), &Split::Horizontal, 1);
+        let a = split_areas(r(100, 50), &Split::LeftRight, 1);
         assert_eq!(a.len(), 1);
         assert_eq!(a[0], r(100, 50));
     }
 
     #[test]
     fn split_areas_vertical_remainder() {
-        let a = split_areas(r(80, 31), &Split::Vertical, 2);
+        let a = split_areas(r(80, 31), &Split::TopBottom, 2);
         assert_eq!(a[0].height + a[1].height, 31);
     }
 }

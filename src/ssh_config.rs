@@ -1,5 +1,6 @@
 use std::io::BufReader;
 
+use log::warn;
 use ssh2_config::{ParseRule, SshConfig};
 
 /// A single entry from `~/.ssh/config` that can be dialled directly.
@@ -19,7 +20,10 @@ fn parse_str(content: &str) -> Vec<SshHost> {
     let mut reader = BufReader::new(clean.as_bytes());
     let config = match SshConfig::default().parse(&mut reader, ParseRule::ALLOW_UNKNOWN_FIELDS) {
         Ok(c) => c,
-        Err(_) => return vec![],
+        Err(e) => {
+            warn!("failed to parse SSH config: {}", e);
+            return vec![];
+        }
     };
     extract_hosts(&config)
 }
@@ -32,7 +36,10 @@ pub fn parse_ssh_config() -> Vec<SshHost> {
     };
     let content = match std::fs::read_to_string(&config_path) {
         Ok(c) => c,
-        Err(_) => return vec![],
+        Err(e) => {
+            warn!("failed to read SSH config {:?}: {}", config_path, e);
+            return vec![];
+        }
     };
     parse_str(&content)
 }

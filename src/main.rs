@@ -91,7 +91,6 @@ fn main() -> Result<()> {
             height: s.height,
         }
     };
-    let mut host_mouse_captured = false;
     let mut first_frame = true;
     loop {
         // Skip sleep during paste accumulation to drain chars fast.
@@ -101,12 +100,7 @@ fn main() -> Result<()> {
 
         app.tick_browsers();
 
-        let needs_draw = app.any_dirty();
-
-        if !host_mouse_captured {
-            execute!(terminal.backend_mut(), EnableMouseCapture)?;
-            host_mouse_captured = true;
-        }
+        let needs_draw = app.take_dirty();
 
         let mut had_event = false;
         let mut quit = false;
