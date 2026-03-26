@@ -42,7 +42,7 @@ Interactive sessions have 1000-line scrollback via `vt100::Parser`. Mouse scroll
 
 ### Browser state machines
 
-Both browsers (`FileBrowser` in browser/sftp.rs, `SshBrowser` in browser/ssh.rs) hold a `BrowserCore` field (browser/common.rs) that provides shared state, dual-panel rendering, local navigation, click/drag handling, and the common key dispatch via `handle_browser_key()`. Browser-specific logic (SFTP commands, SCP process spawning, password prompts) stays on the outer struct.
+Both browsers (`FileBrowser` in browser/sftp.rs, `SshBrowser` in browser/ssh.rs) implement the `Browser` trait (browser/common.rs) and hold a `BrowserCore` field that provides shared state, dual-panel rendering, local navigation, mouse handling, and the common key dispatch via `handle_browser_key()`. Browser-specific logic (SFTP commands, SCP process spawning, password prompts) stays on the outer struct. `Pane::as_browser_mut()` returns `&mut dyn Browser` to avoid duplicated match arms.
 
 Both use prompt-stability detection: raw PTY buffer byte count unchanged for N ticks + expected prompt string present. They share parsing utilities from `browser/parse.rs` (ANSI stripping, `ls -la` parsing, transfer progress scraping).
 
@@ -64,6 +64,12 @@ Both use prompt-stability detection: raw PTY buffer byte count unchanged for N t
 - No external SSH libraries (ssh2, russh). Must use system binaries only.
 - Must work on both Windows (ConPTY) and Linux.
 - ConPTY on Windows has known quirks: spurious SIGWINCH on mouse mode changes causes double-prompt artifacts in some remote shells. No clean fix found yet.
+
+## Code quality rules
+
+- **Zero code duplication.** When two or more types share the same logic, extract it into a trait, a shared method, or a helper function. Never write parallel match arms or if/else branches that do the same thing. Example: `FileBrowser` and `SshBrowser` both implement the `Browser` trait; `Pane::as_browser_mut()` returns `&mut dyn Browser` so callers never duplicate per-type logic.
+- **Think big picture first.** Before writing new code, ask: does a shared type, trait, or helper already exist for this? Can the logic live on a common struct or behind an existing abstraction? Exhaust these options before introducing new code paths.
+- **No bool-flag dispatch.** Never pass a bool to select between types. Use traits, enums, or polymorphism instead.
 
 ## Code review expectations
 
