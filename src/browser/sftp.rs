@@ -79,6 +79,9 @@ impl FileBrowser {
             self.core.pending_uploads.clear();
             self.core.pending_transfers.clear();
             self.core.pending_deletes.clear();
+            self.core.batch_done = 0;
+            self.core.batch_total = 0;
+            self.core.transfer_start = None;
             self.sftp_state = SftpState::Idle;
             self.core.status_msg = "SFTP connection lost".to_string();
             self.core.status_color = Color::Red;
@@ -147,7 +150,10 @@ impl FileBrowser {
                     if !self.core.pending_uploads.is_empty() {
                         self.upload_pending_paths();
                     } else if !self.core.pending_transfers.is_empty() {
-                        debug!("SFTP chaining next transfer, direction={:?}", self.core.last_transfer_direction());
+                        debug!(
+                            "SFTP chaining next transfer, direction={:?}",
+                            self.core.last_transfer_direction()
+                        );
                         match self.core.last_transfer_direction() {
                             TransferDirection::Upload => self.upload(),
                             TransferDirection::Download => self.download(),
@@ -162,7 +168,7 @@ impl FileBrowser {
                     self.core.prompt_stable = 0;
                     let completion_msg = self.core.last_transfer.as_mut().map(|t| {
                         t.done = true;
-                        t.progress = "100%".to_string();
+                        t.progress = 100;
                         let verb = match t.direction {
                             TransferDirection::Download => "Downloaded",
                             TransferDirection::Upload => "Uploaded",
@@ -173,6 +179,8 @@ impl FileBrowser {
                         self.core.status_msg = msg;
                         self.core.status_color = Color::Green;
                     }
+                    self.core.batch_done += 1;
+                    self.core.transfer_start = None;
                     self.core.local_entries = read_local_dir(&self.core.local_path);
                     info!(
                         "SFTP transfer complete, pending_transfers={}, pending_uploads={}",
@@ -198,6 +206,9 @@ impl FileBrowser {
                         }
                         return;
                     }
+                    // Batch complete — reset counters before the final ls refresh.
+                    self.core.batch_done = 0;
+                    self.core.batch_total = 0;
                     self.send_ls();
                     self.sftp_state = SftpState::WaitingLs;
                 } else {
@@ -351,27 +362,25 @@ impl FileBrowser {
             self.core.remote_path.trim_end_matches('/'),
             entry.name
         );
-        let remaining = self.core.pending_transfers.len();
-        let suffix = if remaining > 0 {
-            format!(" ({} more queued)", remaining)
-        } else {
-            String::new()
-        };
         let cmd = format!(
             "get {}{} {}/\r\n",
             flag,
             shell_quote(&remote_file),
             local_dest
         );
+        if self.core.batch_done == 0 {
+            self.core.batch_total = self.core.pending_transfers.len() + 1;
+        }
+        self.core.transfer_start = Some(Instant::now());
         self.core.last_transfer = Some(TransferStatus {
             filename: entry.name.clone(),
             direction: TransferDirection::Download,
             is_dir: entry.is_dir,
             done: false,
-            progress: "0%".to_string(),
+            progress: 0,
             file_count: 0,
         });
-        self.core.status_msg = format!("Downloading {}...{}", entry.name, suffix);
+        self.core.status_msg = format!("Downloading {}...", entry.name);
         self.core.status_color = Color::Yellow;
         info!("SFTP get {} -> {}", entry.name, local_dest);
         self.sftp.send_str(&cmd);
@@ -402,27 +411,25 @@ impl FileBrowser {
         let local_path = self.core.local_path.join(&entry.name);
         let local_str = local_path.to_string_lossy().replace('\\', "/");
         let flag = if entry.is_dir { "-r " } else { "" };
-        let remaining = self.core.pending_transfers.len();
-        let suffix = if remaining > 0 {
-            format!(" ({} more queued)", remaining)
-        } else {
-            String::new()
-        };
         let cmd = format!(
             "put {}{} {}/\r\n",
             flag,
             shell_quote(&local_str),
             shell_quote(&self.core.remote_path)
         );
+        if self.core.batch_done == 0 {
+            self.core.batch_total = self.core.pending_transfers.len() + 1;
+        }
+        self.core.transfer_start = Some(Instant::now());
         self.core.last_transfer = Some(TransferStatus {
             filename: entry.name.clone(),
             direction: TransferDirection::Upload,
             is_dir: entry.is_dir,
             done: false,
-            progress: "0%".to_string(),
+            progress: 0,
             file_count: 0,
         });
-        self.core.status_msg = format!("Uploading {}...{}", entry.name, suffix);
+        self.core.status_msg = format!("Uploading {}...", entry.name);
         self.core.status_color = Color::Yellow;
         info!("SFTP put {}", local_str);
         self.sftp.send_str(&cmd);
@@ -438,10 +445,8 @@ impl FileBrowser {
         let Some(path) = self.core.pending_uploads.first().cloned() else {
             return;
         };
-        self.core.pending_uploads.remove(0);
         self.core.upload_scroll_x = 0;
         self.core.upload_scroll_y = 0;
-        let remaining = self.core.pending_uploads.len();
 
         let is_dir = path.is_dir();
         let name = path
@@ -457,23 +462,21 @@ impl FileBrowser {
             shell_quote(&local_str),
             shell_quote(&self.core.remote_path)
         );
+        // pending_uploads was already popped above; remaining = after this one
+        if self.core.batch_done == 0 {
+            self.core.batch_total = self.core.pending_uploads.len() + 1;
+        }
+        self.core.transfer_start = Some(Instant::now());
         self.core.last_transfer = Some(TransferStatus {
             filename: name.clone(),
             direction: TransferDirection::Upload,
             is_dir,
             done: false,
-            progress: "0%".to_string(),
+            progress: 0,
             file_count: 0,
         });
-        let suffix = if remaining > 0 {
-            format!(" (+{} queued)", remaining)
-        } else {
-            String::new()
-        };
-        self.core.status_msg = format!("Uploading {}...{}", name, suffix);
+        self.core.status_msg = format!("Uploading {}...", name);
         self.core.status_color = Color::Yellow;
-        self.core.upload_scroll_x = 0;
-        self.core.upload_scroll_y = 0;
         info!("SFTP put (drop) {}", local_str);
         self.sftp.send_str(&cmd);
         self.sftp_state = SftpState::Transferring;
@@ -544,6 +547,8 @@ impl FileBrowser {
                 .render_normal_status(status_area, buf, label, color, &progress);
         }
         self.core.render_upload_confirm(area, buf);
+        self.core
+            .render_transfer_progress(area, buf, self.sftp_state == SftpState::Transferring);
         self.core.render_drag_arrow(area, buf, leaf_count);
         self.core.render_drag_ghost(buf);
     }
@@ -560,14 +565,10 @@ impl FileBrowser {
 
     fn progress_suffix(&self) -> String {
         if let Some(ref t) = self.core.last_transfer {
-            if !t.done {
-                if t.is_dir {
-                    format!(" ({} files)", t.file_count)
-                } else {
-                    format!(" {}", t.progress)
-                }
-            } else if t.is_dir {
+            if t.is_dir && !t.done {
                 format!(" ({} files)", t.file_count)
+            } else if !t.is_dir && !t.done {
+                format!(" {}%", t.progress)
             } else {
                 String::new()
             }

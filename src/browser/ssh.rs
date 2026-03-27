@@ -128,10 +128,10 @@ impl SshBrowser {
                 let pct = scrape_transfer_progress(&lines);
 
                 if let Some(ref mut t) = self.core.last_transfer
-                    && let Some(ref pct) = pct
-                    && *pct != t.progress
+                    && let Some(pct) = pct
+                    && pct != t.progress
                 {
-                    t.progress = pct.clone();
+                    t.progress = pct;
                     self.core.needs_redraw = true;
                 }
 
@@ -139,7 +139,7 @@ impl SshBrowser {
                     info!("SCP transfer done (process exited)");
                     let completion_msg = self.core.last_transfer.as_mut().map(|t| {
                         t.done = true;
-                        t.progress = "100%".to_string();
+                        t.progress = 100;
                         let verb = match t.direction {
                             TransferDirection::Download => "Downloaded",
                             TransferDirection::Upload => "Uploaded",
@@ -151,11 +151,20 @@ impl SshBrowser {
                         self.core.status_color = Color::Green;
                     }
                     self.scp_pty = None;
+                    self.core.batch_done += 1;
+                    self.core.transfer_start = None;
                     self.core.local_entries = read_local_dir(&self.core.local_path);
                     info!("SCP transfer complete");
                     self.ssh.drain_raw();
                     self.core.prev_raw_len = 0;
                     self.core.prompt_stable = 0;
+                    // Batch complete — reset counters before the final ls refresh.
+                    if self.core.pending_transfers.is_empty()
+                        && self.core.pending_uploads.is_empty()
+                    {
+                        self.core.batch_done = 0;
+                        self.core.batch_total = 0;
+                    }
                     self.send_ls();
                     self.ssh_state = SshBrowserState::WaitingLs;
                     self.core.needs_redraw = true;
@@ -166,6 +175,9 @@ impl SshBrowser {
                 self.core.pending_uploads.clear();
                 self.core.pending_transfers.clear();
                 self.core.pending_deletes.clear();
+                self.core.batch_done = 0;
+                self.core.batch_total = 0;
+                self.core.transfer_start = None;
                 self.ssh_state = SshBrowserState::Idle;
                 self.core.status_msg = "Transfer failed".to_string();
                 self.core.status_color = Color::Red;
@@ -482,13 +494,6 @@ impl SshBrowser {
             self.core.remote_path.trim_end_matches('/'),
             entry.name
         );
-        let remaining = self.core.pending_transfers.len();
-        let suffix = if remaining > 0 {
-            format!(" ({} more queued)", remaining)
-        } else {
-            String::new()
-        };
-
         let mut cmd = CommandBuilder::new("scp");
         cmd.arg("-O");
         if entry.is_dir {
@@ -505,15 +510,19 @@ impl SshBrowser {
         match EmbeddedTerminal::new(24, 80, cmd, true) {
             Ok(term) => {
                 self.scp_pty = Some(term);
+                if self.core.batch_done == 0 {
+                    self.core.batch_total = self.core.pending_transfers.len() + 1;
+                }
+                self.core.transfer_start = Some(Instant::now());
                 self.core.last_transfer = Some(TransferStatus {
                     filename: entry.name.clone(),
                     direction: TransferDirection::Download,
                     is_dir: entry.is_dir,
                     done: false,
-                    progress: "0%".to_string(),
+                    progress: 0,
                     file_count: 0,
                 });
-                self.core.status_msg = format!("Downloading {}...{}", entry.name, suffix);
+                self.core.status_msg = format!("Downloading {}...", entry.name);
                 self.core.status_color = Color::Yellow;
                 self.ssh_state = SshBrowserState::Transferring;
                 self.password_prompts_seen = 0;
@@ -551,12 +560,6 @@ impl SshBrowser {
         }
         let local_path = self.core.local_path.join(&entry.name);
         let local_str = local_path.to_string_lossy().replace('\\', "/");
-        let remaining = self.core.pending_transfers.len();
-        let suffix = if remaining > 0 {
-            format!(" ({} more queued)", remaining)
-        } else {
-            String::new()
-        };
 
         let mut cmd = CommandBuilder::new("scp");
         cmd.arg("-O");
@@ -580,15 +583,19 @@ impl SshBrowser {
         match EmbeddedTerminal::new(24, 80, cmd, true) {
             Ok(term) => {
                 self.scp_pty = Some(term);
+                if self.core.batch_done == 0 {
+                    self.core.batch_total = self.core.pending_transfers.len() + 1;
+                }
+                self.core.transfer_start = Some(Instant::now());
                 self.core.last_transfer = Some(TransferStatus {
                     filename: entry.name.clone(),
                     direction: TransferDirection::Upload,
                     is_dir: entry.is_dir,
                     done: false,
-                    progress: "0%".to_string(),
+                    progress: 0,
                     file_count: 0,
                 });
-                self.core.status_msg = format!("Uploading {}...{}", entry.name, suffix);
+                self.core.status_msg = format!("Uploading {}...", entry.name);
                 self.core.status_color = Color::Yellow;
                 self.ssh_state = SshBrowserState::Transferring;
                 self.password_prompts_seen = 0;
@@ -613,10 +620,8 @@ impl SshBrowser {
         let Some(path) = self.core.pending_uploads.first().cloned() else {
             return;
         };
-        self.core.pending_uploads.remove(0);
         self.core.upload_scroll_x = 0;
         self.core.upload_scroll_y = 0;
-        let remaining = self.core.pending_uploads.len();
 
         let is_dir = path.is_dir();
         let name = path
@@ -648,20 +653,19 @@ impl SshBrowser {
         match EmbeddedTerminal::new(24, 80, cmd, true) {
             Ok(term) => {
                 self.scp_pty = Some(term);
+                if self.core.batch_done == 0 {
+                    self.core.batch_total = self.core.pending_uploads.len() + 1;
+                }
+                self.core.transfer_start = Some(Instant::now());
                 self.core.last_transfer = Some(TransferStatus {
                     filename: name.clone(),
                     direction: TransferDirection::Upload,
                     is_dir,
                     done: false,
-                    progress: "0%".to_string(),
+                    progress: 0,
                     file_count: 0,
                 });
-                let suffix = if remaining > 0 {
-                    format!(" (+{} queued)", remaining)
-                } else {
-                    String::new()
-                };
-                self.core.status_msg = format!("Uploading {}...{}", name, suffix);
+                self.core.status_msg = format!("Uploading {}...", name);
                 self.core.status_color = Color::Yellow;
                 self.core.upload_scroll_x = 0;
                 self.core.upload_scroll_y = 0;
@@ -782,6 +786,11 @@ impl SshBrowser {
             }
         }
         self.core.render_upload_confirm(area, buf);
+        self.core.render_transfer_progress(
+            area,
+            buf,
+            self.ssh_state == SshBrowserState::Transferring,
+        );
         self.core.render_drag_arrow(area, buf, leaf_count);
         self.core.render_drag_ghost(buf);
     }
@@ -816,7 +825,7 @@ impl SshBrowser {
     fn progress_suffix(&self) -> String {
         if let Some(ref t) = self.core.last_transfer {
             if !t.done {
-                format!(" {}", t.progress)
+                format!(" {}%", t.progress)
             } else {
                 String::new()
             }

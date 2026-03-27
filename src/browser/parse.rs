@@ -174,16 +174,17 @@ pub fn skip_n_tokens(line: &str, n: usize) -> &str {
     remaining
 }
 
-/// Scrape a transfer progress percentage from sftp output lines.
-pub fn scrape_transfer_progress(lines: &[String]) -> Option<String> {
+/// Scrape a transfer progress percentage from sftp/scp output lines.
+/// Returns a value in 0–100.
+pub fn scrape_transfer_progress(lines: &[String]) -> Option<u8> {
     lines.iter().rev().find_map(|l| {
         // SCP uses \r to overwrite progress on the same line; take the last segment.
         let segment = l.rsplit('\r').next().unwrap_or(l);
         let segment = segment.trim();
         segment
             .split_whitespace()
-            .find(|tok| tok.ends_with('%') && tok.trim_end_matches('%').parse::<u32>().is_ok())
-            .map(|s| s.to_string())
+            .find(|tok| tok.ends_with('%'))
+            .and_then(|tok| tok.trim_end_matches('%').parse::<u8>().ok())
     })
 }
 
@@ -596,26 +597,17 @@ mod tests {
 
     #[test]
     fn scrape_progress_simple() {
-        assert_eq!(
-            scrape_transfer_progress(&["50%".to_string()]),
-            Some("50%".to_string())
-        );
+        assert_eq!(scrape_transfer_progress(&["50%".to_string()]), Some(50));
     }
 
     #[test]
     fn scrape_progress_zero() {
-        assert_eq!(
-            scrape_transfer_progress(&["0%".to_string()]),
-            Some("0%".to_string())
-        );
+        assert_eq!(scrape_transfer_progress(&["0%".to_string()]), Some(0));
     }
 
     #[test]
     fn scrape_progress_hundred() {
-        assert_eq!(
-            scrape_transfer_progress(&["100%".to_string()]),
-            Some("100%".to_string())
-        );
+        assert_eq!(scrape_transfer_progress(&["100%".to_string()]), Some(100));
     }
 
     #[test]
@@ -636,7 +628,7 @@ mod tests {
         // SCP overwrites progress with \r; last segment wins
         assert_eq!(
             scrape_transfer_progress(&["10%\r75%".to_string()]),
-            Some("75%".to_string())
+            Some(75)
         );
     }
 
@@ -644,7 +636,7 @@ mod tests {
     fn scrape_progress_last_line_wins() {
         assert_eq!(
             scrape_transfer_progress(&["10%".to_string(), "90%".to_string()]),
-            Some("90%".to_string())
+            Some(90)
         );
     }
 
@@ -652,19 +644,19 @@ mod tests {
     fn scrape_progress_with_surrounding_text() {
         assert_eq!(
             scrape_transfer_progress(&["demo.png  50% 125KB 62.5KB/s 00:02".to_string()]),
-            Some("50%".to_string())
+            Some(50)
         );
     }
 
     #[test]
     fn scrape_progress_invalid_percent() {
-        // "abc%" should not match (abc is not a u32)
+        // "abc%" should not match (abc is not a valid u8)
         assert_eq!(scrape_transfer_progress(&["abc%".to_string()]), None);
     }
 
     #[test]
     fn scrape_progress_negative_percent() {
-        // "-5%" should not match (negative not valid u32)
+        // "-5%" should not match (negative not valid u8)
         assert_eq!(scrape_transfer_progress(&["-5%".to_string()]), None);
     }
 
@@ -673,10 +665,7 @@ mod tests {
         // Realistic SCP output with \r-separated segments
         let line =
             "demo.png   0%    0     0.0KB/s   --:-- ETA\rdemo.png 100%  125KB  62.5KB/s   00:02";
-        assert_eq!(
-            scrape_transfer_progress(&[line.to_string()]),
-            Some("100%".to_string())
-        );
+        assert_eq!(scrape_transfer_progress(&[line.to_string()]), Some(100));
     }
 
     // ---- shell_quote (additional edge cases) -------------------------------

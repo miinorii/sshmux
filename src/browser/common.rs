@@ -10,7 +10,9 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Widget},
+    widgets::{
+        Block, Borders, Gauge, List, ListItem, ListState, Paragraph, StatefulWidget, Widget,
+    },
 };
 
 use super::browser_layout;
@@ -39,7 +41,7 @@ pub struct TransferStatus {
     pub direction: TransferDirection,
     pub is_dir: bool,
     pub done: bool,
-    pub progress: String,
+    pub progress: u8, // 0–100
     pub file_count: usize,
 }
 
@@ -130,6 +132,10 @@ pub struct BrowserCore {
     pub last_inner: Rect,
     // ---- drag visual feedback ----
     pub drag: Option<DragState>,
+    // ---- active transfer tracking ----
+    pub transfer_start: Option<Instant>,
+    pub batch_total: usize,
+    pub batch_done: usize,
 }
 
 impl BrowserCore {
@@ -175,6 +181,9 @@ impl BrowserCore {
             upload_scroll_y: 0,
             last_inner: Rect::default(),
             drag: None,
+            transfer_start: None,
+            batch_total: 0,
+            batch_done: 0,
         }
     }
 
@@ -1156,6 +1165,141 @@ impl BrowserCore {
                     .title_alignment(Alignment::Center),
             );
         paragraph.render(overlay, buf);
+        true
+    }
+
+    /// Render the transfer progress overlay during an active transfer.
+    /// `transferring` must be true (driven by the concrete browser state) for the overlay to show.
+    /// Returns `true` if the overlay was drawn.
+    pub fn render_transfer_progress(
+        &self,
+        inner: Rect,
+        buf: &mut Buffer,
+        transferring: bool,
+    ) -> bool {
+        let t = match self.last_transfer.as_ref() {
+            Some(t) if transferring => t,
+            _ => return false,
+        };
+
+        let elapsed = self.transfer_start.map(|s| s.elapsed()).unwrap_or_default();
+        let elapsed_str = Self::format_duration(elapsed);
+
+        let direction_arrow = match t.direction {
+            TransferDirection::Download => "↓",
+            TransferDirection::Upload => "↑",
+        };
+
+        // Gauge ratio: combine batch progress with per-file progress.
+        // For dirs, file_pct stays 0 so the gauge advances step-wise between files.
+        let file_pct = if t.is_dir { 0.0 } else { t.progress as f64 };
+        let ratio = if self.batch_total == 0 {
+            file_pct / 100.0
+        } else {
+            (self.batch_done as f64 + file_pct / 100.0) / self.batch_total as f64
+        }
+        .clamp(0.0, 1.0);
+
+        let show_batch = self.batch_total > 1;
+        let content_rows: u16 = if show_batch { 3 } else { 2 };
+        let box_w = 56u16.min(inner.width.saturating_sub(4));
+        let box_h = content_rows + 2; // content + 2 borders
+
+        let cx = inner.x + inner.width.saturating_sub(box_w) / 2;
+        let cy = inner.y + inner.height.saturating_sub(box_h) / 2;
+        let overlay = Rect {
+            x: cx,
+            y: cy,
+            width: box_w,
+            height: box_h,
+        };
+
+        // Clear area
+        for y in overlay.y..overlay.y + overlay.height {
+            for x in overlay.x..overlay.x + overlay.width {
+                if x < buf.area().width && y < buf.area().height {
+                    buf[(x, y)].reset();
+                }
+            }
+        }
+
+        let border_style = Style::default().fg(Color::Cyan).bg(Color::Black);
+        let inner_area = Rect {
+            x: overlay.x + 1,
+            y: overlay.y + 1,
+            width: overlay.width.saturating_sub(2),
+            height: overlay.height.saturating_sub(2),
+        };
+
+        // Draw border box
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(" Transfer ")
+            .title_alignment(Alignment::Center)
+            .style(Style::default().bg(Color::Black))
+            .render(overlay, buf);
+
+        // Row 0: direction + filename (left) + elapsed (right)
+        let fname_style = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
+        let dim = Style::default().fg(Color::DarkGray);
+        let elapsed_str_padded = format!(" {}", elapsed_str);
+        let available = inner_area.width as usize;
+        let elapsed_len = elapsed_str_padded.chars().count();
+        let name_prefix = format!("{}  {} ", direction_arrow, t.filename);
+        let name_max = available.saturating_sub(elapsed_len);
+        let name_display = if name_prefix.chars().count() > name_max {
+            let truncated: String = name_prefix
+                .chars()
+                .take(name_max.saturating_sub(1))
+                .collect();
+            format!("{}…", truncated)
+        } else {
+            let pad = name_max - name_prefix.chars().count();
+            format!("{}{}", name_prefix, " ".repeat(pad))
+        };
+        let row0 = Line::from(vec![
+            Span::styled(name_display, fname_style),
+            Span::styled(elapsed_str_padded, dim),
+        ]);
+        buf.set_line(inner_area.x, inner_area.y, &row0, inner_area.width);
+
+        // Row 1: Gauge
+        let gauge_label = if t.is_dir {
+            String::new()
+        } else {
+            format!(" {}% ", t.progress)
+        };
+        let gauge_area = Rect {
+            x: inner_area.x,
+            y: inner_area.y + 1,
+            width: inner_area.width,
+            height: 1,
+        };
+        Gauge::default()
+            .ratio(ratio)
+            .label(gauge_label)
+            .gauge_style(Style::default().fg(Color::Cyan).bg(Color::DarkGray))
+            .render(gauge_area, buf);
+
+        // Row 2 (batch only): file count info
+        if show_batch {
+            let batch_line = if t.is_dir {
+                format!(
+                    "  {} files  ·  File {} of {}",
+                    t.file_count,
+                    self.batch_done + 1,
+                    self.batch_total
+                )
+            } else {
+                format!("  File {} of {}", self.batch_done + 1, self.batch_total)
+            };
+            let row2 = Line::from(Span::styled(batch_line, dim));
+            buf.set_line(inner_area.x, inner_area.y + 2, &row2, inner_area.width);
+        }
+
         true
     }
 
