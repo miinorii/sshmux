@@ -175,11 +175,29 @@ impl FileBrowser {
                     }
                     self.core.local_entries = read_local_dir(&self.core.local_path);
                     info!(
-                        "SFTP transfer complete, pending_transfers={}",
-                        self.core.pending_transfers.len()
+                        "SFTP transfer complete, pending_transfers={}, pending_uploads={}",
+                        self.core.pending_transfers.len(),
+                        self.core.pending_uploads.len(),
                     );
                     self.sftp.drain_raw();
                     self.core.prev_raw_len = 0;
+                    // Skip the ls round-trip when more transfers are queued.
+                    // sftp get/put does not remove the source file, so the
+                    // existing entries are still valid for finding queued names.
+                    if !self.core.pending_transfers.is_empty()
+                        || !self.core.pending_uploads.is_empty()
+                    {
+                        self.sftp_state = SftpState::Idle;
+                        if !self.core.pending_uploads.is_empty() {
+                            self.upload_pending_paths();
+                        } else {
+                            match self.core.last_transfer_direction() {
+                                TransferDirection::Upload => self.upload(),
+                                TransferDirection::Download => self.download(),
+                            }
+                        }
+                        return;
+                    }
                     self.send_ls();
                     self.sftp_state = SftpState::WaitingLs;
                 } else {
