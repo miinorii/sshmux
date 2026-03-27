@@ -464,9 +464,21 @@ fn handle_browser_key_dispatch(
         return Some(Action::Continue);
     }
 
+    // Log all key events while paste is in progress to diagnose
+    // characters that go missing (e.g. backslash on Windows drag-and-drop).
+    if !browser.core_mut().paste_buf.is_empty() {
+        debug!(
+            "paste key event: code={:?} ctrl={} alt={} shift={}",
+            code, ctrl, alt, shift
+        );
+    }
+
     // Ignore ctrl/alt chars — they are not browser actions and must not
-    // trigger paste accumulation.
-    if (ctrl || alt) && matches!(code, KeyCode::Char(_)) {
+    // trigger paste accumulation.  However, during active paste accumulation
+    // let them through: Windows sends backslash as Ctrl+Alt+\ (AltGr) in
+    // drag-and-drop paths.
+    if (ctrl || alt) && matches!(code, KeyCode::Char(_)) && browser.core_mut().paste_buf.is_empty()
+    {
         return Some(Action::Continue);
     }
 
@@ -475,7 +487,6 @@ fn handle_browser_key_dispatch(
         BrowserKeyAction::GoUp => browser.go_up(),
         BrowserKeyAction::Download => browser.download(),
         BrowserKeyAction::Upload => browser.upload(),
-        BrowserKeyAction::UploadPaths => browser.upload_pending_paths(),
         BrowserKeyAction::Delete => browser.delete_focused(),
         BrowserKeyAction::ConfirmDeleteYes => browser.confirm_delete_yes(),
         BrowserKeyAction::Handled => {}

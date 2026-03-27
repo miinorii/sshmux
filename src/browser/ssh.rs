@@ -159,9 +159,7 @@ impl SshBrowser {
                     self.core.prev_raw_len = 0;
                     self.core.prompt_stable = 0;
                     // Batch complete — reset counters before the final ls refresh.
-                    if self.core.pending_transfers.is_empty()
-                        && self.core.pending_uploads.is_empty()
-                    {
+                    if self.core.pending_transfers.is_empty() {
                         self.core.batch_done = 0;
                         self.core.batch_total = 0;
                     }
@@ -172,7 +170,7 @@ impl SshBrowser {
             } else {
                 // scp_pty is None while state is Transferring — recover.
                 warn!("SCP transfer state with no process, recovering");
-                self.core.pending_uploads.clear();
+                self.core.drop_confirm = None;
                 self.core.pending_transfers.clear();
                 self.core.pending_deletes.clear();
                 self.core.batch_done = 0;
@@ -319,10 +317,8 @@ impl SshBrowser {
                         self.core.status_color = Color::Green;
                     }
                     self.core.needs_redraw = true;
-                    // Chain next queued drop-upload if any
-                    if !self.core.pending_uploads.is_empty() {
-                        self.upload_pending_paths();
-                    } else if !self.core.pending_transfers.is_empty() {
+                    // Chain next queued transfer if any
+                    if !self.core.pending_transfers.is_empty() {
                         match self.core.last_transfer_direction() {
                             TransferDirection::Upload => self.upload(),
                             TransferDirection::Download => self.download(),
@@ -472,31 +468,28 @@ impl SshBrowser {
         if self.ssh_state != SshBrowserState::Idle {
             return;
         }
-        let idx = if !self.core.pending_transfers.is_empty() {
-            let Some(i) = self.core.pop_pending_transfer(BrowserFocus::Remote) else {
+        let (remote_file, name, is_dir) = if let Some(t) = self.core.pop_pending() {
+            (t.path, t.name, t.is_dir)
+        } else if let Some(i) = self.core.remote_sel.selected() {
+            let Some(entry) = self.core.remote_entries.get(i) else {
                 return;
             };
-            i
-        } else if let Some(i) = self.core.remote_sel.selected() {
-            i
+            if entry.name == ".." {
+                return;
+            }
+            let path = format!(
+                "{}/{}",
+                self.core.remote_path.trim_end_matches('/'),
+                entry.name
+            );
+            (path, entry.name.clone(), entry.is_dir)
         } else {
             return;
         };
-        let Some(entry) = self.core.remote_entries.get(idx).cloned() else {
-            return;
-        };
-        if entry.name == ".." {
-            return;
-        }
         let local_dest = self.core.local_path.to_string_lossy().replace('\\', "/");
-        let remote_file = format!(
-            "{}/{}",
-            self.core.remote_path.trim_end_matches('/'),
-            entry.name
-        );
         let mut cmd = CommandBuilder::new("scp");
         cmd.arg("-O");
-        if entry.is_dir {
+        if is_dir {
             cmd.arg("-r");
         }
         cmd.arg(format!("{}:{}", self.core.host, remote_file));
@@ -515,19 +508,19 @@ impl SshBrowser {
                 }
                 self.core.transfer_start = Some(Instant::now());
                 self.core.last_transfer = Some(TransferStatus {
-                    filename: entry.name.clone(),
+                    filename: name.clone(),
                     direction: TransferDirection::Download,
-                    is_dir: entry.is_dir,
+                    is_dir,
                     done: false,
                     progress: 0,
                     file_count: 0,
                 });
-                self.core.status_msg = format!("Downloading {}...", entry.name);
+                self.core.status_msg = format!("Downloading {}...", name);
                 self.core.status_color = Color::Yellow;
                 self.ssh_state = SshBrowserState::Transferring;
                 self.password_prompts_seen = 0;
                 self.waiting_password = false;
-                info!("SCP get {} started", entry.name);
+                info!("SCP get {} started", name);
             }
             Err(e) => {
                 error!("SCP spawn failed: {}", e);
@@ -542,28 +535,29 @@ impl SshBrowser {
         if self.ssh_state != SshBrowserState::Idle {
             return;
         }
-        let idx = if !self.core.pending_transfers.is_empty() {
-            let Some(i) = self.core.pop_pending_transfer(BrowserFocus::Local) else {
+        let (local_str, name, is_dir) = if let Some(t) = self.core.pop_pending() {
+            (t.path, t.name, t.is_dir)
+        } else if let Some(i) = self.core.local_sel.selected() {
+            let Some(entry) = self.core.local_entries.get(i) else {
                 return;
             };
-            i
-        } else if let Some(i) = self.core.local_sel.selected() {
-            i
+            if entry.name == ".." {
+                return;
+            }
+            let path = self
+                .core
+                .local_path
+                .join(&entry.name)
+                .to_string_lossy()
+                .replace('\\', "/");
+            (path, entry.name.clone(), entry.is_dir)
         } else {
             return;
         };
-        let Some(entry) = self.core.local_entries.get(idx).cloned() else {
-            return;
-        };
-        if entry.name == ".." {
-            return;
-        }
-        let local_path = self.core.local_path.join(&entry.name);
-        let local_str = local_path.to_string_lossy().replace('\\', "/");
 
         let mut cmd = CommandBuilder::new("scp");
         cmd.arg("-O");
-        if entry.is_dir {
+        if is_dir {
             cmd.arg("-r");
         }
         cmd.arg(&*local_str);
@@ -588,76 +582,6 @@ impl SshBrowser {
                 }
                 self.core.transfer_start = Some(Instant::now());
                 self.core.last_transfer = Some(TransferStatus {
-                    filename: entry.name.clone(),
-                    direction: TransferDirection::Upload,
-                    is_dir: entry.is_dir,
-                    done: false,
-                    progress: 0,
-                    file_count: 0,
-                });
-                self.core.status_msg = format!("Uploading {}...", entry.name);
-                self.core.status_color = Color::Yellow;
-                self.ssh_state = SshBrowserState::Transferring;
-                self.password_prompts_seen = 0;
-                self.waiting_password = false;
-                info!("SCP put {} started", local_str);
-            }
-            Err(e) => {
-                error!("SCP spawn failed: {}", e);
-                self.core.status_msg = format!("SCP error: {}", e);
-                self.core.status_color = Color::Red;
-            }
-        }
-        self.core.needs_redraw = true;
-    }
-
-    // ---- drop upload -------------------------------------------------------
-
-    pub fn upload_pending_paths(&mut self) {
-        if self.ssh_state != SshBrowserState::Idle {
-            return;
-        }
-        let Some(path) = self.core.pending_uploads.first().cloned() else {
-            return;
-        };
-        self.core.upload_scroll_x = 0;
-        self.core.upload_scroll_y = 0;
-
-        let is_dir = path.is_dir();
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let local_str = path.to_string_lossy().replace('\\', "/");
-
-        let mut cmd = CommandBuilder::new("scp");
-        cmd.arg("-O");
-        if is_dir {
-            cmd.arg("-r");
-        }
-        cmd.arg(&*local_str);
-        cmd.arg(format!(
-            "{}:{}",
-            self.core.host,
-            self.core.remote_path.trim_end_matches('/')
-        ));
-        cmd.env("TERM", "xterm");
-        info!(
-            "SCP upload (drop): {} -> {}:{}",
-            local_str,
-            self.core.host,
-            self.core.remote_path.trim_end_matches('/')
-        );
-
-        match EmbeddedTerminal::new(24, 80, cmd, true) {
-            Ok(term) => {
-                self.scp_pty = Some(term);
-                if self.core.batch_done == 0 {
-                    self.core.batch_total = self.core.pending_uploads.len() + 1;
-                }
-                self.core.transfer_start = Some(Instant::now());
-                self.core.last_transfer = Some(TransferStatus {
                     filename: name.clone(),
                     direction: TransferDirection::Upload,
                     is_dir,
@@ -667,12 +591,10 @@ impl SshBrowser {
                 });
                 self.core.status_msg = format!("Uploading {}...", name);
                 self.core.status_color = Color::Yellow;
-                self.core.upload_scroll_x = 0;
-                self.core.upload_scroll_y = 0;
                 self.ssh_state = SshBrowserState::Transferring;
                 self.password_prompts_seen = 0;
                 self.waiting_password = false;
-                info!("SCP put (drop) {} started", name);
+                info!("SCP put {} started", local_str);
             }
             Err(e) => {
                 error!("SCP spawn failed: {}", e);
@@ -850,9 +772,6 @@ impl Browser for SshBrowser {
     }
     fn go_up(&mut self) {
         self.go_up();
-    }
-    fn upload_pending_paths(&mut self) {
-        self.upload_pending_paths();
     }
     fn delete_focused(&mut self) {
         self.delete_focused();

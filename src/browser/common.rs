@@ -45,6 +45,13 @@ pub struct TransferStatus {
     pub file_count: usize,
 }
 
+#[derive(Clone, Debug)]
+pub struct PendingTransfer {
+    pub path: String, // full source path (local for upload, remote for download)
+    pub name: String, // filename component
+    pub is_dir: bool,
+}
+
 /// Action returned by `handle_browser_key` for browser-specific operations.
 pub enum BrowserKeyAction {
     Handled,
@@ -52,7 +59,6 @@ pub enum BrowserKeyAction {
     GoUp,
     Download,
     Upload,
-    UploadPaths,
     Delete,
     ConfirmDeleteYes,
 }
@@ -78,7 +84,6 @@ pub trait Browser {
     fn download(&mut self);
     fn enter(&mut self);
     fn go_up(&mut self);
-    fn upload_pending_paths(&mut self);
     fn delete_focused(&mut self);
     fn confirm_delete_yes(&mut self);
     /// True when the browser is in a connecting/auth state that should forward raw keys.
@@ -121,14 +126,14 @@ pub struct BrowserCore {
     pub selected: BTreeSet<usize>,
     pub select_anchor: Option<usize>,
     // ---- multi-transfer queues ----
-    pub pending_transfers: Vec<String>, // filenames queued for batch transfer
-    pub pending_deletes: Vec<String>,   // tagged delete strings queued for batch delete
+    pub pending_transfers: Vec<PendingTransfer>,
+    pub pending_deletes: Vec<String>, // tagged delete strings queued for batch delete
     // ---- drag-and-drop paste detection ----
     pub paste_buf: String,
     pub paste_deadline: Option<Instant>,
-    pub pending_uploads: Vec<PathBuf>,
-    pub upload_scroll_x: usize,
-    pub upload_scroll_y: usize,
+    pub drop_confirm: Option<Vec<PathBuf>>,
+    pub drop_scroll_x: usize,
+    pub drop_scroll_y: usize,
     pub last_inner: Rect,
     // ---- drag visual feedback ----
     pub drag: Option<DragState>,
@@ -176,9 +181,9 @@ impl BrowserCore {
             pending_deletes: vec![],
             paste_buf: String::new(),
             paste_deadline: None,
-            pending_uploads: vec![],
-            upload_scroll_x: 0,
-            upload_scroll_y: 0,
+            drop_confirm: None,
+            drop_scroll_x: 0,
+            drop_scroll_y: 0,
             last_inner: Rect::default(),
             drag: None,
             transfer_start: None,
@@ -443,7 +448,7 @@ impl BrowserCore {
     // ---- paste / drag-and-drop detection ------------------------------------
 
     /// Called each tick. If the paste deadline has expired, parse the buffer
-    /// for valid file paths and populate `pending_uploads`.
+    /// for valid file paths and populate `drop_confirm`.
     pub fn check_paste_deadline(&mut self) {
         let expired = self
             .paste_deadline
@@ -482,10 +487,11 @@ impl BrowserCore {
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>()
         );
-        self.pending_uploads = paths;
-        self.upload_scroll_x = 0;
-        self.upload_scroll_y = 0;
-        self.status_msg = format!("{} file(s) ready to upload", self.pending_uploads.len());
+        let count = paths.len();
+        self.drop_confirm = Some(paths);
+        self.drop_scroll_x = 0;
+        self.drop_scroll_y = 0;
+        self.status_msg = format!("{} file(s) ready to upload", count);
         self.status_color = Color::Cyan;
         self.needs_redraw = true;
     }
@@ -586,7 +592,7 @@ impl BrowserCore {
         }
     }
 
-    /// Convert selected indices to filenames and store in `pending_transfers`.
+    /// Convert selected indices to transfer entries and store in `pending_transfers`.
     pub fn queue_transfers_from_indices(&mut self, indices: &[usize]) {
         let entries = match self.focus {
             BrowserFocus::Local => &self.local_entries,
@@ -596,7 +602,23 @@ impl BrowserCore {
             .iter()
             .filter_map(|&i| entries.get(i))
             .filter(|e| e.name != "..")
-            .map(|e| e.name.clone())
+            .map(|e| {
+                let path = match self.focus {
+                    BrowserFocus::Local => self
+                        .local_path
+                        .join(&e.name)
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    BrowserFocus::Remote => {
+                        format!("{}/{}", self.remote_path.trim_end_matches('/'), e.name)
+                    }
+                };
+                PendingTransfer {
+                    path,
+                    name: e.name.clone(),
+                    is_dir: e.is_dir,
+                }
+            })
             .collect();
         info!(
             "queued {} transfers: {:?}",
@@ -605,28 +627,13 @@ impl BrowserCore {
         );
     }
 
-    /// Pop the next pending transfer filename and find its index in the
-    /// specified panel's entry list. Returns `Some(index)` if found.
-    pub fn pop_pending_transfer(&mut self, panel: BrowserFocus) -> Option<usize> {
-        while let Some(name) = self.pending_transfers.first().cloned() {
-            self.pending_transfers.remove(0);
-            let entries = match panel {
-                BrowserFocus::Local => &self.local_entries,
-                BrowserFocus::Remote => &self.remote_entries,
-            };
-            if let Some(idx) = entries.iter().position(|e| e.name == name) {
-                debug!(
-                    "pop_pending_transfer: '{}' -> idx {}, {} remaining",
-                    name,
-                    idx,
-                    self.pending_transfers.len()
-                );
-                return Some(idx);
-            }
-            warn!("pending transfer '{}' no longer in listing, skipping", name);
+    /// Pop the next pending transfer from the queue.
+    pub fn pop_pending(&mut self) -> Option<PendingTransfer> {
+        if self.pending_transfers.is_empty() {
+            None
+        } else {
+            Some(self.pending_transfers.remove(0))
         }
-        debug!("pop_pending_transfer: queue empty");
-        None
     }
 
     pub fn confirm_delete_no(&mut self) {
@@ -760,7 +767,7 @@ impl BrowserCore {
         pane_area: Rect,
         leaf_count: usize,
     ) -> Option<DragAction> {
-        if !self.pending_uploads.is_empty() {
+        if self.drop_confirm.is_some() {
             return None;
         }
         match kind {
@@ -1066,20 +1073,19 @@ impl BrowserCore {
     /// Render the upload confirmation overlay when files are pending.
     /// Returns true if the overlay was rendered (callers can skip status bar).
     pub fn render_upload_confirm(&mut self, inner: Rect, buf: &mut Buffer) -> bool {
-        if self.pending_uploads.is_empty() {
+        let Some(paths) = self.drop_confirm.as_ref() else {
             return false;
-        }
+        };
 
-        let count = self.pending_uploads.len();
-        let scroll_x = self.upload_scroll_x;
-        let scroll_y = self.upload_scroll_y;
+        let count = paths.len();
+        let scroll_x = self.drop_scroll_x;
+        let scroll_y = self.drop_scroll_y;
 
         self.last_inner = inner;
         let box_w = 60u16.min(inner.width.saturating_sub(4));
         // Fixed lines: title + blank + indicator/blank + hints = 4, borders = 2
         let max_file_rows = 5.min((inner.height as usize).saturating_sub(6));
-        let visible_files: Vec<_> = self
-            .pending_uploads
+        let visible_files: Vec<_> = paths
             .iter()
             .skip(scroll_y)
             .take(max_file_rows.max(1))
@@ -1417,47 +1423,62 @@ impl BrowserCore {
 /// for password). Navigation keys are handled directly on `core`; actions that
 /// need browser-specific logic are returned as a `BrowserKeyAction`.
 pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode, shift: bool) -> BrowserKeyAction {
-    // ---- Upload confirmation overlay ----
-    if !core.pending_uploads.is_empty() {
+    // ---- Drop upload confirmation overlay ----
+    if let Some(paths) = core.drop_confirm.as_ref() {
         match code {
             KeyCode::Up => {
-                core.upload_scroll_y = core.upload_scroll_y.saturating_sub(1);
+                core.drop_scroll_y = core.drop_scroll_y.saturating_sub(1);
                 core.needs_redraw = true;
             }
             KeyCode::Down => {
                 let max_rows = 5.min((core.last_inner.height as usize).saturating_sub(6));
-                let max_y = core.pending_uploads.len().saturating_sub(max_rows);
-                if core.upload_scroll_y < max_y {
-                    core.upload_scroll_y += 1;
+                let max_y = paths.len().saturating_sub(max_rows);
+                if core.drop_scroll_y < max_y {
+                    core.drop_scroll_y += 1;
                     core.needs_redraw = true;
                 }
             }
             KeyCode::Left => {
-                core.upload_scroll_x = core.upload_scroll_x.saturating_sub(1);
+                core.drop_scroll_x = core.drop_scroll_x.saturating_sub(1);
                 core.needs_redraw = true;
             }
             KeyCode::Right => {
                 let box_w = 60u16.min(core.last_inner.width.saturating_sub(4));
                 let content_w = (box_w as usize).saturating_sub(2);
-                let longest = core
-                    .pending_uploads
+                let longest = paths
                     .iter()
                     .map(|p| format!("  {}", p.display()).len())
                     .max()
                     .unwrap_or(0);
                 let max_scroll = longest.saturating_sub(content_w);
-                if core.upload_scroll_x < max_scroll {
-                    core.upload_scroll_x += 1;
+                if core.drop_scroll_x < max_scroll {
+                    core.drop_scroll_x += 1;
                     core.needs_redraw = true;
                 }
             }
             KeyCode::Char('y') => {
-                return BrowserKeyAction::UploadPaths;
+                if let Some(paths) = core.drop_confirm.take() {
+                    core.pending_transfers = paths
+                        .iter()
+                        .map(|p| PendingTransfer {
+                            path: p.to_string_lossy().replace('\\', "/"),
+                            name: p
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string(),
+                            is_dir: p.is_dir(),
+                        })
+                        .collect();
+                    core.drop_scroll_x = 0;
+                    core.drop_scroll_y = 0;
+                }
+                return BrowserKeyAction::Upload;
             }
             KeyCode::Char('n') | KeyCode::Esc => {
-                core.pending_uploads.clear();
-                core.upload_scroll_x = 0;
-                core.upload_scroll_y = 0;
+                core.drop_confirm = None;
+                core.drop_scroll_x = 0;
+                core.drop_scroll_y = 0;
                 core.status_msg = "File drop canceled".to_string();
                 core.status_color = Color::Yellow;
                 core.needs_redraw = true;

@@ -76,7 +76,7 @@ impl FileBrowser {
                 "SFTP process died in state {:?}, recovering",
                 self.sftp_state
             );
-            self.core.pending_uploads.clear();
+            self.core.drop_confirm = None;
             self.core.pending_transfers.clear();
             self.core.pending_deletes.clear();
             self.core.batch_done = 0;
@@ -142,14 +142,11 @@ impl FileBrowser {
                     self.core.needs_redraw = true;
                     // Chain next queued transfer if any
                     debug!(
-                        "SFTP WaitingLs done: pending_uploads={}, pending_transfers={}, pending_deletes={}",
-                        self.core.pending_uploads.len(),
+                        "SFTP WaitingLs done: pending_transfers={}, pending_deletes={}",
                         self.core.pending_transfers.len(),
                         self.core.pending_deletes.len(),
                     );
-                    if !self.core.pending_uploads.is_empty() {
-                        self.upload_pending_paths();
-                    } else if !self.core.pending_transfers.is_empty() {
+                    if !self.core.pending_transfers.is_empty() {
                         debug!(
                             "SFTP chaining next transfer, direction={:?}",
                             self.core.last_transfer_direction()
@@ -183,26 +180,19 @@ impl FileBrowser {
                     self.core.transfer_start = None;
                     self.core.local_entries = read_local_dir(&self.core.local_path);
                     info!(
-                        "SFTP transfer complete, pending_transfers={}, pending_uploads={}",
+                        "SFTP transfer complete, pending_transfers={}",
                         self.core.pending_transfers.len(),
-                        self.core.pending_uploads.len(),
                     );
                     self.sftp.drain_raw();
                     self.core.prev_raw_len = 0;
                     // Skip the ls round-trip when more transfers are queued.
                     // sftp get/put does not remove the source file, so the
-                    // existing entries are still valid for finding queued names.
-                    if !self.core.pending_transfers.is_empty()
-                        || !self.core.pending_uploads.is_empty()
-                    {
+                    // existing entries are still valid for chaining.
+                    if !self.core.pending_transfers.is_empty() {
                         self.sftp_state = SftpState::Idle;
-                        if !self.core.pending_uploads.is_empty() {
-                            self.upload_pending_paths();
-                        } else {
-                            match self.core.last_transfer_direction() {
-                                TransferDirection::Upload => self.upload(),
-                                TransferDirection::Download => self.download(),
-                            }
+                        match self.core.last_transfer_direction() {
+                            TransferDirection::Upload => self.upload(),
+                            TransferDirection::Download => self.download(),
                         }
                         return;
                     }
@@ -339,29 +329,26 @@ impl FileBrowser {
             debug!("SFTP download: skipped, state={:?}", self.sftp_state);
             return;
         }
-        let idx = if !self.core.pending_transfers.is_empty() {
-            let Some(i) = self.core.pop_pending_transfer(BrowserFocus::Remote) else {
+        let (remote_file, name, is_dir) = if let Some(t) = self.core.pop_pending() {
+            (t.path, t.name, t.is_dir)
+        } else if let Some(i) = self.core.remote_sel.selected() {
+            let Some(entry) = self.core.remote_entries.get(i) else {
                 return;
             };
-            i
-        } else if let Some(i) = self.core.remote_sel.selected() {
-            i
+            if entry.name == ".." {
+                return;
+            }
+            let path = format!(
+                "{}/{}",
+                self.core.remote_path.trim_end_matches('/'),
+                entry.name
+            );
+            (path, entry.name.clone(), entry.is_dir)
         } else {
             return;
         };
-        let Some(entry) = self.core.remote_entries.get(idx).cloned() else {
-            return;
-        };
-        if entry.name == ".." {
-            return;
-        }
         let local_dest = self.core.local_path.to_string_lossy().replace('\\', "/");
-        let flag = if entry.is_dir { "-r " } else { "" };
-        let remote_file = format!(
-            "{}/{}",
-            self.core.remote_path.trim_end_matches('/'),
-            entry.name
-        );
+        let flag = if is_dir { "-r " } else { "" };
         let cmd = format!(
             "get {}{} {}/\r\n",
             flag,
@@ -373,16 +360,16 @@ impl FileBrowser {
         }
         self.core.transfer_start = Some(Instant::now());
         self.core.last_transfer = Some(TransferStatus {
-            filename: entry.name.clone(),
+            filename: name.clone(),
             direction: TransferDirection::Download,
-            is_dir: entry.is_dir,
+            is_dir,
             done: false,
             progress: 0,
             file_count: 0,
         });
-        self.core.status_msg = format!("Downloading {}...", entry.name);
+        self.core.status_msg = format!("Downloading {}...", name);
         self.core.status_color = Color::Yellow;
-        info!("SFTP get {} -> {}", entry.name, local_dest);
+        info!("SFTP get {} -> {}", name, local_dest);
         self.sftp.send_str(&cmd);
         self.sftp_state = SftpState::Transferring;
     }
@@ -392,25 +379,26 @@ impl FileBrowser {
             debug!("SFTP upload: skipped, state={:?}", self.sftp_state);
             return;
         }
-        let idx = if !self.core.pending_transfers.is_empty() {
-            let Some(i) = self.core.pop_pending_transfer(BrowserFocus::Local) else {
+        let (local_str, name, is_dir) = if let Some(t) = self.core.pop_pending() {
+            (t.path, t.name, t.is_dir)
+        } else if let Some(i) = self.core.local_sel.selected() {
+            let Some(entry) = self.core.local_entries.get(i) else {
                 return;
             };
-            i
-        } else if let Some(i) = self.core.local_sel.selected() {
-            i
+            if entry.name == ".." {
+                return;
+            }
+            let path = self
+                .core
+                .local_path
+                .join(&entry.name)
+                .to_string_lossy()
+                .replace('\\', "/");
+            (path, entry.name.clone(), entry.is_dir)
         } else {
             return;
         };
-        let Some(entry) = self.core.local_entries.get(idx).cloned() else {
-            return;
-        };
-        if entry.name == ".." {
-            return;
-        }
-        let local_path = self.core.local_path.join(&entry.name);
-        let local_str = local_path.to_string_lossy().replace('\\', "/");
-        let flag = if entry.is_dir { "-r " } else { "" };
+        let flag = if is_dir { "-r " } else { "" };
         let cmd = format!(
             "put {}{} {}/\r\n",
             flag,
@@ -419,52 +407,6 @@ impl FileBrowser {
         );
         if self.core.batch_done == 0 {
             self.core.batch_total = self.core.pending_transfers.len() + 1;
-        }
-        self.core.transfer_start = Some(Instant::now());
-        self.core.last_transfer = Some(TransferStatus {
-            filename: entry.name.clone(),
-            direction: TransferDirection::Upload,
-            is_dir: entry.is_dir,
-            done: false,
-            progress: 0,
-            file_count: 0,
-        });
-        self.core.status_msg = format!("Uploading {}...", entry.name);
-        self.core.status_color = Color::Yellow;
-        info!("SFTP put {}", local_str);
-        self.sftp.send_str(&cmd);
-        self.sftp_state = SftpState::Transferring;
-    }
-
-    // ---- drop upload -------------------------------------------------------
-
-    pub fn upload_pending_paths(&mut self) {
-        if self.sftp_state != SftpState::Idle {
-            return;
-        }
-        let Some(path) = self.core.pending_uploads.first().cloned() else {
-            return;
-        };
-        self.core.upload_scroll_x = 0;
-        self.core.upload_scroll_y = 0;
-
-        let is_dir = path.is_dir();
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let local_str = path.to_string_lossy().replace('\\', "/");
-        let flag = if is_dir { "-r " } else { "" };
-        let cmd = format!(
-            "put {}{} {}/\r\n",
-            flag,
-            shell_quote(&local_str),
-            shell_quote(&self.core.remote_path)
-        );
-        // pending_uploads was already popped above; remaining = after this one
-        if self.core.batch_done == 0 {
-            self.core.batch_total = self.core.pending_uploads.len() + 1;
         }
         self.core.transfer_start = Some(Instant::now());
         self.core.last_transfer = Some(TransferStatus {
@@ -477,7 +419,7 @@ impl FileBrowser {
         });
         self.core.status_msg = format!("Uploading {}...", name);
         self.core.status_color = Color::Yellow;
-        info!("SFTP put (drop) {}", local_str);
+        info!("SFTP put {}", local_str);
         self.sftp.send_str(&cmd);
         self.sftp_state = SftpState::Transferring;
     }
@@ -593,9 +535,6 @@ impl Browser for FileBrowser {
     }
     fn go_up(&mut self) {
         self.go_up();
-    }
-    fn upload_pending_paths(&mut self) {
-        self.upload_pending_paths();
     }
     fn delete_focused(&mut self) {
         self.delete_focused();
