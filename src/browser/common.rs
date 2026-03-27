@@ -1281,7 +1281,8 @@ impl BrowserCore {
         Gauge::default()
             .ratio(ratio)
             .label(gauge_label)
-            .gauge_style(Style::default().fg(Color::Cyan).bg(Color::DarkGray))
+            .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
+            .style(Style::default().fg(Color::White).bg(Color::Black))
             .render(gauge_area, buf);
 
         // Row 2 (batch only): file count info
