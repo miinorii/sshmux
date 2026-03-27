@@ -1198,7 +1198,12 @@ impl BrowserCore {
 
         // Gauge ratio: combine batch progress with per-file progress.
         // For dirs, file_pct stays 0 so the gauge advances step-wise between files.
-        let file_pct = if t.is_dir { 0.0 } else { t.progress as f64 };
+        // When done, the file is already counted in batch_done — don't double-count.
+        let file_pct = if t.done || t.is_dir {
+            0.0
+        } else {
+            t.progress as f64
+        };
         let ratio = if self.batch_total == 0 {
             file_pct / 100.0
         } else {

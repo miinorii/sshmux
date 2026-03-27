@@ -152,7 +152,6 @@ impl SshBrowser {
                     }
                     self.scp_pty = None;
                     self.core.batch_done += 1;
-                    self.core.transfer_start = None;
                     self.core.local_entries = read_local_dir(&self.core.local_path);
                     info!("SCP transfer complete");
                     self.ssh.drain_raw();
@@ -160,6 +159,7 @@ impl SshBrowser {
                     self.core.prompt_stable = 0;
                     // Batch complete — reset counters before the final ls refresh.
                     if self.core.pending_transfers.is_empty() {
+                        self.core.transfer_start = None;
                         self.core.batch_done = 0;
                         self.core.batch_total = 0;
                     }
@@ -708,11 +708,8 @@ impl SshBrowser {
             }
         }
         self.core.render_upload_confirm(area, buf);
-        self.core.render_transfer_progress(
-            area,
-            buf,
-            self.ssh_state == SshBrowserState::Transferring,
-        );
+        self.core
+            .render_transfer_progress(area, buf, self.core.transfer_start.is_some());
         self.core.render_drag_arrow(area, buf, leaf_count);
         self.core.render_drag_ghost(buf);
     }

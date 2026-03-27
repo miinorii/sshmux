@@ -177,7 +177,6 @@ impl FileBrowser {
                         self.core.status_color = Color::Green;
                     }
                     self.core.batch_done += 1;
-                    self.core.transfer_start = None;
                     self.core.local_entries = read_local_dir(&self.core.local_path);
                     info!(
                         "SFTP transfer complete, pending_transfers={}",
@@ -197,6 +196,7 @@ impl FileBrowser {
                         return;
                     }
                     // Batch complete — reset counters before the final ls refresh.
+                    self.core.transfer_start = None;
                     self.core.batch_done = 0;
                     self.core.batch_total = 0;
                     self.send_ls();
@@ -490,7 +490,7 @@ impl FileBrowser {
         }
         self.core.render_upload_confirm(area, buf);
         self.core
-            .render_transfer_progress(area, buf, self.sftp_state == SftpState::Transferring);
+            .render_transfer_progress(area, buf, self.core.transfer_start.is_some());
         self.core.render_drag_arrow(area, buf, leaf_count);
         self.core.render_drag_ghost(buf);
     }
