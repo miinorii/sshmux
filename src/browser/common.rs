@@ -1266,11 +1266,11 @@ impl BrowserCore {
         ]);
         buf.set_line(inner_area.x, inner_area.y, &row0, inner_area.width);
 
-        // Row 1: Gauge
+        // Row 1: Gauge — label reflects the combined batch ratio, not the raw per-file %
         let gauge_label = if t.is_dir {
             String::new()
         } else {
-            format!(" {}% ", t.progress)
+            format!(" {}% ", (ratio * 100.0) as u8)
         };
         let gauge_area = Rect {
             x: inner_area.x,
