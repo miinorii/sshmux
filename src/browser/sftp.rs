@@ -245,8 +245,14 @@ impl FileBrowser {
                     }
                     self.sftp.drain_raw();
                     self.core.prev_raw_len = 0;
-                    self.send_ls();
-                    self.sftp_state = SftpState::WaitingLs;
+                    // Skip the ls round-trip when more deletes are queued —
+                    // chain directly to the next delete instead.
+                    if !has_error && self.core.pop_pending_delete() {
+                        self.confirm_delete_yes();
+                    } else {
+                        self.send_ls();
+                        self.sftp_state = SftpState::WaitingLs;
+                    }
                     self.core.needs_redraw = true;
                 }
             }
