@@ -51,12 +51,12 @@ Hosts are read from `~/.ssh/config` at startup. Any non-wildcard `Host` entry is
 
 | Key | Action |
 |---|---|
-| `↑` / `k` | Select previous host |
-| `↓` / `j` | Select next host |
+| `↑` | Select previous host |
+| `↓` | Select next host |
 | `Enter` | Open SSH session |
 | `c` | Connect manually (type SSH args) |
 | `b` | Open file browser menu (SFTP or SCP) |
-| `h` | Toggle shortcut help overlay |
+| `h` | Open keybinding editor |
 | `Esc` | Close overlay |
 
 ### Session pane (SSH)
@@ -87,7 +87,7 @@ Two browser backends are available from the connect pane menu (`b`):
 | `↑` / `↓` | Navigate entries |
 | `Shift+↑` / `Shift+↓` | Extend multi-selection |
 | `←` / `→` | Scroll long file names |
-| `Space` / `Enter` | Enter directory |
+| `Enter` | Enter directory |
 | `Backspace` | Go up one directory |
 | `t` | Transfer: download (remote focus) or upload (local focus) |
 | `Delete` | Delete focused file or selection (confirmation required) |
@@ -95,6 +95,16 @@ Two browser backends are available from the connect pane menu (`b`):
 | `n` / `Esc` | Cancel deletion |
 
 Drag-and-drop: click on one panel and release on the other to transfer. Multi-selected files are transferred as a batch. Files dragged from the OS file manager onto a browser pane are queued for upload with a confirmation prompt.
+
+### Customization
+
+All keybindings can be remapped interactively from the keybinding editor (`h` in the connect pane). Select a binding with `↑`/`↓`, press `Enter` to start capturing, then press the desired key combination. Changes are saved immediately to `~/.config/sshmux/config.toml` and take effect without restarting.
+
+To reset all keybindings to defaults:
+
+```
+sshmux --reset-kb
+```
 
 ---
 
@@ -170,6 +180,7 @@ Drag-and-drop: click on one panel and release on the other to transfer. Multi-se
 | `browser/ssh.rs` | `SshBrowser` — SSH/SCP state machine, password handling |
 | `browser/parse.rs` | `ls -la` parsing, ANSI stripping, transfer progress scraping |
 | `terminal.rs` | `EmbeddedTerminal` — PTY wrapper (portable\_pty + vt100) |
+| `keybindings.rs` | `KeyBindings` — key binding definitions, config load/save, editor support |
 | `tab.rs` | `Tab` — pane tree + focus index |
 | `ssh_config.rs` | `~/.ssh/config` parser |
 

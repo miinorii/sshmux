@@ -50,11 +50,19 @@ Both use prompt-stability detection: raw PTY buffer byte count unchanged for N t
 
 **SCP**: Sets `PS1='SSHMUX> '` after SSH auth, then detects `SSHMUX> ` prompt. Browsing uses shell commands (`ls`, `rm`, `pwd`). Transfers spawn separate `scp` processes in temporary PTYs.
 
+### Keybindings
+
+`keybindings.rs` defines `KeyBinding` (single key combo with code/ctrl/alt/shift) and three binding groups: `GlobalBindings` (9), `ConnectBindings` (6), `BrowserBindings` (9) — 24 total, wrapped in `KeyBindings`. Bindings load from `~/.config/sshmux/config.toml` at startup; `--reset-kb` deletes the config file to restore defaults.
+
+The Connect pane's `KeyEditor` overlay (replacing the old Help overlay) lets users remap bindings interactively. When in capture mode (`editing: true`), `input.rs` sets `editor_capturing` to bypass global shortcuts and Alt suppression so any key combo can be captured. `KeyBindings::save()` writes changes to disk immediately.
+
+`KeyBinding::matches()` requires exact modifier match. `matches_ignore_shift()` exists for bindings where Shift extends behavior (e.g., Shift+Up for multiselect in browsers).
+
 ### Key patterns
 
 - `dirty: Arc<AtomicBool>` and `exited: Arc<AtomicBool>` for cross-thread state
 - `raw_output: Arc<Mutex<Vec<u8>>>` — browsers scrape PTY output by reading and draining this buffer
-- Connect pane has three mutually exclusive overlays: `browser_menu`, `connect_input`, `show_help`
+- Connect pane has four mutually exclusive overlays: `None`, `BrowserMenu`, `ConnectInput`, `KeyEditor`
 - Right-click context menu lives on `App` (not per-pane): `context_menu: Option<ContextMenu>`. Opens on right-click Down, tracks hover via Drag, executes on Up, dismissed by any keypress or resize. Right-click is intercepted before pane dispatch so it is never forwarded to remote apps.
 - Browser focus toggle (`Tab` key) switches between local and remote panels
 - `pane_inner()` computes render area by subtracting tab bar and shortcut bar
