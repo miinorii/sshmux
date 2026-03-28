@@ -15,6 +15,7 @@ use super::common::{Browser, BrowserCore, BrowserFocus, TransferDirection, Trans
 use super::parse::{
     parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote, strip_ansi,
 };
+use crate::keybindings::BrowserBindings;
 use crate::terminal::EmbeddedTerminal;
 
 // ---------------------------------------------------------------------------
@@ -692,7 +693,14 @@ impl SshBrowser {
 
     // ---- render ------------------------------------------------------------
 
-    pub fn render(&mut self, area: Rect, buf: &mut Buffer, is_focus: bool, leaf_count: usize) {
+    pub fn render(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        is_focus: bool,
+        leaf_count: usize,
+        bindings: &BrowserBindings,
+    ) {
         let title = format!(" scp: {} ", self.core.host);
         let status_area = self
             .core
@@ -704,7 +712,7 @@ impl SshBrowser {
                 let (label, color) = self.state_label();
                 let progress = self.progress_suffix();
                 self.core
-                    .render_normal_status(status_area, buf, label, color, &progress);
+                    .render_normal_status(status_area, buf, label, color, &progress, bindings);
             }
         }
         self.core.render_upload_confirm(area, buf);

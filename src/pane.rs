@@ -588,13 +588,13 @@ impl Pane {
             Pane::FileBrowser { browser } => {
                 let is_focus = *my_idx == focus_idx;
                 *my_idx += 1;
-                browser.render(area, buf, is_focus, leaf_count);
+                browser.render(area, buf, is_focus, leaf_count, &keybindings.browser);
             }
 
             Pane::SshBrowser { browser } => {
                 let is_focus = *my_idx == focus_idx;
                 *my_idx += 1;
-                browser.render(area, buf, is_focus, leaf_count);
+                browser.render(area, buf, is_focus, leaf_count, &keybindings.browser);
             }
 
             Pane::Split { kind, children } => {

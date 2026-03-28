@@ -17,7 +17,7 @@ use ratatui::{
 
 use super::browser_layout;
 use super::parse::{FsEntry, list_drives, read_local_dir};
-use crate::keybindings::KeyBinding;
+use crate::keybindings::{BrowserBindings, KeyBinding};
 use crate::pane::{pane_inner, render_pane_border};
 
 // ---------------------------------------------------------------------------
@@ -1386,8 +1386,9 @@ impl BrowserCore {
         state_label: &str,
         state_color: Color,
         progress_suffix: &str,
+        bindings: &BrowserBindings,
     ) {
-        let help = " [T]xfer [Del]rm ";
+        let help = format!(" [{}]xfer [{}]rm ", bindings.transfer, bindings.delete);
         let help_len = help.chars().count() as u16;
         let help_x = area.x + area.width.saturating_sub(help_len);
 
@@ -1434,7 +1435,7 @@ pub fn handle_browser_key(
     ctrl: bool,
     alt: bool,
     shift: bool,
-    bindings: &crate::keybindings::BrowserBindings,
+    bindings: &BrowserBindings,
 ) -> BrowserKeyAction {
     // ---- Drop upload confirmation overlay ----
     if let Some(paths) = core.drop_confirm.as_ref() {
