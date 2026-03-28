@@ -37,6 +37,18 @@ impl KeyBinding {
         }
     }
 
+    /// Like `matches`, but ignores the shift modifier. Used for navigation
+    /// bindings where Shift is a secondary modifier meaning "extend selection".
+    pub fn matches_ignore_shift(&self, code: KeyCode, ctrl: bool, alt: bool) -> bool {
+        if self.ctrl != ctrl || self.alt != alt {
+            return false;
+        }
+        match (&self.code, &code) {
+            (KeyCode::Char(a), KeyCode::Char(b)) => a.eq_ignore_ascii_case(b),
+            (a, b) => a == b,
+        }
+    }
+
     /// Parse a human-readable key string like `"Alt+Q"`, `"Ctrl+Shift+F1"`, `"Enter"`.
     pub fn parse(s: &str) -> Result<Self, String> {
         let s = s.trim();

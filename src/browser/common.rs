@@ -1533,7 +1533,7 @@ pub fn handle_browser_key(
     } else if code == KeyCode::Esc {
         core.dismiss_drive_picker();
         BrowserKeyAction::Handled
-    } else if m(&bindings.navigate_up) {
+    } else if bindings.navigate_up.matches_ignore_shift(code, ctrl, alt) {
         if shift {
             if core.select_anchor.is_none() {
                 core.select_anchor = core.focused_index();
@@ -1545,7 +1545,7 @@ pub fn handle_browser_key(
             core.nav_up();
         }
         BrowserKeyAction::Handled
-    } else if m(&bindings.navigate_down) {
+    } else if bindings.navigate_down.matches_ignore_shift(code, ctrl, alt) {
         if shift {
             if core.select_anchor.is_none() {
                 core.select_anchor = core.focused_index();
