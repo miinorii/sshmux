@@ -1108,10 +1108,10 @@ impl BrowserCore {
             } else {
                 full
             };
-            lines.push(Line::from(Span::styled(
-                display,
-                Style::default().fg(Color::Cyan),
-            )));
+            lines.push(
+                Line::from(Span::styled(display, Style::default().fg(Color::Cyan)))
+                    .alignment(Alignment::Left),
+            );
         }
         // Show scroll indicator if not all files are visible
         if count > visible_files.len() {
