@@ -1562,7 +1562,7 @@ pub fn handle_browser_key(
     } else if m(&bindings.scroll_right) {
         core.scroll_right();
         BrowserKeyAction::Handled
-    } else if m(&bindings.enter) || m(&bindings.enter_alt) {
+    } else if m(&bindings.enter) {
         core.clear_selection();
         BrowserKeyAction::Enter
     } else if m(&bindings.go_up) {
@@ -1953,22 +1953,6 @@ mod tests {
             handle_browser_key(
                 &mut core,
                 KeyCode::Enter,
-                false,
-                false,
-                false,
-                &BrowserBindings::default()
-            ),
-            BrowserKeyAction::Enter
-        ));
-    }
-
-    #[test]
-    fn key_space_returns_enter_action() {
-        let mut core = BrowserCore::new("host");
-        assert!(matches!(
-            handle_browser_key(
-                &mut core,
-                KeyCode::Char(' '),
                 false,
                 false,
                 false,

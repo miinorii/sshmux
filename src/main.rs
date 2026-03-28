@@ -36,6 +36,20 @@ use pane::pane_inner;
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<()> {
+    if std::env::args().any(|a| a == "--reset-kb") {
+        let kb = crate::keybindings::KeyBindings::default();
+        match kb.save() {
+            Ok(()) => {
+                eprintln!("keybindings reset to defaults");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("failed to reset keybindings: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let log_level = std::env::args().find_map(|a| a.strip_prefix("--log=").map(String::from));
     if let Some(level_str) = log_level {
         let level = match level_str.to_lowercase().as_str() {

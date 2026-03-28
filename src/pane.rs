@@ -30,7 +30,88 @@ pub enum ConnectOverlay {
     None,
     BrowserMenu(ListState),
     ConnectInput(String),
-    Help,
+    KeyEditor(KeyEditorState),
+}
+
+pub struct KeyEditorState {
+    pub list_state: ListState,
+    pub editing: bool,
+    pub status: Option<String>,
+}
+
+impl KeyEditorState {
+    pub fn new() -> Self {
+        let mut ls = ListState::default();
+        ls.select(Some(1)); // first binding (index 0 is a header)
+        Self {
+            list_state: ls,
+            editing: false,
+            status: None,
+        }
+    }
+}
+
+/// Number of bindings per group (for header index calculation).
+const GLOBAL_COUNT: usize = 9;
+const CONNECT_COUNT: usize = 6;
+
+/// Header indices in the flat display list.
+const HEADER_GLOBAL: usize = 0;
+const HEADER_CONNECT: usize = GLOBAL_COUNT + 1; // 10
+const HEADER_BROWSER: usize = GLOBAL_COUNT + 1 + CONNECT_COUNT + 1; // 17
+
+/// Total rows in the editor list (3 headers + 24 bindings).
+const EDITOR_ROW_COUNT: usize = 27;
+
+/// Returns true if the given index is a section header row.
+pub fn is_editor_header(idx: usize) -> bool {
+    idx == HEADER_GLOBAL || idx == HEADER_CONNECT || idx == HEADER_BROWSER
+}
+
+/// Map a display index to a binding entry index (0..26), or None for headers.
+pub fn editor_binding_index(display_idx: usize) -> Option<usize> {
+    if is_editor_header(display_idx) {
+        return None;
+    }
+    let binding_idx = if display_idx < HEADER_CONNECT {
+        display_idx - 1 // subtract global header
+    } else if display_idx < HEADER_BROWSER {
+        display_idx - 2 // subtract global + connect headers
+    } else {
+        display_idx - 3 // subtract all 3 headers
+    };
+    Some(binding_idx)
+}
+
+/// Move selection to next non-header row (wrapping).
+pub fn editor_nav_down(list_state: &mut ListState) {
+    let cur = list_state.selected().unwrap_or(0);
+    let mut next = cur + 1;
+    if next >= EDITOR_ROW_COUNT {
+        next = 1; // wrap to first binding
+    }
+    if is_editor_header(next) {
+        next += 1;
+    }
+    list_state.select(Some(next));
+}
+
+/// Move selection to previous non-header row (wrapping).
+pub fn editor_nav_up(list_state: &mut ListState) {
+    let cur = list_state.selected().unwrap_or(0);
+    let mut prev = if cur == 0 {
+        EDITOR_ROW_COUNT - 1
+    } else {
+        cur - 1
+    };
+    if is_editor_header(prev) {
+        prev = if prev == 0 {
+            EDITOR_ROW_COUNT - 1
+        } else {
+            prev - 1
+        };
+    }
+    list_state.select(Some(prev));
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +373,7 @@ impl Pane {
                     hint_y,
                     &Line::from(vec![
                         Span::raw(help_key).style(Style::default().fg(Color::Yellow)),
-                        Span::raw(" help").style(Style::default().fg(Color::DarkGray)),
+                        Span::raw(" keybindings").style(Style::default().fg(Color::DarkGray)),
                     ]),
                     inner.width,
                 );
@@ -326,51 +407,99 @@ impl Pane {
                             .highlight_symbol("> ");
                         StatefulWidget::render(menu_list, menu_area, buf, menu_state);
                     }
-                    ConnectOverlay::Help => {
-                        let g = &keybindings.global;
-                        let c = &keybindings.connect;
-                        let shortcuts: Vec<(String, &str)> = vec![
-                            (c.connect.to_string(), "connect"),
-                            (c.manual_connect.to_string(), "connect (manual)"),
-                            (c.browser_menu.to_string(), "file browser"),
-                            (g.new_tab.to_string(), "new tab"),
-                            (g.close.to_string(), "close pane / tab"),
-                            (g.split_horizontal.to_string(), "split top/bottom"),
-                            (g.split_vertical.to_string(), "split left/right"),
-                            (
-                                format!("{}/{}", g.prev_pane, g.next_pane),
-                                "cycle pane focus",
-                            ),
-                            (format!("{}/{}", g.prev_tab, g.next_tab), "switch tab"),
-                            (g.quit.to_string(), "quit"),
-                        ];
-                        let help_w = 36u16.min(inner.width.saturating_sub(2));
-                        let help_h = (shortcuts.len() as u16 + 2).min(inner.height);
-                        let cx = inner.x + inner.width.saturating_sub(help_w) / 2;
-                        let cy = inner.y + inner.height.saturating_sub(help_h) / 2;
-                        let help_area = Rect {
+                    ConnectOverlay::KeyEditor(editor) => {
+                        let entries = keybindings.entries();
+                        let selected_display = editor.list_state.selected().unwrap_or(0);
+                        let groups = ["Global", "Connect", "Browser"];
+                        let header_indices = [HEADER_GLOBAL, HEADER_CONNECT, HEADER_BROWSER];
+
+                        let mut items: Vec<Line> = Vec::with_capacity(EDITOR_ROW_COUNT);
+                        let mut entry_idx = 0usize;
+                        for row in 0..EDITOR_ROW_COUNT {
+                            if let Some(gi) = header_indices.iter().position(|&h| h == row) {
+                                // Section header
+                                let label = format!(" ── {} ", groups[gi]);
+                                items.push(Line::from(Span::styled(
+                                    label,
+                                    Style::default()
+                                        .fg(Color::DarkGray)
+                                        .add_modifier(Modifier::BOLD),
+                                )));
+                            } else {
+                                // Binding row
+                                let e = &entries[entry_idx];
+                                entry_idx += 1;
+                                let key_str = if editor.editing && row == selected_display {
+                                    "[press key...]".to_string()
+                                } else {
+                                    e.binding.to_string()
+                                };
+                                let key_style = if editor.editing && row == selected_display {
+                                    Style::default()
+                                        .fg(Color::Cyan)
+                                        .add_modifier(Modifier::BOLD)
+                                } else {
+                                    Style::default().fg(Color::Yellow)
+                                };
+                                items.push(Line::from(vec![
+                                    Span::styled(format!(" {:14}", key_str), key_style),
+                                    Span::styled(
+                                        e.description,
+                                        Style::default().fg(Color::DarkGray),
+                                    ),
+                                ]));
+                            }
+                        }
+
+                        let title = if editor.editing {
+                            " press a key to bind "
+                        } else {
+                            " keybindings (Enter to edit) "
+                        };
+
+                        // Status line at bottom if present
+                        let status_line = editor.status.as_deref().unwrap_or("");
+                        let extra_h = if status_line.is_empty() { 0u16 } else { 1 };
+
+                        let ed_w = 44u16.min(inner.width.saturating_sub(2));
+                        let ed_h = (EDITOR_ROW_COUNT as u16 + 2 + extra_h).min(inner.height);
+                        let cx = inner.x + inner.width.saturating_sub(ed_w) / 2;
+                        let cy = inner.y + inner.height.saturating_sub(ed_h) / 2;
+                        let ed_area = Rect {
                             x: cx,
                             y: cy,
-                            width: help_w,
-                            height: help_h,
+                            width: ed_w,
+                            height: ed_h,
                         };
-                        let items: Vec<Line> = shortcuts
-                            .iter()
-                            .map(|(key, desc)| {
-                                Line::from(vec![
-                                    Span::raw(format!(" {:10}", key))
-                                        .style(Style::default().fg(Color::Yellow)),
-                                    Span::raw(*desc).style(Style::default().fg(Color::DarkGray)),
-                                ])
-                            })
-                            .collect();
-                        let help_list = List::new(items).block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(Color::Yellow))
-                                .title(" shortcuts "),
-                        );
-                        Widget::render(help_list, help_area, buf);
+
+                        let ed_list = List::new(items)
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .border_style(Style::default().fg(Color::Yellow))
+                                    .title(title),
+                            )
+                            .highlight_style(
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                            .highlight_symbol("> ");
+                        StatefulWidget::render(ed_list, ed_area, buf, &mut editor.list_state);
+
+                        // Render status at bottom of overlay (inside border)
+                        if !status_line.is_empty() {
+                            let status_y = ed_area.y + ed_area.height.saturating_sub(2);
+                            buf.set_line(
+                                ed_area.x + 2,
+                                status_y,
+                                &Line::from(Span::styled(
+                                    status_line,
+                                    Style::default().fg(Color::Green),
+                                )),
+                                ed_area.width.saturating_sub(4),
+                            );
+                        }
                     }
                     ConnectOverlay::ConnectInput(input) => {
                         let input_w = 50u16.min(inner.width.saturating_sub(2));

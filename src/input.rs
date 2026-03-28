@@ -4,7 +4,11 @@ use ratatui::{layout::Rect, style::Color, widgets::ListState};
 
 use crate::app::App;
 use crate::browser::{BrowserKeyAction, DragAction, SshBrowserState, handle_browser_key};
-use crate::pane::{ConnectOverlay, Pane, Split, pane_inner};
+use crate::keybindings::KeyBinding;
+use crate::pane::{
+    ConnectOverlay, KeyEditorState, Pane, Split, editor_binding_index, editor_nav_down,
+    editor_nav_up, pane_inner,
+};
 
 // ---------------------------------------------------------------------------
 // Action — returned by input handlers to signal the main loop
@@ -36,61 +40,73 @@ pub fn handle_key(
 
     let focused_pane_has_app_cursor = app.focused_pane_app_cursor();
 
-    // ---- Global shortcuts ----
-    let g = &app.keybindings.global;
-    if g.quit.matches(code, ctrl, alt, shift) {
-        return Action::Quit;
-    }
-    if g.prev_tab.matches(code, ctrl, alt, shift) {
-        if app.selected_tab > 0 {
-            app.selected_tab -= 1;
-        } else {
-            app.selected_tab = app.tabs.len() - 1;
-        }
-        return Action::Continue;
-    }
-    if g.next_tab.matches(code, ctrl, alt, shift) {
-        app.selected_tab = (app.selected_tab + 1) % app.tabs.len();
-        return Action::Continue;
-    }
-    if g.prev_pane.matches(code, ctrl, alt, shift) {
-        app.tab_mut().focus_prev();
-        return Action::Continue;
-    }
-    if g.next_pane.matches(code, ctrl, alt, shift) {
-        app.tab_mut().focus_next();
-        return Action::Continue;
-    }
-    if g.close.matches(code, ctrl, alt, shift) {
-        let was_last_pane = app.tab().leaf_count() == 1;
-        if was_last_pane {
-            app.close_tab();
-        } else {
-            app.tab_mut().close_focused();
-            app.resize_all(last_area);
-        }
-        return Action::Continue;
-    }
-    if g.new_tab.matches(code, ctrl, alt, shift) {
-        app.new_tab();
-        return Action::Continue;
-    }
-    if g.split_horizontal.matches(code, ctrl, alt, shift) {
-        app.tab_mut().split(Split::TopBottom, pane_inner(last_area));
-        return Action::Continue;
-    }
-    if g.split_vertical.matches(code, ctrl, alt, shift) {
-        app.tab_mut().split(Split::LeftRight, pane_inner(last_area));
-        return Action::Continue;
-    }
+    // When the key editor is in capture mode, skip global shortcuts and
+    // Alt suppression so the captured key reaches the editor handler.
+    let editor_capturing = matches!(
+        app.tab().focused_pane(),
+        Some(Pane::Connect {
+            overlay: ConnectOverlay::KeyEditor(KeyEditorState { editing: true, .. }),
+            ..
+        })
+    );
 
-    // Suppress unbound Alt+Char from reaching session passthrough
-    if alt && !ctrl {
-        return Action::Continue;
+    if !editor_capturing {
+        // ---- Global shortcuts ----
+        let g = &app.keybindings.global;
+        if g.quit.matches(code, ctrl, alt, shift) {
+            return Action::Quit;
+        }
+        if g.prev_tab.matches(code, ctrl, alt, shift) {
+            if app.selected_tab > 0 {
+                app.selected_tab -= 1;
+            } else {
+                app.selected_tab = app.tabs.len() - 1;
+            }
+            return Action::Continue;
+        }
+        if g.next_tab.matches(code, ctrl, alt, shift) {
+            app.selected_tab = (app.selected_tab + 1) % app.tabs.len();
+            return Action::Continue;
+        }
+        if g.prev_pane.matches(code, ctrl, alt, shift) {
+            app.tab_mut().focus_prev();
+            return Action::Continue;
+        }
+        if g.next_pane.matches(code, ctrl, alt, shift) {
+            app.tab_mut().focus_next();
+            return Action::Continue;
+        }
+        if g.close.matches(code, ctrl, alt, shift) {
+            let was_last_pane = app.tab().leaf_count() == 1;
+            if was_last_pane {
+                app.close_tab();
+            } else {
+                app.tab_mut().close_focused();
+                app.resize_all(last_area);
+            }
+            return Action::Continue;
+        }
+        if g.new_tab.matches(code, ctrl, alt, shift) {
+            app.new_tab();
+            return Action::Continue;
+        }
+        if g.split_horizontal.matches(code, ctrl, alt, shift) {
+            app.tab_mut().split(Split::TopBottom, pane_inner(last_area));
+            return Action::Continue;
+        }
+        if g.split_vertical.matches(code, ctrl, alt, shift) {
+            app.tab_mut().split(Split::LeftRight, pane_inner(last_area));
+            return Action::Continue;
+        }
+
+        // Suppress unbound Alt+Char from reaching session passthrough
+        if alt && !ctrl {
+            return Action::Continue;
+        }
     }
 
     // ---- Connect pane ----
-    if let Some(action) = handle_connect_key(app, code, ctrl, shift, last_area) {
+    if let Some(action) = handle_connect_key(app, code, ctrl, alt, shift, last_area) {
         return action;
     }
 
@@ -223,6 +239,7 @@ fn handle_connect_key(
     app: &mut App,
     code: KeyCode,
     ctrl: bool,
+    alt: bool,
     shift: bool,
     last_area: Rect,
 ) -> Option<Action> {
@@ -362,32 +379,96 @@ fn handle_connect_key(
         return Some(Action::Continue);
     }
 
-    // Help overlay — Esc dismisses, everything else falls through to normal handling
-    if matches!(
-        app.tab().focused_pane(),
-        Some(Pane::Connect {
-            overlay: ConnectOverlay::Help,
-            ..
-        })
-    ) && code == KeyCode::Esc
+    // Key editor overlay
+    if let Some(Pane::Connect {
+        overlay: ConnectOverlay::KeyEditor(editor),
+        ..
+    }) = app.tab().focused_pane()
     {
-        if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
-            *overlay = ConnectOverlay::None;
+        let is_editing = editor.editing;
+        let display_idx = editor.list_state.selected().unwrap_or(0);
+
+        if is_editing {
+            // Capture mode: Esc cancels, any other key sets the binding
+            if code == KeyCode::Esc {
+                if let Some(Pane::Connect {
+                    overlay: ConnectOverlay::KeyEditor(editor),
+                    ..
+                }) = app.tab_mut().focused_pane_mut()
+                {
+                    editor.editing = false;
+                    editor.status = Some("Cancelled".into());
+                }
+            } else if let Some(entry_idx) = editor_binding_index(display_idx) {
+                let entries = app.keybindings.entries();
+                if let Some(entry) = entries.get(entry_idx) {
+                    let new_kb = KeyBinding::new(code, ctrl, alt, shift);
+                    app.keybindings
+                        .set_binding(entry.group, entry.field, new_kb);
+                    match app.keybindings.save() {
+                        Ok(()) => {}
+                        Err(e) => error!("save keybindings: {e}"),
+                    }
+                }
+                if let Some(Pane::Connect {
+                    overlay: ConnectOverlay::KeyEditor(editor),
+                    ..
+                }) = app.tab_mut().focused_pane_mut()
+                {
+                    editor.editing = false;
+                    editor.status = Some("Saved!".into());
+                }
+            }
+        } else {
+            // Navigation mode
+            match code {
+                KeyCode::Up => {
+                    if let Some(Pane::Connect {
+                        overlay: ConnectOverlay::KeyEditor(editor),
+                        ..
+                    }) = app.tab_mut().focused_pane_mut()
+                    {
+                        editor_nav_up(&mut editor.list_state);
+                    }
+                }
+                KeyCode::Down => {
+                    if let Some(Pane::Connect {
+                        overlay: ConnectOverlay::KeyEditor(editor),
+                        ..
+                    }) = app.tab_mut().focused_pane_mut()
+                    {
+                        editor_nav_down(&mut editor.list_state);
+                    }
+                }
+                KeyCode::Enter => {
+                    if editor_binding_index(display_idx).is_some()
+                        && let Some(Pane::Connect {
+                            overlay: ConnectOverlay::KeyEditor(editor),
+                            ..
+                        }) = app.tab_mut().focused_pane_mut()
+                    {
+                        editor.editing = true;
+                        editor.status = None;
+                    }
+                }
+                KeyCode::Esc => {
+                    if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
+                        *overlay = ConnectOverlay::None;
+                    }
+                }
+                _ => {}
+            }
         }
         return Some(Action::Continue);
     }
 
     // Normal connect pane
     let cb = &app.keybindings.connect;
-    if cb.select_prev.matches(code, ctrl, false, shift)
-        || cb.select_prev_alt.matches(code, ctrl, false, shift)
-    {
+    if cb.select_prev.matches(code, ctrl, false, shift) {
         if let Some(Pane::Connect { list_state, .. }) = app.tab_mut().focused_pane_mut() {
             list_state.select_previous();
         }
-    } else if cb.select_next.matches(code, ctrl, false, shift)
-        || cb.select_next_alt.matches(code, ctrl, false, shift)
-    {
+    } else if cb.select_next.matches(code, ctrl, false, shift) {
         if let Some(Pane::Connect { list_state, .. }) = app.tab_mut().focused_pane_mut() {
             list_state.select_next();
         }
@@ -416,10 +497,10 @@ fn handle_connect_key(
         }
     } else if cb.help.matches(code, ctrl, false, shift) {
         if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
-            *overlay = if matches!(overlay, ConnectOverlay::Help) {
+            *overlay = if matches!(overlay, ConnectOverlay::KeyEditor(_)) {
                 ConnectOverlay::None
             } else {
-                ConnectOverlay::Help
+                ConnectOverlay::KeyEditor(KeyEditorState::new())
             };
         }
     } else if code == KeyCode::Esc

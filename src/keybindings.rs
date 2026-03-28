@@ -226,9 +226,7 @@ impl Default for GlobalBindings {
 #[derive(Clone, Debug)]
 pub struct ConnectBindings {
     pub select_prev: KeyBinding,
-    pub select_prev_alt: KeyBinding,
     pub select_next: KeyBinding,
-    pub select_next_alt: KeyBinding,
     pub connect: KeyBinding,
     pub browser_menu: KeyBinding,
     pub manual_connect: KeyBinding,
@@ -239,9 +237,7 @@ impl Default for ConnectBindings {
     fn default() -> Self {
         Self {
             select_prev: KeyBinding::new(KeyCode::Up, false, false, false),
-            select_prev_alt: KeyBinding::new(KeyCode::Char('k'), false, false, false),
             select_next: KeyBinding::new(KeyCode::Down, false, false, false),
-            select_next_alt: KeyBinding::new(KeyCode::Char('j'), false, false, false),
             connect: KeyBinding::new(KeyCode::Enter, false, false, false),
             browser_menu: KeyBinding::new(KeyCode::Char('b'), false, false, false),
             manual_connect: KeyBinding::new(KeyCode::Char('c'), false, false, false),
@@ -258,7 +254,6 @@ pub struct BrowserBindings {
     pub scroll_left: KeyBinding,
     pub scroll_right: KeyBinding,
     pub enter: KeyBinding,
-    pub enter_alt: KeyBinding,
     pub go_up: KeyBinding,
     pub transfer: KeyBinding,
     pub delete: KeyBinding,
@@ -273,7 +268,6 @@ impl Default for BrowserBindings {
             scroll_left: KeyBinding::new(KeyCode::Left, false, false, false),
             scroll_right: KeyBinding::new(KeyCode::Right, false, false, false),
             enter: KeyBinding::new(KeyCode::Enter, false, false, false),
-            enter_alt: KeyBinding::new(KeyCode::Char(' '), false, false, false),
             go_up: KeyBinding::new(KeyCode::Backspace, false, false, false),
             transfer: KeyBinding::new(KeyCode::Char('t'), false, false, false),
             delete: KeyBinding::new(KeyCode::Delete, false, false, false),
@@ -319,9 +313,7 @@ struct RawGlobal {
 #[derive(Deserialize, Default)]
 struct RawConnect {
     select_prev: Option<String>,
-    select_prev_alt: Option<String>,
     select_next: Option<String>,
-    select_next_alt: Option<String>,
     connect: Option<String>,
     browser_menu: Option<String>,
     manual_connect: Option<String>,
@@ -336,7 +328,6 @@ struct RawBrowser {
     scroll_left: Option<String>,
     scroll_right: Option<String>,
     enter: Option<String>,
-    enter_alt: Option<String>,
     go_up: Option<String>,
     transfer: Option<String>,
     delete: Option<String>,
@@ -363,25 +354,17 @@ fn log_bindings(kb: &KeyBindings) {
         g.next_pane
     );
     info!(
-        "config: connect: prev={}, prev_alt={}, next={}, next_alt={}, connect={}, browser={}, manual={}, help={}",
-        c.select_prev,
-        c.select_prev_alt,
-        c.select_next,
-        c.select_next_alt,
-        c.connect,
-        c.browser_menu,
-        c.manual_connect,
-        c.help
+        "config: connect: prev={}, next={}, connect={}, browser={}, manual={}, help={}",
+        c.select_prev, c.select_next, c.connect, c.browser_menu, c.manual_connect, c.help
     );
     info!(
-        "config: browser: focus={}, up={}, down={}, left={}, right={}, enter={}, enter_alt={}, go_up={}, transfer={}, delete={}",
+        "config: browser: focus={}, up={}, down={}, left={}, right={}, enter={}, go_up={}, transfer={}, delete={}",
         b.toggle_focus,
         b.navigate_up,
         b.navigate_down,
         b.scroll_left,
         b.scroll_right,
         b.enter,
-        b.enter_alt,
         b.go_up,
         b.transfer,
         b.delete
@@ -472,20 +455,10 @@ impl KeyBindings {
                     &rc.select_prev,
                     &dc.select_prev,
                 ),
-                select_prev_alt: parse_or_default(
-                    "connect.select_prev_alt",
-                    &rc.select_prev_alt,
-                    &dc.select_prev_alt,
-                ),
                 select_next: parse_or_default(
                     "connect.select_next",
                     &rc.select_next,
                     &dc.select_next,
-                ),
-                select_next_alt: parse_or_default(
-                    "connect.select_next_alt",
-                    &rc.select_next_alt,
-                    &dc.select_next_alt,
                 ),
                 connect: parse_or_default("connect.connect", &rc.connect, &dc.connect),
                 browser_menu: parse_or_default(
@@ -527,7 +500,6 @@ impl KeyBindings {
                     &db.scroll_right,
                 ),
                 enter: parse_or_default("browser.enter", &rb.enter, &db.enter),
-                enter_alt: parse_or_default("browser.enter_alt", &rb.enter_alt, &db.enter_alt),
                 go_up: parse_or_default("browser.go_up", &rb.go_up, &db.go_up),
                 transfer: parse_or_default("browser.transfer", &rb.transfer, &db.transfer),
                 delete: parse_or_default("browser.delete", &rb.delete, &db.delete),
@@ -540,10 +512,9 @@ impl KeyBindings {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
 impl KeyBinding {
     /// For serialization back to config-file format (no Unicode arrows).
-    fn to_config_string(&self) -> String {
+    pub fn to_config_string(&self) -> String {
         let mut parts = Vec::new();
         if self.ctrl {
             parts.push("Ctrl".to_string());
@@ -556,6 +527,241 @@ impl KeyBinding {
         }
         parts.push(key_code_display(&self.code));
         parts.join("+")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Binding enumeration (for the keybinding editor overlay)
+// ---------------------------------------------------------------------------
+
+pub struct BindingEntry {
+    pub group: &'static str,
+    pub field: &'static str,
+    pub description: &'static str,
+    pub binding: KeyBinding,
+}
+
+impl KeyBindings {
+    /// Returns all 27 bindings in display order, grouped by section.
+    pub fn entries(&self) -> Vec<BindingEntry> {
+        let g = &self.global;
+        let c = &self.connect;
+        let b = &self.browser;
+        vec![
+            // Global
+            BindingEntry {
+                group: "global",
+                field: "quit",
+                description: "quit",
+                binding: g.quit.clone(),
+            },
+            BindingEntry {
+                group: "global",
+                field: "new_tab",
+                description: "new tab",
+                binding: g.new_tab.clone(),
+            },
+            BindingEntry {
+                group: "global",
+                field: "close",
+                description: "close pane / tab",
+                binding: g.close.clone(),
+            },
+            BindingEntry {
+                group: "global",
+                field: "split_horizontal",
+                description: "split top/bottom",
+                binding: g.split_horizontal.clone(),
+            },
+            BindingEntry {
+                group: "global",
+                field: "split_vertical",
+                description: "split left/right",
+                binding: g.split_vertical.clone(),
+            },
+            BindingEntry {
+                group: "global",
+                field: "prev_pane",
+                description: "previous pane",
+                binding: g.prev_pane.clone(),
+            },
+            BindingEntry {
+                group: "global",
+                field: "next_pane",
+                description: "next pane",
+                binding: g.next_pane.clone(),
+            },
+            BindingEntry {
+                group: "global",
+                field: "prev_tab",
+                description: "previous tab",
+                binding: g.prev_tab.clone(),
+            },
+            BindingEntry {
+                group: "global",
+                field: "next_tab",
+                description: "next tab",
+                binding: g.next_tab.clone(),
+            },
+            // Connect
+            BindingEntry {
+                group: "connect",
+                field: "select_prev",
+                description: "previous host",
+                binding: c.select_prev.clone(),
+            },
+            BindingEntry {
+                group: "connect",
+                field: "select_next",
+                description: "next host",
+                binding: c.select_next.clone(),
+            },
+            BindingEntry {
+                group: "connect",
+                field: "connect",
+                description: "connect",
+                binding: c.connect.clone(),
+            },
+            BindingEntry {
+                group: "connect",
+                field: "browser_menu",
+                description: "file browser",
+                binding: c.browser_menu.clone(),
+            },
+            BindingEntry {
+                group: "connect",
+                field: "manual_connect",
+                description: "manual connect",
+                binding: c.manual_connect.clone(),
+            },
+            BindingEntry {
+                group: "connect",
+                field: "help",
+                description: "keybindings",
+                binding: c.help.clone(),
+            },
+            // Browser
+            BindingEntry {
+                group: "browser",
+                field: "toggle_focus",
+                description: "toggle focus",
+                binding: b.toggle_focus.clone(),
+            },
+            BindingEntry {
+                group: "browser",
+                field: "navigate_up",
+                description: "navigate up",
+                binding: b.navigate_up.clone(),
+            },
+            BindingEntry {
+                group: "browser",
+                field: "navigate_down",
+                description: "navigate down",
+                binding: b.navigate_down.clone(),
+            },
+            BindingEntry {
+                group: "browser",
+                field: "scroll_left",
+                description: "scroll left",
+                binding: b.scroll_left.clone(),
+            },
+            BindingEntry {
+                group: "browser",
+                field: "scroll_right",
+                description: "scroll right",
+                binding: b.scroll_right.clone(),
+            },
+            BindingEntry {
+                group: "browser",
+                field: "enter",
+                description: "enter / open",
+                binding: b.enter.clone(),
+            },
+            BindingEntry {
+                group: "browser",
+                field: "go_up",
+                description: "go up",
+                binding: b.go_up.clone(),
+            },
+            BindingEntry {
+                group: "browser",
+                field: "transfer",
+                description: "transfer",
+                binding: b.transfer.clone(),
+            },
+            BindingEntry {
+                group: "browser",
+                field: "delete",
+                description: "delete",
+                binding: b.delete.clone(),
+            },
+        ]
+    }
+
+    /// Update a single binding by group and field name.
+    pub fn set_binding(&mut self, group: &str, field: &str, kb: KeyBinding) {
+        match (group, field) {
+            ("global", "quit") => self.global.quit = kb,
+            ("global", "new_tab") => self.global.new_tab = kb,
+            ("global", "close") => self.global.close = kb,
+            ("global", "split_horizontal") => self.global.split_horizontal = kb,
+            ("global", "split_vertical") => self.global.split_vertical = kb,
+            ("global", "prev_pane") => self.global.prev_pane = kb,
+            ("global", "next_pane") => self.global.next_pane = kb,
+            ("global", "prev_tab") => self.global.prev_tab = kb,
+            ("global", "next_tab") => self.global.next_tab = kb,
+            ("connect", "select_prev") => self.connect.select_prev = kb,
+            ("connect", "select_next") => self.connect.select_next = kb,
+            ("connect", "connect") => self.connect.connect = kb,
+            ("connect", "browser_menu") => self.connect.browser_menu = kb,
+            ("connect", "manual_connect") => self.connect.manual_connect = kb,
+            ("connect", "help") => self.connect.help = kb,
+            ("browser", "toggle_focus") => self.browser.toggle_focus = kb,
+            ("browser", "navigate_up") => self.browser.navigate_up = kb,
+            ("browser", "navigate_down") => self.browser.navigate_down = kb,
+            ("browser", "scroll_left") => self.browser.scroll_left = kb,
+            ("browser", "scroll_right") => self.browser.scroll_right = kb,
+            ("browser", "enter") => self.browser.enter = kb,
+            ("browser", "go_up") => self.browser.go_up = kb,
+            ("browser", "transfer") => self.browser.transfer = kb,
+            ("browser", "delete") => self.browser.delete = kb,
+            _ => warn!("config: unknown binding {group}.{field}"),
+        }
+    }
+
+    /// Save all keybindings to the config file.
+    pub fn save(&self) -> Result<(), String> {
+        let Some(config_dir) = dirs::config_dir() else {
+            return Err("could not determine config directory".into());
+        };
+        let dir = config_dir.join("sshmux");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return Err(format!("could not create {}: {e}", dir.display()));
+        }
+
+        let entries = self.entries();
+        let mut toml = String::new();
+        let mut current_group = "";
+        for entry in &entries {
+            if entry.group != current_group {
+                if !toml.is_empty() {
+                    toml.push('\n');
+                }
+                toml.push_str(&format!("[{}]\n", entry.group));
+                current_group = entry.group;
+            }
+            toml.push_str(&format!(
+                "{} = \"{}\"\n",
+                entry.field,
+                entry.binding.to_config_string()
+            ));
+        }
+
+        let path = dir.join("config.toml");
+        std::fs::write(&path, &toml)
+            .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+        info!("config: saved keybindings to {}", path.display());
+        Ok(())
     }
 }
 
