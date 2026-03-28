@@ -246,6 +246,7 @@ impl Pane {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         area: Rect,
@@ -254,6 +255,7 @@ impl Pane {
         focus_idx: usize,
         leaf_count: usize,
         my_idx: &mut usize,
+        keybindings: &crate::keybindings::KeyBindings,
     ) {
         match self {
             Pane::Connect {
@@ -284,11 +286,12 @@ impl Pane {
                     .highlight_symbol("> ");
                 StatefulWidget::render(list, list_area, buf, list_state);
 
+                let help_key = format!("  {}", keybindings.connect.help);
                 buf.set_line(
                     inner.x,
                     hint_y,
                     &Line::from(vec![
-                        Span::raw("  H").style(Style::default().fg(Color::Yellow)),
+                        Span::raw(help_key).style(Style::default().fg(Color::Yellow)),
                         Span::raw(" help").style(Style::default().fg(Color::DarkGray)),
                     ]),
                     inner.width,
@@ -324,17 +327,22 @@ impl Pane {
                         StatefulWidget::render(menu_list, menu_area, buf, menu_state);
                     }
                     ConnectOverlay::Help => {
-                        let shortcuts = [
-                            ("Enter", "connect"),
-                            ("C", "connect (manual)"),
-                            ("B", "file browser"),
-                            ("Alt+T", "new tab"),
-                            ("Alt+W", "close pane / tab"),
-                            ("Alt+-", "split top/bottom"),
-                            ("Alt++", "split left/right"),
-                            ("Alt+\u{2191}\u{2193}", "cycle pane focus"),
-                            ("Alt+\u{2190}\u{2192}", "switch tab"),
-                            ("Alt+Q", "quit"),
+                        let g = &keybindings.global;
+                        let c = &keybindings.connect;
+                        let shortcuts: Vec<(String, &str)> = vec![
+                            (c.connect.to_string(), "connect"),
+                            (c.manual_connect.to_string(), "connect (manual)"),
+                            (c.browser_menu.to_string(), "file browser"),
+                            (g.new_tab.to_string(), "new tab"),
+                            (g.close.to_string(), "close pane / tab"),
+                            (g.split_horizontal.to_string(), "split top/bottom"),
+                            (g.split_vertical.to_string(), "split left/right"),
+                            (
+                                format!("{}/{}", g.prev_pane, g.next_pane),
+                                "cycle pane focus",
+                            ),
+                            (format!("{}/{}", g.prev_tab, g.next_tab), "switch tab"),
+                            (g.quit.to_string(), "quit"),
                         ];
                         let help_w = 36u16.min(inner.width.saturating_sub(2));
                         let help_h = (shortcuts.len() as u16 + 2).min(inner.height);
@@ -463,7 +471,7 @@ impl Pane {
             Pane::Split { kind, children } => {
                 let areas = split_areas(area, kind, children.len());
                 for (child, a) in children.iter_mut().zip(areas) {
-                    child.render(a, buf, hosts, focus_idx, leaf_count, my_idx);
+                    child.render(a, buf, hosts, focus_idx, leaf_count, my_idx, keybindings);
                 }
             }
         }

@@ -36,45 +36,61 @@ pub fn handle_key(
 
     let focused_pane_has_app_cursor = app.focused_pane_app_cursor();
 
-    // ---- Global shortcuts (Alt+…) ----
-    if alt && !ctrl {
-        match code {
-            KeyCode::Char('q') => return Action::Quit,
-            KeyCode::Left => {
-                if app.selected_tab > 0 {
-                    app.selected_tab -= 1;
-                } else {
-                    app.selected_tab = app.tabs.len() - 1;
-                }
-            }
-            KeyCode::Right => {
-                app.selected_tab = (app.selected_tab + 1) % app.tabs.len();
-            }
-            KeyCode::Up => app.tab_mut().focus_prev(),
-            KeyCode::Down => app.tab_mut().focus_next(),
-            KeyCode::Char('w') => {
-                let was_last_pane = app.tab().leaf_count() == 1;
-                if was_last_pane {
-                    app.close_tab();
-                } else {
-                    app.tab_mut().close_focused();
-                    app.resize_all(last_area);
-                }
-            }
-            KeyCode::Char('t') => app.new_tab(),
-            KeyCode::Char('-') => {
-                app.tab_mut().split(Split::TopBottom, pane_inner(last_area));
-            }
-            KeyCode::Char('+') => {
-                app.tab_mut().split(Split::LeftRight, pane_inner(last_area));
-            }
-            _ => {}
+    // ---- Global shortcuts ----
+    let g = &app.keybindings.global;
+    if g.quit.matches(code, ctrl, alt, shift) {
+        return Action::Quit;
+    }
+    if g.prev_tab.matches(code, ctrl, alt, shift) {
+        if app.selected_tab > 0 {
+            app.selected_tab -= 1;
+        } else {
+            app.selected_tab = app.tabs.len() - 1;
         }
+        return Action::Continue;
+    }
+    if g.next_tab.matches(code, ctrl, alt, shift) {
+        app.selected_tab = (app.selected_tab + 1) % app.tabs.len();
+        return Action::Continue;
+    }
+    if g.prev_pane.matches(code, ctrl, alt, shift) {
+        app.tab_mut().focus_prev();
+        return Action::Continue;
+    }
+    if g.next_pane.matches(code, ctrl, alt, shift) {
+        app.tab_mut().focus_next();
+        return Action::Continue;
+    }
+    if g.close.matches(code, ctrl, alt, shift) {
+        let was_last_pane = app.tab().leaf_count() == 1;
+        if was_last_pane {
+            app.close_tab();
+        } else {
+            app.tab_mut().close_focused();
+            app.resize_all(last_area);
+        }
+        return Action::Continue;
+    }
+    if g.new_tab.matches(code, ctrl, alt, shift) {
+        app.new_tab();
+        return Action::Continue;
+    }
+    if g.split_horizontal.matches(code, ctrl, alt, shift) {
+        app.tab_mut().split(Split::TopBottom, pane_inner(last_area));
+        return Action::Continue;
+    }
+    if g.split_vertical.matches(code, ctrl, alt, shift) {
+        app.tab_mut().split(Split::LeftRight, pane_inner(last_area));
+        return Action::Continue;
+    }
+
+    // Suppress unbound Alt+Char from reaching session passthrough
+    if alt && !ctrl {
         return Action::Continue;
     }
 
     // ---- Connect pane ----
-    if let Some(action) = handle_connect_key(app, code, ctrl, last_area) {
+    if let Some(action) = handle_connect_key(app, code, ctrl, shift, last_area) {
         return action;
     }
 
@@ -203,7 +219,13 @@ pub fn handle_key(
 // ---------------------------------------------------------------------------
 
 /// Returns `Some(Action)` if the focused pane is a Connect pane.
-fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect) -> Option<Action> {
+fn handle_connect_key(
+    app: &mut App,
+    code: KeyCode,
+    ctrl: bool,
+    shift: bool,
+    last_area: Rect,
+) -> Option<Action> {
     let focus_idx = app.tabs[app.selected_tab].focus_idx;
     if !matches!(
         app.tabs[app.selected_tab].root.leaf(focus_idx),
@@ -356,58 +378,54 @@ fn handle_connect_key(app: &mut App, code: KeyCode, ctrl: bool, last_area: Rect)
     }
 
     // Normal connect pane
-    match code {
-        KeyCode::Up | KeyCode::Char('k') => {
+    let cb = &app.keybindings.connect;
+    if cb.select_prev.matches(code, ctrl, false, shift)
+        || cb.select_prev_alt.matches(code, ctrl, false, shift)
+    {
+        if let Some(Pane::Connect { list_state, .. }) = app.tab_mut().focused_pane_mut() {
+            list_state.select_previous();
+        }
+    } else if cb.select_next.matches(code, ctrl, false, shift)
+        || cb.select_next_alt.matches(code, ctrl, false, shift)
+    {
+        if let Some(Pane::Connect { list_state, .. }) = app.tab_mut().focused_pane_mut() {
+            list_state.select_next();
+        }
+    } else if cb.connect.matches(code, ctrl, false, shift) {
+        let selected =
             if let Some(Pane::Connect { list_state, .. }) = app.tab_mut().focused_pane_mut() {
-                list_state.select_previous();
+                list_state.selected()
+            } else {
+                None
+            };
+        if let Some(idx) = selected {
+            if let Err(e) = app.open_session(idx, last_area) {
+                error!("open_session: {}", e);
             }
+            app.resize_all(last_area);
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if let Some(Pane::Connect { list_state, .. }) = app.tab_mut().focused_pane_mut() {
-                list_state.select_next();
-            }
+    } else if cb.browser_menu.matches(code, ctrl, false, shift) {
+        if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
+            let mut ms = ListState::default();
+            ms.select(Some(0));
+            *overlay = ConnectOverlay::BrowserMenu(ms);
         }
-        KeyCode::Enter => {
-            let selected =
-                if let Some(Pane::Connect { list_state, .. }) = app.tab_mut().focused_pane_mut() {
-                    list_state.selected()
-                } else {
-                    None
-                };
-            if let Some(idx) = selected {
-                if let Err(e) = app.open_session(idx, last_area) {
-                    error!("open_session: {}", e);
-                }
-                app.resize_all(last_area);
-            }
+    } else if cb.manual_connect.matches(code, ctrl, false, shift) {
+        if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
+            *overlay = ConnectOverlay::ConnectInput(String::new());
         }
-        KeyCode::Char('b') | KeyCode::Char('B') => {
-            if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
-                let mut ms = ListState::default();
-                ms.select(Some(0));
-                *overlay = ConnectOverlay::BrowserMenu(ms);
-            }
+    } else if cb.help.matches(code, ctrl, false, shift) {
+        if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
+            *overlay = if matches!(overlay, ConnectOverlay::Help) {
+                ConnectOverlay::None
+            } else {
+                ConnectOverlay::Help
+            };
         }
-        KeyCode::Char('c') | KeyCode::Char('C') => {
-            if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
-                *overlay = ConnectOverlay::ConnectInput(String::new());
-            }
-        }
-        KeyCode::Char('h') | KeyCode::Char('H') => {
-            if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
-                *overlay = if matches!(overlay, ConnectOverlay::Help) {
-                    ConnectOverlay::None
-                } else {
-                    ConnectOverlay::Help
-                };
-            }
-        }
-        KeyCode::Esc => {
-            if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
-                *overlay = ConnectOverlay::None;
-            }
-        }
-        _ => {}
+    } else if code == KeyCode::Esc
+        && let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut()
+    {
+        *overlay = ConnectOverlay::None;
     }
     Some(Action::Continue)
 }
@@ -452,6 +470,8 @@ fn handle_browser_key_dispatch(
         return Some(Action::Continue);
     }
 
+    let browser_bindings = app.keybindings.browser.clone();
+
     // Get a trait-object reference to whichever browser is focused.
     let browser = app
         .tab_mut()
@@ -482,7 +502,14 @@ fn handle_browser_key_dispatch(
         return Some(Action::Continue);
     }
 
-    match handle_browser_key(browser.core_mut(), code, shift) {
+    match handle_browser_key(
+        browser.core_mut(),
+        code,
+        ctrl,
+        alt,
+        shift,
+        &browser_bindings,
+    ) {
         BrowserKeyAction::Enter => browser.enter(),
         BrowserKeyAction::GoUp => browser.go_up(),
         BrowserKeyAction::Download => browser.download(),

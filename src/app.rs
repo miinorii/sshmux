@@ -8,6 +8,7 @@ use ratatui::{
 };
 
 use crate::browser::{FileBrowser, SshBrowser};
+use crate::keybindings::KeyBindings;
 use crate::pane::{Pane, pane_inner};
 use crate::ssh_config::SshHost;
 use crate::tab::Tab;
@@ -47,6 +48,7 @@ pub struct App {
     pub selected_tab: usize,
     pub hosts: Vec<SshHost>,
     pub context_menu: Option<ContextMenu>,
+    pub keybindings: KeyBindings,
 }
 
 impl App {
@@ -56,6 +58,7 @@ impl App {
             selected_tab: 0,
             hosts: crate::ssh_config::parse_ssh_config(),
             context_menu: None,
+            keybindings: KeyBindings::load(),
         }
     }
 
@@ -229,9 +232,15 @@ impl App {
         let hosts = &self.hosts;
         let mut idx = 0;
         let leaf_count = self.tabs[self.selected_tab].root.leaf_count();
-        self.tabs[self.selected_tab]
-            .root
-            .render(content, buf, hosts, focus_idx, leaf_count, &mut idx);
+        self.tabs[self.selected_tab].root.render(
+            content,
+            buf,
+            hosts,
+            focus_idx,
+            leaf_count,
+            &mut idx,
+            &self.keybindings,
+        );
 
         // Context menu overlay (on top of everything)
         if let Some(ref menu) = self.context_menu {
@@ -279,6 +288,7 @@ mod tests {
             selected_tab: 0,
             hosts: vec![],
             context_menu: None,
+            keybindings: KeyBindings::default(),
         }
     }
 

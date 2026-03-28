@@ -17,6 +17,7 @@ use ratatui::{
 
 use super::browser_layout;
 use super::parse::{FsEntry, list_drives, read_local_dir};
+use crate::keybindings::KeyBinding;
 use crate::pane::{pane_inner, render_pane_border};
 
 // ---------------------------------------------------------------------------
@@ -1427,7 +1428,14 @@ impl BrowserCore {
 /// Handle a key event for a browser in idle mode (not connecting, not waiting
 /// for password). Navigation keys are handled directly on `core`; actions that
 /// need browser-specific logic are returned as a `BrowserKeyAction`.
-pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode, shift: bool) -> BrowserKeyAction {
+pub fn handle_browser_key(
+    core: &mut BrowserCore,
+    code: KeyCode,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    bindings: &crate::keybindings::BrowserBindings,
+) -> BrowserKeyAction {
     // ---- Drop upload confirmation overlay ----
     if let Some(paths) = core.drop_confirm.as_ref() {
         match code {
@@ -1516,78 +1524,71 @@ pub fn handle_browser_key(core: &mut BrowserCore, code: KeyCode, shift: bool) ->
     }
 
     // ---- Normal mode ----
-    match code {
-        KeyCode::Tab => {
-            core.toggle_focus();
-            BrowserKeyAction::Handled
-        }
-        KeyCode::Esc => {
-            core.dismiss_drive_picker();
-            BrowserKeyAction::Handled
-        }
-        KeyCode::Up => {
-            if shift {
-                if core.select_anchor.is_none() {
-                    core.select_anchor = core.focused_index();
-                }
-                core.nav_up();
-                core.update_selection();
-            } else {
-                core.clear_selection();
-                core.nav_up();
+    let m = |kb: &KeyBinding| kb.matches(code, ctrl, alt, shift);
+
+    if m(&bindings.toggle_focus) {
+        core.toggle_focus();
+        BrowserKeyAction::Handled
+    } else if code == KeyCode::Esc {
+        core.dismiss_drive_picker();
+        BrowserKeyAction::Handled
+    } else if m(&bindings.navigate_up) {
+        if shift {
+            if core.select_anchor.is_none() {
+                core.select_anchor = core.focused_index();
             }
-            BrowserKeyAction::Handled
-        }
-        KeyCode::Down => {
-            if shift {
-                if core.select_anchor.is_none() {
-                    core.select_anchor = core.focused_index();
-                }
-                core.nav_down();
-                core.update_selection();
-            } else {
-                core.clear_selection();
-                core.nav_down();
-            }
-            BrowserKeyAction::Handled
-        }
-        KeyCode::Left => {
-            core.scroll_left();
-            BrowserKeyAction::Handled
-        }
-        KeyCode::Right => {
-            core.scroll_right();
-            BrowserKeyAction::Handled
-        }
-        KeyCode::Char(' ') | KeyCode::Enter => {
+            core.nav_up();
+            core.update_selection();
+        } else {
             core.clear_selection();
-            BrowserKeyAction::Enter
+            core.nav_up();
         }
-        KeyCode::Backspace => {
+        BrowserKeyAction::Handled
+    } else if m(&bindings.navigate_down) {
+        if shift {
+            if core.select_anchor.is_none() {
+                core.select_anchor = core.focused_index();
+            }
+            core.nav_down();
+            core.update_selection();
+        } else {
             core.clear_selection();
-            BrowserKeyAction::GoUp
+            core.nav_down();
         }
-        KeyCode::Char('t') => {
-            let indices = core.selected_indices();
-            if indices.len() > 1 {
-                core.queue_transfers_from_indices(&indices);
-                core.clear_selection();
-            }
-            match core.focus {
-                BrowserFocus::Remote => BrowserKeyAction::Download,
-                BrowserFocus::Local => BrowserKeyAction::Upload,
-            }
+        BrowserKeyAction::Handled
+    } else if m(&bindings.scroll_left) {
+        core.scroll_left();
+        BrowserKeyAction::Handled
+    } else if m(&bindings.scroll_right) {
+        core.scroll_right();
+        BrowserKeyAction::Handled
+    } else if m(&bindings.enter) || m(&bindings.enter_alt) {
+        core.clear_selection();
+        BrowserKeyAction::Enter
+    } else if m(&bindings.go_up) {
+        core.clear_selection();
+        BrowserKeyAction::GoUp
+    } else if m(&bindings.transfer) {
+        let indices = core.selected_indices();
+        if indices.len() > 1 {
+            core.queue_transfers_from_indices(&indices);
+            core.clear_selection();
         }
-        KeyCode::Delete => BrowserKeyAction::Delete,
+        match core.focus {
+            BrowserFocus::Remote => BrowserKeyAction::Download,
+            BrowserFocus::Local => BrowserKeyAction::Upload,
+        }
+    } else if m(&bindings.delete) {
+        BrowserKeyAction::Delete
+    } else if let KeyCode::Char(c) = code {
         // Unrecognized char: start paste accumulation (no redraw to avoid
         // hundreds of draws while characters stream in from a file drop)
-        KeyCode::Char(c) => {
-            debug!("paste accumulation started with char {:?}", c);
-            core.paste_buf.push(c);
-            core.paste_deadline = Some(Instant::now() + Duration::from_millis(150));
-            BrowserKeyAction::Handled
-        }
-        _ => BrowserKeyAction::Handled,
+        debug!("paste accumulation started with char {:?}", c);
+        core.paste_buf.push(c);
+        core.paste_deadline = Some(Instant::now() + Duration::from_millis(150));
+        BrowserKeyAction::Handled
+    } else {
+        BrowserKeyAction::Handled
     }
 }
 
@@ -1657,6 +1658,7 @@ fn find_path_boundary(s: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keybindings::BrowserBindings;
 
     fn dummy_entry(name: &str, is_dir: bool) -> FsEntry {
         FsEntry {
@@ -1932,7 +1934,14 @@ mod tests {
     fn key_tab_toggles_focus() {
         let mut core = BrowserCore::new("host");
         assert_eq!(core.focus, BrowserFocus::Local);
-        let action = handle_browser_key(&mut core, KeyCode::Tab, false);
+        let action = handle_browser_key(
+            &mut core,
+            KeyCode::Tab,
+            false,
+            false,
+            false,
+            &BrowserBindings::default(),
+        );
         assert!(matches!(action, BrowserKeyAction::Handled));
         assert_eq!(core.focus, BrowserFocus::Remote);
     }
@@ -1941,7 +1950,14 @@ mod tests {
     fn key_enter_returns_enter_action() {
         let mut core = BrowserCore::new("host");
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::Enter, false),
+            handle_browser_key(
+                &mut core,
+                KeyCode::Enter,
+                false,
+                false,
+                false,
+                &BrowserBindings::default()
+            ),
             BrowserKeyAction::Enter
         ));
     }
@@ -1950,7 +1966,14 @@ mod tests {
     fn key_space_returns_enter_action() {
         let mut core = BrowserCore::new("host");
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::Char(' '), false),
+            handle_browser_key(
+                &mut core,
+                KeyCode::Char(' '),
+                false,
+                false,
+                false,
+                &BrowserBindings::default()
+            ),
             BrowserKeyAction::Enter
         ));
     }
@@ -1959,7 +1982,14 @@ mod tests {
     fn key_backspace_returns_go_up() {
         let mut core = BrowserCore::new("host");
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::Backspace, false),
+            handle_browser_key(
+                &mut core,
+                KeyCode::Backspace,
+                false,
+                false,
+                false,
+                &BrowserBindings::default()
+            ),
             BrowserKeyAction::GoUp
         ));
     }
@@ -1969,7 +1999,14 @@ mod tests {
         let mut core = BrowserCore::new("host");
         core.focus = BrowserFocus::Remote;
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::Char('t'), false),
+            handle_browser_key(
+                &mut core,
+                KeyCode::Char('t'),
+                false,
+                false,
+                false,
+                &BrowserBindings::default()
+            ),
             BrowserKeyAction::Download
         ));
     }
@@ -1979,7 +2016,14 @@ mod tests {
         let mut core = BrowserCore::new("host");
         core.focus = BrowserFocus::Local;
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::Char('t'), false),
+            handle_browser_key(
+                &mut core,
+                KeyCode::Char('t'),
+                false,
+                false,
+                false,
+                &BrowserBindings::default()
+            ),
             BrowserKeyAction::Upload
         ));
     }
@@ -1988,7 +2032,14 @@ mod tests {
     fn key_delete_returns_delete() {
         let mut core = BrowserCore::new("host");
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::Delete, false),
+            handle_browser_key(
+                &mut core,
+                KeyCode::Delete,
+                false,
+                false,
+                false,
+                &BrowserBindings::default()
+            ),
             BrowserKeyAction::Delete
         ));
     }
@@ -1997,7 +2048,14 @@ mod tests {
     fn key_unknown_returns_handled() {
         let mut core = BrowserCore::new("host");
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::F(5), false),
+            handle_browser_key(
+                &mut core,
+                KeyCode::F(5),
+                false,
+                false,
+                false,
+                &BrowserBindings::default()
+            ),
             BrowserKeyAction::Handled
         ));
     }
@@ -2009,7 +2067,14 @@ mod tests {
         let mut core = BrowserCore::new("host");
         core.confirm_delete = Some("remote:file:/tmp/x".to_string());
         assert!(matches!(
-            handle_browser_key(&mut core, KeyCode::Char('y'), false),
+            handle_browser_key(
+                &mut core,
+                KeyCode::Char('y'),
+                false,
+                false,
+                false,
+                &BrowserBindings::default()
+            ),
             BrowserKeyAction::ConfirmDeleteYes
         ));
     }
@@ -2018,7 +2083,14 @@ mod tests {
     fn key_n_during_confirm_cancels() {
         let mut core = BrowserCore::new("host");
         core.confirm_delete = Some("remote:file:/tmp/x".to_string());
-        let action = handle_browser_key(&mut core, KeyCode::Char('n'), false);
+        let action = handle_browser_key(
+            &mut core,
+            KeyCode::Char('n'),
+            false,
+            false,
+            false,
+            &BrowserBindings::default(),
+        );
         assert!(matches!(action, BrowserKeyAction::Handled));
         assert!(core.confirm_delete.is_none());
     }
@@ -2027,7 +2099,14 @@ mod tests {
     fn key_esc_during_confirm_cancels() {
         let mut core = BrowserCore::new("host");
         core.confirm_delete = Some("remote:file:/tmp/x".to_string());
-        let action = handle_browser_key(&mut core, KeyCode::Esc, false);
+        let action = handle_browser_key(
+            &mut core,
+            KeyCode::Esc,
+            false,
+            false,
+            false,
+            &BrowserBindings::default(),
+        );
         assert!(matches!(action, BrowserKeyAction::Handled));
         assert!(core.confirm_delete.is_none());
     }
@@ -2036,7 +2115,14 @@ mod tests {
     fn key_random_during_confirm_is_swallowed() {
         let mut core = BrowserCore::new("host");
         core.confirm_delete = Some("remote:file:/tmp/x".to_string());
-        let action = handle_browser_key(&mut core, KeyCode::Char('z'), false);
+        let action = handle_browser_key(
+            &mut core,
+            KeyCode::Char('z'),
+            false,
+            false,
+            false,
+            &BrowserBindings::default(),
+        );
         assert!(matches!(action, BrowserKeyAction::Handled));
         // confirm_delete is still active
         assert!(core.confirm_delete.is_some());

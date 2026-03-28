@@ -21,6 +21,7 @@ use time::OffsetDateTime;
 mod app;
 mod browser;
 mod input;
+mod keybindings;
 mod pane;
 mod ssh_config;
 mod tab;
