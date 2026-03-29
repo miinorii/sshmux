@@ -5,7 +5,9 @@ use crossterm::event::KeyCode;
 use log::{debug, info, warn};
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
-use super::common::{Browser, BrowserCore, BrowserFocus, TransferDirection, TransferStatus};
+use super::common::{
+    Browser, BrowserCore, BrowserFocus, DeleteLocation, TransferDirection, TransferStatus,
+};
 use super::parse::{
     parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote, strip_ansi,
 };
@@ -457,27 +459,26 @@ impl FileBrowser {
         if self.core.local_confirm_delete() {
             return;
         }
-        if let Some(tagged) = self.core.confirm_delete.take()
-            && let Some(rest) = tagged.strip_prefix("remote:")
-        {
-            let is_dir = rest.starts_with("dir:");
-            let name = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
-            info!("SFTP remote delete: {}", name);
+        if let Some(target) = self.core.confirm_delete.take() {
+            if target.location != DeleteLocation::Remote {
+                return;
+            }
+            info!("SFTP remote delete: {}", target.path);
             // SFTP protocol only supports rmdir (non-recursive). Non-empty dirs will fail.
             // The SSH/SCP browser uses `rm -rf` via shell, which handles non-empty dirs.
-            let cmd = if is_dir {
-                format!("rmdir {}\r\n", shell_quote(name))
+            let cmd = if target.is_dir() {
+                format!("rmdir {}\r\n", shell_quote(&target.path))
             } else {
-                format!("rm {}\r\n", shell_quote(name))
+                format!("rm {}\r\n", shell_quote(&target.path))
             };
             self.sftp.drain_raw();
             self.core.prev_raw_len = 0;
             self.core.prompt_stable = 0;
             self.sftp.send_str(&cmd);
             self.sftp_state = SftpState::WaitingDelete;
-            self.core.status_msg = format!("Deleting {}...", name);
+            self.core.status_msg = format!("Deleting {}...", target.path);
             self.core.status_color = Color::Yellow;
-            self.core.pending_delete_name = Some(name.to_string());
+            self.core.pending_delete_name = Some(target.path);
             self.core.needs_redraw = true;
         }
     }
@@ -535,6 +536,9 @@ impl FileBrowser {
 }
 
 impl Browser for FileBrowser {
+    fn core(&self) -> &BrowserCore {
+        &self.core
+    }
     fn core_mut(&mut self) -> &mut BrowserCore {
         &mut self.core
     }

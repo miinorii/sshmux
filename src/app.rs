@@ -49,6 +49,7 @@ pub struct App {
     pub hosts: Vec<SshHost>,
     pub context_menu: Option<ContextMenu>,
     pub keybindings: KeyBindings,
+    next_tab_id: usize,
 }
 
 impl App {
@@ -59,6 +60,7 @@ impl App {
             hosts: crate::ssh_config::parse_ssh_config(),
             context_menu: None,
             keybindings: KeyBindings::load(),
+            next_tab_id: 2,
         }
     }
 
@@ -94,11 +96,10 @@ impl App {
     /// Returns true when the focused browser pane is accumulating paste chars.
     /// Used to suppress unnecessary redraws during file-drop detection.
     pub fn paste_accumulating(&self) -> bool {
-        match self.tab().focused_pane() {
-            Some(Pane::FileBrowser { browser }) => !browser.core.paste_buf.is_empty(),
-            Some(Pane::SshBrowser { browser }) => !browser.core.paste_buf.is_empty(),
-            _ => false,
-        }
+        self.tab()
+            .focused_pane()
+            .and_then(|p| p.as_browser())
+            .is_some_and(|b| !b.core().paste_buf.is_empty())
     }
 
     pub fn open_session(&mut self, host_idx: usize, area: Rect) -> Result<()> {
@@ -187,7 +188,8 @@ impl App {
     }
 
     pub fn new_tab(&mut self) {
-        let name = (self.tabs.len() + 1).to_string();
+        let name = self.next_tab_id.to_string();
+        self.next_tab_id += 1;
         self.tabs.push(Tab::new(&name));
         self.selected_tab = self.tabs.len() - 1;
     }
@@ -195,6 +197,7 @@ impl App {
     pub fn close_tab(&mut self) {
         self.tabs.remove(self.selected_tab);
         if self.tabs.is_empty() {
+            self.next_tab_id = 2;
             self.tabs.push(Tab::new("1"));
             self.selected_tab = 0;
         } else if self.selected_tab >= self.tabs.len() {
@@ -289,6 +292,7 @@ mod tests {
             hosts: vec![],
             context_menu: None,
             keybindings: KeyBindings::default(),
+            next_tab_id: 2,
         }
     }
 
@@ -334,6 +338,28 @@ mod tests {
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.selected_tab, 0);
         assert_eq!(app.tabs[0].name, "1");
+    }
+
+    #[test]
+    fn new_tab_after_close_uses_monotonic_id() {
+        let mut app = make_app();
+        app.new_tab(); // "2"
+        app.new_tab(); // "3"
+        app.selected_tab = 0;
+        app.close_tab(); // removes "1", tabs are ["2", "3"]
+        app.new_tab(); // should be "4", not "3"
+        assert_eq!(app.tabs.last().unwrap().name, "4");
+    }
+
+    #[test]
+    fn close_all_tabs_resets_counter() {
+        let mut app = make_app();
+        app.new_tab(); // "2"
+        app.close_tab(); // closes "2"
+        app.close_tab(); // closes "1", recreates default "1"
+        assert_eq!(app.tabs[0].name, "1");
+        app.new_tab(); // should be "2" (counter reset)
+        assert_eq!(app.tabs[1].name, "2");
     }
 
     #[test]

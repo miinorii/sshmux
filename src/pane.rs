@@ -86,12 +86,15 @@ pub fn editor_binding_index(display_idx: usize) -> Option<usize> {
 /// Move selection to next non-header row (wrapping).
 pub fn editor_nav_down(list_state: &mut ListState) {
     let cur = list_state.selected().unwrap_or(0);
-    let mut next = cur + 1;
-    if next >= EDITOR_ROW_COUNT {
-        next = 1; // wrap to first binding
-    }
-    if is_editor_header(next) {
+    let mut next = cur;
+    for _ in 0..EDITOR_ROW_COUNT {
         next += 1;
+        if next >= EDITOR_ROW_COUNT {
+            next = 1; // wrap to first binding (skip header at 0)
+        }
+        if !is_editor_header(next) {
+            break;
+        }
     }
     list_state.select(Some(next));
 }
@@ -99,17 +102,16 @@ pub fn editor_nav_down(list_state: &mut ListState) {
 /// Move selection to previous non-header row (wrapping).
 pub fn editor_nav_up(list_state: &mut ListState) {
     let cur = list_state.selected().unwrap_or(0);
-    let mut prev = if cur == 0 {
-        EDITOR_ROW_COUNT - 1
-    } else {
-        cur - 1
-    };
-    if is_editor_header(prev) {
-        prev = if prev == 0 {
-            EDITOR_ROW_COUNT - 1
+    let mut prev = cur;
+    for _ in 0..EDITOR_ROW_COUNT {
+        if prev == 0 {
+            prev = EDITOR_ROW_COUNT - 1;
         } else {
-            prev - 1
-        };
+            prev -= 1;
+        }
+        if !is_editor_header(prev) {
+            break;
+        }
     }
     list_state.select(Some(prev));
 }
@@ -153,6 +155,15 @@ impl Pane {
     /// Returns `true` if this pane is a browser (SFTP or SCP).
     pub fn is_browser(&self) -> bool {
         matches!(self, Pane::FileBrowser { .. } | Pane::SshBrowser { .. })
+    }
+
+    /// Returns this pane as a `&dyn Browser` if it is a browser pane.
+    pub fn as_browser(&self) -> Option<&dyn Browser> {
+        match self {
+            Pane::FileBrowser { browser } => Some(browser),
+            Pane::SshBrowser { browser } => Some(browser),
+            _ => None,
+        }
     }
 
     /// Returns this pane as a `&mut dyn Browser` if it is a browser pane.
@@ -1024,5 +1035,74 @@ mod tests {
     fn split_areas_vertical_remainder() {
         let a = split_areas(r(80, 31), &Split::TopBottom, 2);
         assert_eq!(a[0].height + a[1].height, 31);
+    }
+
+    // ---- editor navigation --------------------------------------------------
+
+    #[test]
+    fn editor_nav_down_skips_headers() {
+        let mut ls = ListState::default();
+        // Start just before a header
+        ls.select(Some(HEADER_CONNECT - 1)); // last global binding
+        editor_nav_down(&mut ls);
+        let sel = ls.selected().unwrap();
+        assert!(!is_editor_header(sel));
+        assert_eq!(sel, HEADER_CONNECT + 1); // first connect binding
+    }
+
+    #[test]
+    fn editor_nav_up_skips_headers() {
+        let mut ls = ListState::default();
+        // Start just after a header
+        ls.select(Some(HEADER_CONNECT + 1)); // first connect binding
+        editor_nav_up(&mut ls);
+        let sel = ls.selected().unwrap();
+        assert!(!is_editor_header(sel));
+        assert_eq!(sel, HEADER_CONNECT - 1); // last global binding
+    }
+
+    #[test]
+    fn editor_nav_down_wraps_to_first_binding() {
+        let mut ls = ListState::default();
+        ls.select(Some(EDITOR_ROW_COUNT - 1)); // last row
+        editor_nav_down(&mut ls);
+        let sel = ls.selected().unwrap();
+        assert!(!is_editor_header(sel));
+        assert_eq!(sel, 1); // first binding (index 0 is header)
+    }
+
+    #[test]
+    fn editor_nav_up_wraps_to_last_binding() {
+        let mut ls = ListState::default();
+        ls.select(Some(1)); // first binding
+        editor_nav_up(&mut ls);
+        let sel = ls.selected().unwrap();
+        assert!(!is_editor_header(sel));
+        assert_eq!(sel, EDITOR_ROW_COUNT - 1);
+    }
+
+    #[test]
+    fn editor_nav_never_lands_on_header() {
+        // Exhaustively verify for all starting positions
+        for start in 0..EDITOR_ROW_COUNT {
+            let mut ls = ListState::default();
+            ls.select(Some(start));
+            editor_nav_down(&mut ls);
+            assert!(
+                !is_editor_header(ls.selected().unwrap()),
+                "nav_down from {} landed on header {}",
+                start,
+                ls.selected().unwrap()
+            );
+
+            ls.select(Some(start));
+            editor_nav_up(&mut ls);
+            assert!(
+                !is_editor_header(ls.selected().unwrap()),
+                "nav_up from {} landed on header {}",
+                start,
+                ls.selected().unwrap()
+            );
+        }
     }
 }

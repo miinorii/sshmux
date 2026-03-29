@@ -53,6 +53,38 @@ pub struct PendingTransfer {
     pub is_dir: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeleteLocation {
+    Local,
+    Remote,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeleteKind {
+    File,
+    Dir,
+}
+
+#[derive(Clone, Debug)]
+pub struct DeleteTarget {
+    pub location: DeleteLocation,
+    pub kind: DeleteKind,
+    pub path: String,
+}
+
+impl DeleteTarget {
+    pub fn is_dir(&self) -> bool {
+        self.kind == DeleteKind::Dir
+    }
+
+    pub fn display_side(&self) -> &'static str {
+        match self.location {
+            DeleteLocation::Local => "local",
+            DeleteLocation::Remote => "remote",
+        }
+    }
+}
+
 /// Action returned by `handle_browser_key` for browser-specific operations.
 pub enum BrowserKeyAction {
     Handled,
@@ -80,6 +112,7 @@ pub struct DragState {
 
 /// Shared interface for browser panes (SFTP and SCP).
 pub trait Browser {
+    fn core(&self) -> &BrowserCore;
     fn core_mut(&mut self) -> &mut BrowserCore;
     fn upload(&mut self);
     fn download(&mut self);
@@ -113,7 +146,7 @@ pub struct BrowserCore {
     pub status_msg: String,
     pub raw_snapshot: Vec<String>,
     pub needs_redraw: bool,
-    pub confirm_delete: Option<String>,
+    pub confirm_delete: Option<DeleteTarget>,
     pub pending_delete_name: Option<String>,
     pub drive_picker: Option<(Vec<PathBuf>, ListState)>,
     pub status_color: Color,
@@ -128,7 +161,7 @@ pub struct BrowserCore {
     pub select_anchor: Option<usize>,
     // ---- multi-transfer queues ----
     pub pending_transfers: Vec<PendingTransfer>,
-    pub pending_deletes: Vec<String>, // tagged delete strings queued for batch delete
+    pub pending_deletes: Vec<DeleteTarget>,
     // ---- drag-and-drop paste detection ----
     pub paste_buf: String,
     pub paste_deadline: Option<Instant>,
@@ -508,25 +541,32 @@ impl BrowserCore {
                 return;
             }
             let full_path = self.local_path.join(&entry.name);
-            let kind = if entry.is_dir { "dir" } else { "file" };
-            self.confirm_delete = Some(format!("local:{}:{}", kind, full_path.to_string_lossy()));
+            self.confirm_delete = Some(DeleteTarget {
+                location: DeleteLocation::Local,
+                kind: if entry.is_dir {
+                    DeleteKind::Dir
+                } else {
+                    DeleteKind::File
+                },
+                path: full_path.to_string_lossy().into_owned(),
+            });
             self.needs_redraw = true;
         }
     }
 
     /// Execute a confirmed local delete. Returns true if handled.
+    /// A single confirmation deletes the entire local batch (no async round
+    /// trip needed), matching the remote UX where one `y` covers the selection.
     pub fn local_confirm_delete(&mut self) -> bool {
         loop {
-            let Some(ref tagged) = self.confirm_delete else {
+            let Some(ref target) = self.confirm_delete else {
                 return false;
             };
-            let Some(rest) = tagged.strip_prefix("local:") else {
+            if target.location != DeleteLocation::Local {
                 return false;
-            };
-            let is_dir = rest.starts_with("dir:");
-            let full_path = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
-            let path = PathBuf::from(full_path);
-            let result = if is_dir {
+            }
+            let path = PathBuf::from(&target.path);
+            let result = if target.is_dir() {
                 std::fs::remove_dir_all(&path)
             } else {
                 std::fs::remove_file(&path)
@@ -537,8 +577,8 @@ impl BrowserCore {
                 self.status_color = Color::Red;
                 self.pending_deletes.clear();
             } else {
-                info!("local delete ok: {}", full_path);
-                self.status_msg = format!("Deleted: {}", full_path);
+                info!("local delete ok: {}", target.path);
+                self.status_msg = format!("Deleted: {}", target.path);
                 self.status_color = Color::Green;
                 self.local_entries = read_local_dir(&self.local_path);
             }
@@ -552,7 +592,7 @@ impl BrowserCore {
         true
     }
 
-    /// Build tagged delete strings for local multi-select deletion.
+    /// Build delete targets for local multi-select deletion.
     /// Queues all selected items and shows confirmation for the first one.
     pub fn local_delete_selected(&mut self) {
         let indices = self.selected_indices();
@@ -561,7 +601,7 @@ impl BrowserCore {
             self.local_delete_focused();
             return;
         }
-        let mut tags: Vec<String> = Vec::new();
+        let mut targets: Vec<DeleteTarget> = Vec::new();
         for &i in &indices {
             let Some(entry) = self.local_entries.get(i) else {
                 continue;
@@ -570,12 +610,19 @@ impl BrowserCore {
                 continue;
             }
             let full_path = self.local_path.join(&entry.name);
-            let kind = if entry.is_dir { "dir" } else { "file" };
-            tags.push(format!("local:{}:{}", kind, full_path.to_string_lossy()));
+            targets.push(DeleteTarget {
+                location: DeleteLocation::Local,
+                kind: if entry.is_dir {
+                    DeleteKind::Dir
+                } else {
+                    DeleteKind::File
+                },
+                path: full_path.to_string_lossy().into_owned(),
+            });
         }
         self.clear_selection();
-        if let Some(first) = tags.first().cloned() {
-            self.pending_deletes = tags[1..].to_vec();
+        if let Some(first) = targets.first().cloned() {
+            self.pending_deletes = targets[1..].to_vec();
             self.confirm_delete = Some(first);
             self.needs_redraw = true;
         }
@@ -584,12 +631,11 @@ impl BrowserCore {
     /// Pop the next pending delete and set it as confirm_delete.
     /// Returns true if there was a next item to delete.
     pub fn pop_pending_delete(&mut self) -> bool {
-        if let Some(next) = self.pending_deletes.first().cloned() {
-            self.pending_deletes.remove(0);
-            self.confirm_delete = Some(next);
-            true
-        } else {
+        if self.pending_deletes.is_empty() {
             false
+        } else {
+            self.confirm_delete = Some(self.pending_deletes.remove(0));
+            true
         }
     }
 
@@ -645,12 +691,12 @@ impl BrowserCore {
         self.needs_redraw = true;
     }
 
-    /// Build tagged delete strings for remote multi-select or single-item deletion.
+    /// Build delete targets for remote multi-select or single-item deletion.
     /// Sets `confirm_delete` for the first item and queues the rest in `pending_deletes`.
     pub fn remote_delete_focused(&mut self) {
         let indices = self.selected_indices();
         if indices.len() > 1 {
-            let mut tags: Vec<String> = Vec::new();
+            let mut targets: Vec<DeleteTarget> = Vec::new();
             for &i in &indices {
                 let Some(entry) = self.remote_entries.get(i) else {
                     continue;
@@ -660,12 +706,19 @@ impl BrowserCore {
                 }
                 let full_path =
                     format!("{}/{}", self.remote_path.trim_end_matches('/'), entry.name);
-                let kind = if entry.is_dir { "dir" } else { "file" };
-                tags.push(format!("remote:{}:{}", kind, full_path));
+                targets.push(DeleteTarget {
+                    location: DeleteLocation::Remote,
+                    kind: if entry.is_dir {
+                        DeleteKind::Dir
+                    } else {
+                        DeleteKind::File
+                    },
+                    path: full_path,
+                });
             }
             self.clear_selection();
-            if let Some(first) = tags.first().cloned() {
-                self.pending_deletes = tags[1..].to_vec();
+            if let Some(first) = targets.first().cloned() {
+                self.pending_deletes = targets[1..].to_vec();
                 self.confirm_delete = Some(first);
                 self.needs_redraw = true;
             }
@@ -680,8 +733,15 @@ impl BrowserCore {
                 }
                 let full_path =
                     format!("{}/{}", self.remote_path.trim_end_matches('/'), entry.name);
-                let kind = if entry.is_dir { "dir" } else { "file" };
-                self.confirm_delete = Some(format!("remote:{}:{}", kind, full_path));
+                self.confirm_delete = Some(DeleteTarget {
+                    location: DeleteLocation::Remote,
+                    kind: if entry.is_dir {
+                        DeleteKind::Dir
+                    } else {
+                        DeleteKind::File
+                    },
+                    path: full_path,
+                });
                 self.needs_redraw = true;
             }
         }
@@ -1040,17 +1100,11 @@ impl BrowserCore {
 
     /// Render delete confirmation bar. Returns true if rendered.
     pub fn render_confirm_delete(&self, area: Rect, buf: &mut Buffer) -> bool {
-        let Some(ref tagged) = self.confirm_delete else {
+        let Some(ref target) = self.confirm_delete else {
             return false;
         };
-        let (side, rest) = if let Some(r) = tagged.strip_prefix("local:") {
-            ("local", r)
-        } else if let Some(r) = tagged.strip_prefix("remote:") {
-            ("remote", r)
-        } else {
-            ("", tagged.as_str())
-        };
-        let name = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
+        let side = target.display_side();
+        let name = &target.path;
         let remaining = self.pending_deletes.len();
         let msg = if remaining > 0 {
             format!(
@@ -1103,8 +1157,10 @@ impl BrowserCore {
         lines.push(Line::from(""));
         for path in &visible_files {
             let full = format!("  {}", path.display());
-            let display = if scroll_x > 0 && scroll_x < full.len() {
-                format!("…{}", &full[scroll_x + 1..])
+            let char_count = full.chars().count();
+            let display = if scroll_x > 0 && scroll_x < char_count {
+                let rest: String = full.chars().skip(scroll_x + 1).collect();
+                format!("…{}", rest)
             } else {
                 full
             };
@@ -1858,7 +1914,11 @@ mod tests {
     #[test]
     fn confirm_delete_no_clears_state() {
         let mut core = BrowserCore::new("host");
-        core.confirm_delete = Some("remote:file:/tmp/test.txt".to_string());
+        core.confirm_delete = Some(DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::File,
+            path: "/tmp/test.txt".to_string(),
+        });
         core.confirm_delete_no();
         assert!(core.confirm_delete.is_none());
         assert_eq!(core.status_msg, "Deletion cancelled.");
@@ -1876,9 +1936,10 @@ mod tests {
         core.local_sel.select(Some(1));
         core.local_delete_focused();
         assert!(core.confirm_delete.is_some());
-        let tag = core.confirm_delete.unwrap();
-        assert!(tag.starts_with("local:file:"));
-        assert!(tag.contains("myfile.txt"));
+        let target = core.confirm_delete.unwrap();
+        assert_eq!(target.location, DeleteLocation::Local);
+        assert_eq!(target.kind, DeleteKind::File);
+        assert!(target.path.contains("myfile.txt"));
     }
 
     #[test]
@@ -1888,6 +1949,82 @@ mod tests {
         core.local_sel.select(Some(0));
         core.local_delete_focused();
         assert!(core.confirm_delete.is_none());
+    }
+
+    #[test]
+    fn local_delete_focused_dir_sets_dir_kind() {
+        let mut core = BrowserCore::new("host");
+        core.local_entries = vec![dummy_entry("..", true), dummy_entry("subdir", true)];
+        core.local_sel.select(Some(1));
+        core.local_delete_focused();
+        let target = core.confirm_delete.unwrap();
+        assert_eq!(target.location, DeleteLocation::Local);
+        assert_eq!(target.kind, DeleteKind::Dir);
+    }
+
+    #[test]
+    fn remote_delete_focused_single() {
+        let mut core = BrowserCore::new("host");
+        core.remote_path = "/home/user".to_string();
+        core.remote_entries = vec![dummy_entry("..", true), dummy_entry("file.txt", false)];
+        core.remote_sel.select(Some(1));
+        core.remote_delete_focused();
+        let target = core.confirm_delete.unwrap();
+        assert_eq!(target.location, DeleteLocation::Remote);
+        assert_eq!(target.kind, DeleteKind::File);
+        assert_eq!(target.path, "/home/user/file.txt");
+    }
+
+    #[test]
+    fn remote_delete_focused_skips_dotdot() {
+        let mut core = BrowserCore::new("host");
+        core.remote_path = "/home".to_string();
+        core.remote_entries = vec![dummy_entry("..", true)];
+        core.remote_sel.select(Some(0));
+        core.remote_delete_focused();
+        assert!(core.confirm_delete.is_none());
+    }
+
+    #[test]
+    fn pop_pending_delete_cycles_targets() {
+        let mut core = BrowserCore::new("host");
+        core.pending_deletes = vec![
+            DeleteTarget {
+                location: DeleteLocation::Remote,
+                kind: DeleteKind::File,
+                path: "/a".to_string(),
+            },
+            DeleteTarget {
+                location: DeleteLocation::Remote,
+                kind: DeleteKind::Dir,
+                path: "/b".to_string(),
+            },
+        ];
+        assert!(core.pop_pending_delete());
+        assert_eq!(core.confirm_delete.as_ref().unwrap().path, "/a");
+        assert_eq!(core.pending_deletes.len(), 1);
+        assert!(core.pop_pending_delete());
+        assert_eq!(core.confirm_delete.as_ref().unwrap().path, "/b");
+        assert!(core.pending_deletes.is_empty());
+        assert!(!core.pop_pending_delete());
+    }
+
+    #[test]
+    fn delete_target_display_side() {
+        let local = DeleteTarget {
+            location: DeleteLocation::Local,
+            kind: DeleteKind::File,
+            path: "/x".to_string(),
+        };
+        let remote = DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::Dir,
+            path: "/y".to_string(),
+        };
+        assert_eq!(local.display_side(), "local");
+        assert_eq!(remote.display_side(), "remote");
+        assert!(!local.is_dir());
+        assert!(remote.is_dir());
     }
 
     // ---- stop_timer ---------------------------------------------------------
@@ -2050,7 +2187,11 @@ mod tests {
     #[test]
     fn key_y_during_confirm_returns_confirm_yes() {
         let mut core = BrowserCore::new("host");
-        core.confirm_delete = Some("remote:file:/tmp/x".to_string());
+        core.confirm_delete = Some(DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::File,
+            path: "/tmp/x".to_string(),
+        });
         assert!(matches!(
             handle_browser_key(
                 &mut core,
@@ -2067,7 +2208,11 @@ mod tests {
     #[test]
     fn key_n_during_confirm_cancels() {
         let mut core = BrowserCore::new("host");
-        core.confirm_delete = Some("remote:file:/tmp/x".to_string());
+        core.confirm_delete = Some(DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::File,
+            path: "/tmp/x".to_string(),
+        });
         let action = handle_browser_key(
             &mut core,
             KeyCode::Char('n'),
@@ -2083,7 +2228,11 @@ mod tests {
     #[test]
     fn key_esc_during_confirm_cancels() {
         let mut core = BrowserCore::new("host");
-        core.confirm_delete = Some("remote:file:/tmp/x".to_string());
+        core.confirm_delete = Some(DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::File,
+            path: "/tmp/x".to_string(),
+        });
         let action = handle_browser_key(
             &mut core,
             KeyCode::Esc,
@@ -2099,7 +2248,11 @@ mod tests {
     #[test]
     fn key_random_during_confirm_is_swallowed() {
         let mut core = BrowserCore::new("host");
-        core.confirm_delete = Some("remote:file:/tmp/x".to_string());
+        core.confirm_delete = Some(DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::File,
+            path: "/tmp/x".to_string(),
+        });
         let action = handle_browser_key(
             &mut core,
             KeyCode::Char('z'),

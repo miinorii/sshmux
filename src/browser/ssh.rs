@@ -11,7 +11,9 @@ use ratatui::{
     text::Span,
 };
 
-use super::common::{Browser, BrowserCore, BrowserFocus, TransferDirection, TransferStatus};
+use super::common::{
+    Browser, BrowserCore, BrowserFocus, DeleteLocation, TransferDirection, TransferStatus,
+};
 use super::parse::{
     parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote, strip_ansi,
 };
@@ -362,8 +364,14 @@ impl SshBrowser {
                     }
                     self.ssh.drain_raw();
                     self.core.prev_raw_len = 0;
-                    self.send_ls();
-                    self.ssh_state = SshBrowserState::WaitingLs;
+                    // Skip the ls round-trip when more deletes are queued —
+                    // chain directly to the next delete instead.
+                    if !has_error && self.core.pop_pending_delete() {
+                        self.confirm_delete_yes();
+                    } else {
+                        self.send_ls();
+                        self.ssh_state = SshBrowserState::WaitingLs;
+                    }
                     self.core.needs_redraw = true;
                 }
             }
@@ -668,22 +676,25 @@ impl SshBrowser {
         if self.core.local_confirm_delete() {
             return;
         }
-        if let Some(tagged) = self.core.confirm_delete.take()
-            && let Some(rest) = tagged.strip_prefix("remote:")
-        {
-            let is_dir = rest.starts_with("dir:");
-            let full_path = rest.split_once(':').map(|(_, n)| n).unwrap_or(rest);
-            info!("SSH remote delete: {} is_dir={}", full_path, is_dir);
-            let cmd = if is_dir {
-                format!("rm -rf -- {}\r\n", shell_quote(full_path))
+        if let Some(target) = self.core.confirm_delete.take() {
+            if target.location != DeleteLocation::Remote {
+                return;
+            }
+            info!(
+                "SSH remote delete: {} is_dir={}",
+                target.path,
+                target.is_dir()
+            );
+            let cmd = if target.is_dir() {
+                format!("rm -rf -- {}\r\n", shell_quote(&target.path))
             } else {
-                format!("rm -- {}\r\n", shell_quote(full_path))
+                format!("rm -- {}\r\n", shell_quote(&target.path))
             };
             self.ssh.send_str(&cmd);
             self.ssh_state = SshBrowserState::WaitingDelete;
-            self.core.status_msg = format!("Deleting {}...", full_path);
+            self.core.status_msg = format!("Deleting {}...", target.path);
             self.core.status_color = Color::Yellow;
-            self.core.pending_delete_name = Some(full_path.to_string());
+            self.core.pending_delete_name = Some(target.path);
             self.ssh.drain_raw();
             self.core.prev_raw_len = 0;
             self.core.prompt_stable = 0;
@@ -763,6 +774,9 @@ impl SshBrowser {
 }
 
 impl Browser for SshBrowser {
+    fn core(&self) -> &BrowserCore {
+        &self.core
+    }
     fn core_mut(&mut self) -> &mut BrowserCore {
         &mut self.core
     }

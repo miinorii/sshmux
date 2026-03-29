@@ -98,11 +98,6 @@ pub fn handle_key(
             app.tab_mut().split(Split::LeftRight, pane_inner(last_area));
             return Action::Continue;
         }
-
-        // Suppress unbound Alt+Char from reaching session passthrough
-        if alt && !ctrl {
-            return Action::Continue;
-        }
     }
 
     // ---- Connect pane ----
@@ -113,6 +108,14 @@ pub fn handle_key(
     // ---- Browser pane (SFTP or SCP) ----
     if let Some(action) = handle_browser_key_dispatch(app, code, ctrl, alt, shift) {
         return action;
+    }
+
+    // Suppress unbound Alt+Char from reaching session passthrough.
+    // Connect and browser panes are already handled above, so this only
+    // affects sessions where we must prevent Alt+key from being forwarded
+    // to the remote terminal.
+    if !editor_capturing && alt && !ctrl {
+        return Action::Continue;
     }
 
     // ---- Session exit menu ----
@@ -464,15 +467,15 @@ fn handle_connect_key(
 
     // Normal connect pane
     let cb = &app.keybindings.connect;
-    if cb.select_prev.matches(code, ctrl, false, shift) {
+    if cb.select_prev.matches(code, ctrl, alt, shift) {
         if let Some(Pane::Connect { list_state, .. }) = app.tab_mut().focused_pane_mut() {
             list_state.select_previous();
         }
-    } else if cb.select_next.matches(code, ctrl, false, shift) {
+    } else if cb.select_next.matches(code, ctrl, alt, shift) {
         if let Some(Pane::Connect { list_state, .. }) = app.tab_mut().focused_pane_mut() {
             list_state.select_next();
         }
-    } else if cb.connect.matches(code, ctrl, false, shift) {
+    } else if cb.connect.matches(code, ctrl, alt, shift) {
         let selected =
             if let Some(Pane::Connect { list_state, .. }) = app.tab_mut().focused_pane_mut() {
                 list_state.selected()
@@ -485,17 +488,17 @@ fn handle_connect_key(
             }
             app.resize_all(last_area);
         }
-    } else if cb.browser_menu.matches(code, ctrl, false, shift) {
+    } else if cb.browser_menu.matches(code, ctrl, alt, shift) {
         if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
             let mut ms = ListState::default();
             ms.select(Some(0));
             *overlay = ConnectOverlay::BrowserMenu(ms);
         }
-    } else if cb.manual_connect.matches(code, ctrl, false, shift) {
+    } else if cb.manual_connect.matches(code, ctrl, alt, shift) {
         if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
             *overlay = ConnectOverlay::ConnectInput(String::new());
         }
-    } else if cb.help.matches(code, ctrl, false, shift) {
+    } else if cb.help.matches(code, ctrl, alt, shift) {
         if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
             *overlay = if matches!(overlay, ConnectOverlay::KeyEditor(_)) {
                 ConnectOverlay::None
