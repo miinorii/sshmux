@@ -18,7 +18,7 @@ use super::parse::{
     parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote, strip_ansi,
 };
 use crate::keybindings::BrowserBindings;
-use crate::terminal::EmbeddedTerminal;
+use crate::terminal::{EmbeddedTerminal, PtyChannel};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -46,8 +46,8 @@ const PROMPT_TAIL_BYTES_LONG: usize = 128;
 
 pub struct SshBrowser {
     pub core: BrowserCore,
-    pub ssh: EmbeddedTerminal,
-    pub scp_pty: Option<EmbeddedTerminal>,
+    pub ssh: Box<dyn PtyChannel>,
+    pub scp_pty: Option<Box<dyn PtyChannel>>,
     pub ssh_state: SshBrowserState,
 
     pub saved_password: Option<String>,
@@ -68,7 +68,7 @@ impl SshBrowser {
         let ssh = EmbeddedTerminal::ssh_shell(host)?;
         Ok(SshBrowser {
             core: BrowserCore::new(host),
-            ssh,
+            ssh: Box::new(ssh),
             scp_pty: None,
             ssh_state: SshBrowserState::Connecting,
             saved_password: None,
@@ -76,6 +76,22 @@ impl SshBrowser {
             waiting_password: false,
             password_prompts_seen: 0,
         })
+    }
+
+    #[cfg(test)]
+    pub fn with_mock() -> (Self, crate::terminal::MockPtyHandle) {
+        let (mock, handle) = crate::terminal::MockPty::new();
+        let browser = SshBrowser {
+            core: BrowserCore::new("test-host"),
+            ssh: Box::new(mock),
+            scp_pty: None,
+            ssh_state: SshBrowserState::Connecting,
+            saved_password: None,
+            password_buf: String::new(),
+            waiting_password: false,
+            password_prompts_seen: 0,
+        };
+        (browser, handle)
     }
 
     pub fn tick(&mut self) {
@@ -381,11 +397,11 @@ impl SshBrowser {
     }
 
     fn prompt_ends_with_sshmux(&self) -> bool {
-        let Ok(rb) = self.ssh.raw_output.lock() else {
+        let tail_bytes = self.ssh.raw_tail(PROMPT_TAIL_BYTES);
+        if tail_bytes.is_empty() {
             return false;
-        };
-        let start = rb.len().saturating_sub(PROMPT_TAIL_BYTES);
-        let tail = strip_ansi(&rb[start..]);
+        }
+        let tail = strip_ansi(&tail_bytes);
         tail.lines()
             .rev()
             .find(|l| !l.trim().is_empty())
@@ -397,14 +413,11 @@ impl SshBrowser {
     }
 
     fn shell_prompt_detected(&self) -> bool {
-        let Ok(rb) = self.ssh.raw_output.lock() else {
-            return false;
-        };
-        if rb.is_empty() {
+        let tail_bytes = self.ssh.raw_tail(PROMPT_TAIL_BYTES_LONG);
+        if tail_bytes.is_empty() {
             return false;
         }
-        let start = rb.len().saturating_sub(PROMPT_TAIL_BYTES_LONG);
-        let tail = strip_ansi(&rb[start..]);
+        let tail = strip_ansi(&tail_bytes);
         tail.lines()
             .rev()
             .find(|l| !l.trim().is_empty())
@@ -511,7 +524,7 @@ impl SshBrowser {
 
         match EmbeddedTerminal::new(24, 80, cmd, true) {
             Ok(term) => {
-                self.scp_pty = Some(term);
+                self.scp_pty = Some(Box::new(term));
                 if self.core.batch_done == 0 {
                     self.core.batch_total = self.core.pending_transfers.len() + 1;
                 }
@@ -585,7 +598,7 @@ impl SshBrowser {
 
         match EmbeddedTerminal::new(24, 80, cmd, true) {
             Ok(term) => {
-                self.scp_pty = Some(term);
+                self.scp_pty = Some(Box::new(term));
                 if self.core.batch_done == 0 {
                     self.core.batch_total = self.core.pending_transfers.len() + 1;
                 }
@@ -811,5 +824,820 @@ impl Browser for SshBrowser {
             KeyCode::Backspace => self.ssh.send_str("\x7f"),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::browser::common::DeleteKind;
+    use crate::browser::parse::FsEntry;
+    use crate::terminal::MockPtyHandle;
+
+    fn tick_until_stable(browser: &mut SshBrowser) {
+        browser.tick();
+        browser.tick();
+        browser.tick();
+    }
+
+    fn make_ssh() -> (SshBrowser, MockPtyHandle) {
+        SshBrowser::with_mock()
+    }
+
+    /// Create a mock SCP pty and return its handle for feeding data.
+    fn attach_scp_pty(browser: &mut SshBrowser) -> MockPtyHandle {
+        let (mock, handle) = crate::terminal::MockPty::new();
+        browser.scp_pty = Some(Box::new(mock));
+        handle
+    }
+
+    // ---- count_password_prompts helper ----
+
+    #[test]
+    fn count_password_prompts_basic() {
+        let lines = vec![
+            "user@host's password:".to_string(),
+            "some output".to_string(),
+        ];
+        assert_eq!(count_password_prompts(&lines), 1);
+    }
+
+    #[test]
+    fn count_password_prompts_multiple() {
+        let lines = vec![
+            "user@host's password:".to_string(),
+            "Permission denied, please try again.".to_string(),
+            "user@host's password:".to_string(),
+        ];
+        assert_eq!(count_password_prompts(&lines), 2);
+    }
+
+    #[test]
+    fn count_password_prompts_none() {
+        let lines = vec!["Welcome to server".to_string()];
+        assert_eq!(count_password_prompts(&lines), 0);
+    }
+
+    // ---- Connecting state ----
+
+    #[test]
+    fn connecting_detects_shell_prompt_and_sets_ps1() {
+        let (mut sb, h) = make_ssh();
+        assert_eq!(sb.ssh_state, SshBrowserState::Connecting);
+
+        h.feed(b"Last login: Mon Jan 1 12:00\nuser@host:~$ ");
+        tick_until_stable(&mut sb);
+
+        assert_eq!(sb.ssh_state, SshBrowserState::SettingPrompt);
+        let sent = h.sent();
+        assert!(
+            sent.iter().any(|s| s.contains("PS1=")),
+            "should send PS1 command, got: {:?}",
+            sent
+        );
+    }
+
+    #[test]
+    fn connecting_stays_without_shell_prompt() {
+        let (mut sb, h) = make_ssh();
+        h.feed(b"SSH negotiating...\n");
+        tick_until_stable(&mut sb);
+        assert_eq!(sb.ssh_state, SshBrowserState::Connecting);
+    }
+
+    #[test]
+    fn connecting_detects_hash_prompt() {
+        let (mut sb, h) = make_ssh();
+        h.feed(b"root@host:~# ");
+        tick_until_stable(&mut sb);
+        assert_eq!(sb.ssh_state, SshBrowserState::SettingPrompt);
+    }
+
+    #[test]
+    fn connecting_detects_percent_prompt() {
+        let (mut sb, h) = make_ssh();
+        h.feed(b"user@host% ");
+        tick_until_stable(&mut sb);
+        assert_eq!(sb.ssh_state, SshBrowserState::SettingPrompt);
+    }
+
+    // ---- SSH password detection ----
+
+    #[test]
+    fn connecting_detects_password_prompt() {
+        let (mut sb, h) = make_ssh();
+        h.feed(b"user@host's password:");
+        sb.tick();
+
+        assert!(sb.waiting_password);
+        assert_eq!(sb.core.status_msg, "SSH requires password");
+        assert!(sb.password_buf.is_empty());
+    }
+
+    #[test]
+    fn connecting_auto_sends_saved_password() {
+        let (mut sb, h) = make_ssh();
+        sb.saved_password = Some("secret".to_string());
+        h.feed(b"user@host's password:");
+        sb.tick();
+
+        assert!(!sb.waiting_password, "should auto-send, not prompt");
+        let sent = h.sent();
+        assert!(
+            sent.iter().any(|s| s.contains("secret")),
+            "should send password, got: {:?}",
+            sent
+        );
+        assert!(sb.core.status_msg.contains("Authenticating"));
+    }
+
+    #[test]
+    fn connecting_rejects_saved_password_on_second_prompt() {
+        let (mut sb, h) = make_ssh();
+        sb.saved_password = Some("wrong".to_string());
+        sb.password_prompts_seen = 1;
+        h.feed(b"user@host's password:\nPermission denied\nuser@host's password:");
+        sb.tick();
+
+        assert!(sb.waiting_password, "should re-prompt after rejection");
+        assert!(
+            sb.saved_password.is_none(),
+            "saved password should be cleared"
+        );
+        assert!(sb.core.status_msg.contains("Wrong password"));
+    }
+
+    #[test]
+    fn connecting_blocks_while_waiting_password() {
+        let (mut sb, h) = make_ssh();
+        sb.waiting_password = true;
+        h.feed(b"user@host:~$ ");
+        tick_until_stable(&mut sb);
+        assert_eq!(
+            sb.ssh_state,
+            SshBrowserState::Connecting,
+            "should not progress while waiting for password"
+        );
+    }
+
+    // ---- Password input methods ----
+
+    #[test]
+    fn password_char_and_backspace() {
+        let (mut sb, _h) = make_ssh();
+        sb.password_char('a');
+        sb.password_char('b');
+        sb.password_char('c');
+        assert_eq!(sb.password_buf, "abc");
+        sb.password_backspace();
+        assert_eq!(sb.password_buf, "ab");
+    }
+
+    #[test]
+    fn submit_password_in_connecting_sends_to_ssh() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Connecting;
+        sb.waiting_password = true;
+        sb.password_buf = "mypass".to_string();
+        h.clear_sent();
+
+        sb.submit_password();
+
+        assert!(!sb.waiting_password);
+        assert_eq!(sb.saved_password, Some("mypass".to_string()));
+        assert!(sb.password_buf.is_empty());
+        let sent = h.sent();
+        assert!(sent.iter().any(|s| s.contains("mypass")));
+    }
+
+    #[test]
+    fn submit_password_in_transferring_sends_to_scp() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Transferring;
+        sb.waiting_password = true;
+        sb.password_buf = "scppass".to_string();
+        sb.core.last_transfer = Some(TransferStatus {
+            filename: "file.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+        let scp_h = attach_scp_pty(&mut sb);
+
+        sb.submit_password();
+
+        assert!(!sb.waiting_password);
+        assert_eq!(sb.saved_password, Some("scppass".to_string()));
+        let sent = scp_h.sent();
+        assert!(sent.iter().any(|s| s.contains("scppass")));
+    }
+
+    // ---- SettingPrompt state ----
+
+    #[test]
+    fn setting_prompt_transitions_to_waiting_pwd() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::SettingPrompt;
+
+        h.feed(b"SSHMUX> ");
+        tick_until_stable(&mut sb);
+
+        assert_eq!(sb.ssh_state, SshBrowserState::WaitingPwd);
+        let sent = h.sent();
+        assert!(
+            sent.iter().any(|s| s == "pwd\r\n"),
+            "should send pwd, got: {:?}",
+            sent
+        );
+    }
+
+    #[test]
+    fn setting_prompt_captures_raw_snapshot() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::SettingPrompt;
+        h.feed(b"setting up...\nSSHMUX> ");
+        sb.tick();
+        assert!(!sb.core.raw_snapshot.is_empty());
+    }
+
+    // ---- WaitingPwd state ----
+
+    #[test]
+    fn waiting_pwd_transitions_to_waiting_ls() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::WaitingPwd;
+
+        h.feed(b"/home/testuser\nSSHMUX> ");
+        tick_until_stable(&mut sb);
+
+        assert_eq!(sb.ssh_state, SshBrowserState::WaitingLs);
+        assert_eq!(sb.core.remote_path, "/home/testuser");
+        let sent = h.sent();
+        assert!(
+            sent.iter().any(|s| s.starts_with("ls ")),
+            "should send ls, got: {:?}",
+            sent
+        );
+    }
+
+    // ---- WaitingLs state ----
+
+    #[test]
+    fn waiting_ls_populates_entries_and_goes_idle() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::WaitingLs;
+
+        h.feed(b"drwxr-xr-x  2 user user  4096 Jan  1 12:00 subdir\n-rw-r--r--  1 user user  1234 Jan  1 12:00 file.txt\nSSHMUX> ");
+        tick_until_stable(&mut sb);
+
+        assert_eq!(sb.ssh_state, SshBrowserState::Idle);
+        assert!(sb.core.remote_entries.len() >= 2);
+        assert!(sb.core.raw_snapshot.is_empty());
+    }
+
+    #[test]
+    fn waiting_ls_chains_pending_delete() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::WaitingLs;
+        sb.core
+            .pending_deletes
+            .push(crate::browser::common::DeleteTarget {
+                location: DeleteLocation::Remote,
+                kind: DeleteKind::File,
+                path: "/remote/todelete.txt".to_string(),
+            });
+
+        h.feed(b"-rw-r--r-- 1 u u 10 Jan 1 12:00 a.txt\nSSHMUX> ");
+        tick_until_stable(&mut sb);
+
+        assert_eq!(sb.ssh_state, SshBrowserState::WaitingDelete);
+        let sent = h.sent();
+        assert!(
+            sent.iter().any(|s| s.starts_with("rm ")),
+            "should send rm command, got: {:?}",
+            sent
+        );
+    }
+
+    // ---- Transferring state (SCP monitoring) ----
+
+    #[test]
+    fn transferring_completes_on_scp_exit() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Transferring;
+        sb.core.last_transfer = Some(TransferStatus {
+            filename: "test.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+        let scp_h = attach_scp_pty(&mut sb);
+        h.clear_sent();
+
+        scp_h.set_exited(true);
+        scp_h.feed(b"test.txt  100%  1234  1.2KB/s  00:00");
+        sb.tick();
+
+        assert_eq!(sb.ssh_state, SshBrowserState::WaitingLs);
+        assert!(sb.scp_pty.is_none(), "scp_pty should be dropped after exit");
+        assert!(sb.core.last_transfer.as_ref().unwrap().done);
+        assert_eq!(sb.core.last_transfer.as_ref().unwrap().progress, 100);
+        let sent = h.sent();
+        assert!(
+            sent.iter().any(|s| s.starts_with("ls ")),
+            "should send ls after transfer, got: {:?}",
+            sent
+        );
+    }
+
+    #[test]
+    fn transferring_scrapes_scp_progress() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Transferring;
+        sb.core.last_transfer = Some(TransferStatus {
+            filename: "big.bin".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+        let scp_h = attach_scp_pty(&mut sb);
+
+        scp_h.feed(b"big.bin  50%  512KB  256.0KB/s  00:01");
+        sb.tick();
+
+        assert_eq!(sb.ssh_state, SshBrowserState::Transferring);
+        assert_eq!(sb.core.last_transfer.as_ref().unwrap().progress, 50);
+    }
+
+    #[test]
+    fn transferring_detects_scp_password_prompt() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Transferring;
+        sb.core.last_transfer = Some(TransferStatus {
+            filename: "file.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+        let scp_h = attach_scp_pty(&mut sb);
+
+        scp_h.feed(b"user@host's password:");
+        sb.tick();
+
+        assert!(sb.waiting_password);
+        assert!(sb.core.status_msg.contains("SCP requires password"));
+    }
+
+    #[test]
+    fn transferring_auto_sends_saved_scp_password() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Transferring;
+        sb.saved_password = Some("secret".to_string());
+        sb.core.last_transfer = Some(TransferStatus {
+            filename: "file.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+        let scp_h = attach_scp_pty(&mut sb);
+
+        scp_h.feed(b"user@host's password:");
+        sb.tick();
+
+        assert!(!sb.waiting_password);
+        let sent = scp_h.sent();
+        assert!(
+            sent.iter().any(|s| s.contains("secret")),
+            "should auto-send password, got: {:?}",
+            sent
+        );
+    }
+
+    #[test]
+    fn transferring_rejects_scp_password_on_second_prompt() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Transferring;
+        sb.saved_password = Some("wrong".to_string());
+        sb.password_prompts_seen = 1;
+        sb.core.last_transfer = Some(TransferStatus {
+            filename: "file.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+        let scp_h = attach_scp_pty(&mut sb);
+
+        scp_h.feed(b"user@host's password:\nPermission denied\nuser@host's password:");
+        sb.tick();
+
+        assert!(sb.waiting_password);
+        assert!(sb.saved_password.is_none());
+        assert!(
+            sb.scp_pty.is_none(),
+            "scp_pty should be dropped on rejection"
+        );
+    }
+
+    #[test]
+    fn transferring_recovers_when_scp_pty_missing() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Transferring;
+        sb.scp_pty = None; // no SCP process
+
+        sb.tick();
+
+        assert_eq!(sb.ssh_state, SshBrowserState::Idle);
+        assert_eq!(sb.core.status_color, Color::Red);
+        assert!(sb.core.status_msg.contains("Transfer failed"));
+    }
+
+    #[test]
+    fn transferring_blocks_while_waiting_password() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Transferring;
+        sb.waiting_password = true;
+        let _scp_h = attach_scp_pty(&mut sb);
+
+        sb.tick();
+
+        // Should return early without processing
+        assert_eq!(sb.ssh_state, SshBrowserState::Transferring);
+    }
+
+    #[test]
+    fn transferring_resets_batch_on_last_transfer() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Transferring;
+        sb.core.batch_done = 0;
+        sb.core.batch_total = 1;
+        sb.core.transfer_start = Some(Instant::now());
+        sb.core.last_transfer = Some(TransferStatus {
+            filename: "only.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+        let scp_h = attach_scp_pty(&mut sb);
+
+        scp_h.set_exited(true);
+        sb.tick();
+
+        assert_eq!(
+            sb.core.batch_done, 0,
+            "batch should reset after last transfer"
+        );
+        assert_eq!(sb.core.batch_total, 0);
+        assert!(sb.core.transfer_start.is_none());
+    }
+
+    // ---- WaitingDelete state ----
+
+    #[test]
+    fn waiting_delete_success_sends_ls() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::WaitingDelete;
+        sb.core.pending_delete_name = Some("removed.txt".to_string());
+        h.clear_sent();
+
+        h.feed(b"SSHMUX> ");
+        tick_until_stable(&mut sb);
+
+        assert_eq!(sb.ssh_state, SshBrowserState::WaitingLs);
+        assert_eq!(sb.core.status_color, Color::Green);
+        assert!(sb.core.status_msg.contains("Deleted remote: removed.txt"));
+        let sent = h.sent();
+        assert!(sent.iter().any(|s| s.starts_with("ls ")));
+    }
+
+    #[test]
+    fn waiting_delete_failure_shows_error() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::WaitingDelete;
+        sb.core.pending_delete_name = Some("protected.txt".to_string());
+
+        // First line is the command echo, error is on subsequent lines
+        h.feed(
+            b"rm -- protected.txt\nrm: cannot remove 'protected.txt': Permission denied\nSSHMUX> ",
+        );
+        tick_until_stable(&mut sb);
+
+        assert_eq!(sb.ssh_state, SshBrowserState::WaitingLs);
+        assert_eq!(sb.core.status_color, Color::Red);
+        assert!(sb.core.status_msg.contains("Delete failed: protected.txt"));
+    }
+
+    #[test]
+    fn waiting_delete_chains_next_delete() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::WaitingDelete;
+        sb.core.pending_delete_name = Some("first.txt".to_string());
+        sb.core
+            .pending_deletes
+            .push(crate::browser::common::DeleteTarget {
+                location: DeleteLocation::Remote,
+                kind: DeleteKind::File,
+                path: "/remote/second.txt".to_string(),
+            });
+        h.clear_sent();
+
+        h.feed(b"SSHMUX> ");
+        tick_until_stable(&mut sb);
+
+        assert_eq!(sb.ssh_state, SshBrowserState::WaitingDelete);
+        assert!(sb.core.pending_deletes.is_empty());
+        let sent = h.sent();
+        assert!(
+            sent.iter().any(|s| s.starts_with("rm ")),
+            "should chain to next delete, got: {:?}",
+            sent
+        );
+    }
+
+    #[test]
+    fn waiting_delete_uses_rm_rf_for_dirs() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Idle;
+        sb.core.confirm_delete = Some(crate::browser::common::DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::Dir,
+            path: "/remote/somedir".to_string(),
+        });
+        h.clear_sent();
+
+        sb.confirm_delete_yes();
+
+        assert_eq!(sb.ssh_state, SshBrowserState::WaitingDelete);
+        let sent = h.sent();
+        assert!(
+            sent.iter().any(|s| s.contains("rm -rf")),
+            "should use rm -rf for dirs, got: {:?}",
+            sent
+        );
+    }
+
+    #[test]
+    fn waiting_delete_uses_rm_for_files() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Idle;
+        sb.core.confirm_delete = Some(crate::browser::common::DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::File,
+            path: "/remote/somefile.txt".to_string(),
+        });
+        h.clear_sent();
+
+        sb.confirm_delete_yes();
+
+        assert_eq!(sb.ssh_state, SshBrowserState::WaitingDelete);
+        let sent = h.sent();
+        let rm_cmds: Vec<_> = sent
+            .iter()
+            .filter(|s| s.starts_with("rm "))
+            .cloned()
+            .collect();
+        assert!(!rm_cmds.is_empty());
+        assert!(
+            !rm_cmds.iter().any(|s| s.contains("-rf")),
+            "should not use -rf for files, got: {:?}",
+            rm_cmds
+        );
+    }
+
+    // ---- Navigation ----
+
+    #[test]
+    fn enter_on_remote_dir_sends_ls() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Idle;
+        sb.core.remote_path = "/home".to_string();
+        sb.core.focus = BrowserFocus::Remote;
+        sb.core.remote_entries.push(FsEntry {
+            name: "subdir".to_string(),
+            is_dir: true,
+            size: "4096".to_string(),
+            modified: "Jan 1 12:00".to_string(),
+            perms: "drwxr-xr-x".to_string(),
+        });
+        sb.core.remote_sel.select(Some(0));
+        h.clear_sent();
+
+        sb.enter();
+
+        assert_eq!(sb.ssh_state, SshBrowserState::WaitingLs);
+        assert_eq!(sb.core.remote_path, "/home/subdir");
+        let sent = h.sent();
+        assert!(sent.iter().any(|s| s.starts_with("ls ")));
+    }
+
+    #[test]
+    fn go_up_remote_sends_ls() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Idle;
+        sb.core.remote_path = "/home/user".to_string();
+        sb.core.focus = BrowserFocus::Remote;
+        h.clear_sent();
+
+        sb.go_up();
+
+        assert_eq!(sb.ssh_state, SshBrowserState::WaitingLs);
+        assert_eq!(sb.core.remote_path, "/home");
+        let sent = h.sent();
+        assert!(sent.iter().any(|s| s.starts_with("ls ")));
+    }
+
+    #[test]
+    fn enter_ignored_when_not_idle() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::WaitingLs;
+        sb.core.focus = BrowserFocus::Remote;
+        sb.core.remote_entries.push(FsEntry {
+            name: "dir".to_string(),
+            is_dir: true,
+            size: "4096".to_string(),
+            modified: "Jan 1 12:00".to_string(),
+            perms: "drwxr-xr-x".to_string(),
+        });
+        sb.core.remote_sel.select(Some(0));
+        h.clear_sent();
+
+        sb.enter();
+
+        assert_eq!(sb.ssh_state, SshBrowserState::WaitingLs);
+        assert!(h.sent().is_empty());
+    }
+
+    // ---- send_connect_key ----
+
+    #[test]
+    fn send_connect_key_forwards_chars() {
+        let (mut sb, h) = make_ssh();
+        h.clear_sent();
+
+        sb.send_connect_key(KeyCode::Char('y'));
+        sb.send_connect_key(KeyCode::Enter);
+        sb.send_connect_key(KeyCode::Backspace);
+
+        let s = h.sent();
+        assert_eq!(s.len(), 3);
+        assert_eq!(s[0], "y");
+        assert_eq!(s[1], "\r\n");
+        assert_eq!(s[2], "\x7f");
+    }
+
+    // ---- State label ----
+
+    #[test]
+    fn state_labels() {
+        let (mut sb, _h) = make_ssh();
+
+        let cases = [
+            (SshBrowserState::Connecting, "connecting"),
+            (SshBrowserState::SettingPrompt, "connecting"),
+            (SshBrowserState::WaitingPwd, "loading"),
+            (SshBrowserState::WaitingLs, "loading"),
+            (SshBrowserState::Idle, "idle"),
+            (SshBrowserState::WaitingDelete, "deleting"),
+            (SshBrowserState::Transferring, "transfer"),
+        ];
+        for (state, expected) in cases {
+            sb.ssh_state = state;
+            assert_eq!(sb.state_label().0, expected, "state_label for {:?}", state);
+        }
+    }
+
+    // ---- Progress suffix ----
+
+    #[test]
+    fn progress_suffix_in_progress() {
+        let (mut sb, _h) = make_ssh();
+        sb.core.last_transfer = Some(TransferStatus {
+            filename: "f.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 42,
+            file_count: 0,
+        });
+        assert_eq!(sb.progress_suffix(), " 42%");
+    }
+
+    #[test]
+    fn progress_suffix_done() {
+        let (mut sb, _h) = make_ssh();
+        sb.core.last_transfer = Some(TransferStatus {
+            filename: "f.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: true,
+            progress: 100,
+            file_count: 0,
+        });
+        assert_eq!(sb.progress_suffix(), "");
+    }
+
+    // ---- Idle state ----
+
+    #[test]
+    fn idle_tick_is_noop() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Idle;
+        sb.core.status_msg = "idle".to_string();
+
+        sb.tick();
+
+        assert_eq!(sb.ssh_state, SshBrowserState::Idle);
+        assert_eq!(sb.core.status_msg, "idle");
+    }
+
+    // ---- Prompt stability ----
+
+    #[test]
+    fn no_transition_before_stable() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::SettingPrompt;
+        h.feed(b"SSHMUX> ");
+
+        sb.tick();
+        sb.tick();
+
+        assert_eq!(sb.ssh_state, SshBrowserState::SettingPrompt);
+    }
+
+    #[test]
+    fn changing_raw_len_resets_stability() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::SettingPrompt;
+        h.feed(b"SSHMUX> ");
+        sb.tick();
+        sb.tick();
+
+        h.feed(b" ");
+        sb.tick();
+
+        assert_eq!(sb.ssh_state, SshBrowserState::SettingPrompt);
+    }
+
+    // ---- Render tests ----
+
+    fn buf_line_text(buf: &Buffer, y: u16) -> String {
+        let w = buf.area().width;
+        (0..w)
+            .map(|x| {
+                buf.cell((x, y))
+                    .map(|c| c.symbol().to_string())
+                    .unwrap_or_default()
+            })
+            .collect::<String>()
+    }
+
+    #[test]
+    fn render_password_status_shows_stars() {
+        let (mut sb, _h) = make_ssh();
+        sb.password_buf = "abc".to_string();
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+
+        sb.render_password_status(area, &mut buf);
+
+        let text = buf_line_text(&buf, 0);
+        assert!(text.contains("Password:"), "should contain label: {}", text);
+        assert!(text.contains("***"), "should mask with stars: {}", text);
+        assert!(
+            !text.contains("abc"),
+            "should not reveal password: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn render_password_status_empty_password() {
+        let (mut sb, _h) = make_ssh();
+        sb.password_buf.clear();
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+
+        sb.render_password_status(area, &mut buf);
+
+        let text = buf_line_text(&buf, 0);
+        assert!(text.contains("Password:"), "should contain label: {}", text);
+        assert!(
+            !text.contains('*'),
+            "should have no stars for empty password: {}",
+            text
+        );
     }
 }

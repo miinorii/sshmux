@@ -12,7 +12,7 @@ use super::parse::{
     parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote, strip_ansi,
 };
 use crate::keybindings::BrowserBindings;
-use crate::terminal::EmbeddedTerminal;
+use crate::terminal::{EmbeddedTerminal, PtyChannel};
 
 /// Bytes to scan from the end of raw PTY output for prompt detection.
 const PROMPT_TAIL_BYTES: usize = 64;
@@ -37,7 +37,7 @@ pub enum SftpState {
 
 pub struct FileBrowser {
     pub core: BrowserCore,
-    pub sftp: EmbeddedTerminal,
+    pub sftp: Box<dyn PtyChannel>,
     pub sftp_state: SftpState,
 }
 
@@ -46,9 +46,20 @@ impl FileBrowser {
         let sftp = EmbeddedTerminal::sftp(host)?;
         Ok(FileBrowser {
             core: BrowserCore::new(host),
-            sftp,
+            sftp: Box::new(sftp),
             sftp_state: SftpState::Connecting,
         })
+    }
+
+    #[cfg(test)]
+    pub fn with_mock() -> (Self, crate::terminal::MockPtyHandle) {
+        let (mock, handle) = crate::terminal::MockPty::new();
+        let browser = FileBrowser {
+            core: BrowserCore::new("test-host"),
+            sftp: Box::new(mock),
+            sftp_state: SftpState::Connecting,
+        };
+        (browser, handle)
     }
 
     pub fn tick(&mut self) {
@@ -263,11 +274,11 @@ impl FileBrowser {
     }
 
     fn prompt_raw_ends_with_prompt(&self) -> bool {
-        let Ok(rb) = self.sftp.raw_output.lock() else {
+        let tail_bytes = self.sftp.raw_tail(PROMPT_TAIL_BYTES);
+        if tail_bytes.is_empty() {
             return false;
-        };
-        let start = rb.len().saturating_sub(PROMPT_TAIL_BYTES);
-        let tail = strip_ansi(&rb[start..]);
+        }
+        let tail = strip_ansi(&tail_bytes);
         tail.lines()
             .rev()
             .find(|l| !l.trim().is_empty())
@@ -570,5 +581,844 @@ impl Browser for FileBrowser {
             KeyCode::Backspace => self.sftp.send_str("\x7f"),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::browser::common::{DeleteKind, PendingTransfer};
+    use crate::terminal::MockPtyHandle;
+
+    /// Run tick() enough times for prompt stability to trigger a transition.
+    /// The prompt-stability counter requires 2 consecutive ticks where:
+    /// - raw_len hasn't changed (compared to prev_raw_len)
+    /// - prompt_raw_ends_with_prompt() returns true
+    ///
+    /// So we need 3 ticks total: first sets prev_raw_len, next two increment stable.
+    fn tick_until_stable(browser: &mut FileBrowser) {
+        browser.tick(); // sets prev_raw_len, prompt_stable = 0
+        browser.tick(); // raw_len same + prompt → prompt_stable = 1
+        browser.tick(); // raw_len same + prompt → prompt_stable = 2 → transition
+    }
+
+    fn make_sftp() -> (FileBrowser, MockPtyHandle) {
+        FileBrowser::with_mock()
+    }
+
+    // ---- Connecting state ----
+
+    #[test]
+    fn connecting_transitions_to_waiting_pwd_and_sends_pwd() {
+        let (mut fb, h) = make_sftp();
+        assert_eq!(fb.sftp_state, SftpState::Connecting);
+
+        h.feed(b"Connected to host.\nsftp> ");
+        tick_until_stable(&mut fb);
+
+        assert_eq!(fb.sftp_state, SftpState::WaitingPwd);
+        assert_eq!(fb.sftp.raw_len(), 0, "drain_raw should clear buffer");
+        assert!(
+            h.sent().iter().any(|s| s == "pwd\r\n"),
+            "should send pwd command, got: {:?}",
+            h.sent()
+        );
+    }
+
+    #[test]
+    fn connecting_stays_without_prompt() {
+        let (mut fb, h) = make_sftp();
+        h.feed(b"Connecting to host...\n");
+        tick_until_stable(&mut fb);
+        assert_eq!(fb.sftp_state, SftpState::Connecting);
+        assert!(h.sent().is_empty());
+    }
+
+    #[test]
+    fn connecting_captures_raw_snapshot() {
+        let (mut fb, h) = make_sftp();
+        h.feed(b"Connecting to host...\nsftp> ");
+        fb.tick();
+        assert!(!fb.core.raw_snapshot.is_empty());
+    }
+
+    #[test]
+    fn connecting_sets_status_on_connect() {
+        let (mut fb, h) = make_sftp();
+        h.feed(b"sftp> ");
+        tick_until_stable(&mut fb);
+        assert_eq!(fb.core.status_color, Color::Green);
+        assert!(fb.core.status_msg.contains("Connected to test-host"));
+    }
+
+    // ---- WaitingPwd state ----
+
+    #[test]
+    fn waiting_pwd_transitions_to_waiting_ls_and_sends_ls() {
+        let (mut fb, h) = make_sftp();
+        h.feed(b"sftp> ");
+        tick_until_stable(&mut fb);
+        assert_eq!(fb.sftp_state, SftpState::WaitingPwd);
+        h.clear_sent();
+
+        h.feed(b"Remote working directory: /home/user\nsftp> ");
+        tick_until_stable(&mut fb);
+
+        assert_eq!(fb.sftp_state, SftpState::WaitingLs);
+        assert_eq!(fb.core.remote_path, "/home/user");
+        let ls_cmds: Vec<_> = h
+            .sent()
+            .iter()
+            .filter(|s| s.starts_with("ls "))
+            .cloned()
+            .collect();
+        assert!(
+            !ls_cmds.is_empty(),
+            "should send ls command, got: {:?}",
+            h.sent()
+        );
+    }
+
+    #[test]
+    fn waiting_pwd_keeps_old_path_on_parse_failure() {
+        let (mut fb, h) = make_sftp();
+        fb.core.remote_path = "/original".to_string();
+        h.feed(b"sftp> ");
+        tick_until_stable(&mut fb);
+        assert_eq!(fb.sftp_state, SftpState::WaitingPwd);
+
+        h.feed(b"some noise\nsftp> ");
+        tick_until_stable(&mut fb);
+
+        assert_eq!(fb.sftp_state, SftpState::WaitingLs);
+        assert_eq!(fb.core.remote_path, "/original");
+    }
+
+    // ---- WaitingLs state ----
+
+    #[test]
+    fn waiting_ls_populates_entries_and_goes_idle() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::WaitingLs;
+
+        h.feed(b"drwxr-xr-x  2 user user  4096 Jan  1 12:00 subdir\n-rw-r--r--  1 user user  1234 Jan  1 12:00 file.txt\nsftp> ");
+        tick_until_stable(&mut fb);
+
+        assert_eq!(fb.sftp_state, SftpState::Idle);
+        assert!(fb.core.remote_entries.len() >= 2);
+        assert!(
+            fb.core.raw_snapshot.is_empty(),
+            "raw_snapshot should be cleared"
+        );
+    }
+
+    #[test]
+    fn waiting_ls_updates_remote_path_from_pwd_line() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::WaitingLs;
+        fb.core.remote_path = "/old".to_string();
+
+        h.feed(
+            b"Remote working directory: /new/path\n-rw-r--r-- 1 u u 10 Jan 1 12:00 a.txt\nsftp> ",
+        );
+        tick_until_stable(&mut fb);
+
+        assert_eq!(fb.core.remote_path, "/new/path");
+    }
+
+    #[test]
+    fn waiting_ls_clamps_selection() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::WaitingLs;
+        fb.core.remote_sel.select(Some(50));
+
+        h.feed(b"-rw-r--r--  1 user user  1234 Jan  1 12:00 file.txt\nsftp> ");
+        tick_until_stable(&mut fb);
+
+        assert_eq!(fb.sftp_state, SftpState::Idle);
+        let sel = fb.core.remote_sel.selected().unwrap_or(999);
+        assert!(sel < fb.core.remote_entries.len());
+    }
+
+    #[test]
+    fn waiting_ls_chains_pending_transfer() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::WaitingLs;
+        fb.core.last_transfer = Some(TransferStatus {
+            filename: "prev.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: true,
+            progress: 100,
+            file_count: 0,
+        });
+        fb.core.pending_transfers.push(PendingTransfer {
+            path: "/remote/next.txt".to_string(),
+            name: "next.txt".to_string(),
+            is_dir: false,
+        });
+
+        h.feed(b"-rw-r--r-- 1 u u 10 Jan 1 12:00 a.txt\nsftp> ");
+        tick_until_stable(&mut fb);
+
+        // download() should have been called, sending a get command
+        assert_eq!(fb.sftp_state, SftpState::Transferring);
+        assert!(fb.core.pending_transfers.is_empty());
+        let get_cmds: Vec<_> = h
+            .sent()
+            .iter()
+            .filter(|s| s.starts_with("get "))
+            .cloned()
+            .collect();
+        assert!(
+            !get_cmds.is_empty(),
+            "should send get command, got: {:?}",
+            h.sent()
+        );
+    }
+
+    #[test]
+    fn waiting_ls_chains_pending_delete() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::WaitingLs;
+        fb.core
+            .pending_deletes
+            .push(crate::browser::common::DeleteTarget {
+                location: DeleteLocation::Remote,
+                kind: DeleteKind::File,
+                path: "/remote/todelete.txt".to_string(),
+            });
+        // pop_pending_delete moves from pending_deletes to confirm_delete
+        // then confirm_delete_yes processes it
+
+        h.feed(b"-rw-r--r-- 1 u u 10 Jan 1 12:00 a.txt\nsftp> ");
+        tick_until_stable(&mut fb);
+
+        // Should chain to delete
+        assert_eq!(fb.sftp_state, SftpState::WaitingDelete);
+        let rm_cmds: Vec<_> = h
+            .sent()
+            .iter()
+            .filter(|s| s.starts_with("rm "))
+            .cloned()
+            .collect();
+        assert!(
+            !rm_cmds.is_empty(),
+            "should send rm command, got: {:?}",
+            h.sent()
+        );
+    }
+
+    // ---- Transferring state ----
+
+    #[test]
+    fn transferring_completes_on_prompt_and_sends_ls() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::Transferring;
+        fb.core.last_transfer = Some(TransferStatus {
+            filename: "test.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+        h.clear_sent();
+
+        h.feed(b"Fetching /remote/test.txt to test.txt\nsftp> ");
+        tick_until_stable(&mut fb);
+
+        assert_eq!(fb.sftp_state, SftpState::WaitingLs);
+        assert!(fb.core.last_transfer.as_ref().unwrap().done);
+        assert_eq!(fb.core.last_transfer.as_ref().unwrap().progress, 100);
+        assert_eq!(
+            fb.core.batch_done, 0,
+            "batch counters should reset after final transfer"
+        );
+        assert_eq!(fb.core.batch_total, 0);
+        let ls_cmds: Vec<_> = h
+            .sent()
+            .iter()
+            .filter(|s| s.starts_with("ls "))
+            .cloned()
+            .collect();
+        assert!(
+            !ls_cmds.is_empty(),
+            "should send ls after transfer, got: {:?}",
+            h.sent()
+        );
+    }
+
+    #[test]
+    fn transferring_scrapes_progress() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::Transferring;
+        fb.core.last_transfer = Some(TransferStatus {
+            filename: "big.bin".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+
+        h.feed(b"big.bin                                       50%  512KB 256.0KB/s   00:01");
+        fb.tick();
+
+        assert_eq!(fb.sftp_state, SftpState::Transferring);
+        assert_eq!(fb.core.last_transfer.as_ref().unwrap().progress, 50);
+    }
+
+    #[test]
+    fn transferring_counts_dir_files() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::Transferring;
+        fb.core.last_transfer = Some(TransferStatus {
+            filename: "mydir".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: true,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+
+        h.feed(b"Fetching /remote/mydir/ to mydir\nFetching /remote/mydir/a.txt\nFetching /remote/mydir/b.txt\n");
+        fb.tick();
+
+        assert_eq!(fb.core.last_transfer.as_ref().unwrap().file_count, 3);
+    }
+
+    #[test]
+    fn transferring_chains_next_download() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::Transferring;
+        fb.core.last_transfer = Some(TransferStatus {
+            filename: "first.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+        fb.core.pending_transfers.push(PendingTransfer {
+            path: "/remote/second.txt".to_string(),
+            name: "second.txt".to_string(),
+            is_dir: false,
+        });
+
+        h.feed(b"sftp> ");
+        tick_until_stable(&mut fb);
+
+        // download() sets sftp_state to Transferring and sends get command
+        assert_eq!(fb.sftp_state, SftpState::Transferring);
+        assert!(fb.core.pending_transfers.is_empty());
+        let get_cmds: Vec<_> = h
+            .sent()
+            .iter()
+            .filter(|s| s.starts_with("get "))
+            .cloned()
+            .collect();
+        assert!(
+            !get_cmds.is_empty(),
+            "should send get for next file, got: {:?}",
+            h.sent()
+        );
+    }
+
+    #[test]
+    fn transferring_chains_next_upload() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::Transferring;
+        fb.core.last_transfer = Some(TransferStatus {
+            filename: "first.txt".to_string(),
+            direction: TransferDirection::Upload,
+            is_dir: false,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+        fb.core.pending_transfers.push(PendingTransfer {
+            path: "/local/second.txt".to_string(),
+            name: "second.txt".to_string(),
+            is_dir: false,
+        });
+
+        h.feed(b"sftp> ");
+        tick_until_stable(&mut fb);
+
+        assert_eq!(fb.sftp_state, SftpState::Transferring);
+        assert!(fb.core.pending_transfers.is_empty());
+        let put_cmds: Vec<_> = h
+            .sent()
+            .iter()
+            .filter(|s| s.starts_with("put "))
+            .cloned()
+            .collect();
+        assert!(
+            !put_cmds.is_empty(),
+            "should send put for next file, got: {:?}",
+            h.sent()
+        );
+    }
+
+    #[test]
+    fn transferring_increments_batch_done() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::Transferring;
+        fb.core.batch_done = 0;
+        fb.core.batch_total = 1;
+        fb.core.last_transfer = Some(TransferStatus {
+            filename: "only.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+
+        h.feed(b"sftp> ");
+        tick_until_stable(&mut fb);
+
+        // After the last transfer, batch counters reset to 0
+        assert_eq!(fb.core.batch_done, 0);
+        assert_eq!(fb.core.batch_total, 0);
+        assert!(fb.core.transfer_start.is_none());
+    }
+
+    // ---- WaitingDelete state ----
+
+    #[test]
+    fn waiting_delete_success_sends_ls() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::WaitingDelete;
+        fb.core.pending_delete_name = Some("removed.txt".to_string());
+        h.clear_sent();
+
+        h.feed(b"sftp> ");
+        tick_until_stable(&mut fb);
+
+        assert_eq!(fb.sftp_state, SftpState::WaitingLs);
+        assert_eq!(fb.core.status_color, Color::Green);
+        assert!(fb.core.status_msg.contains("Deleted remote: removed.txt"));
+        let ls_cmds: Vec<_> = h
+            .sent()
+            .iter()
+            .filter(|s| s.starts_with("ls "))
+            .cloned()
+            .collect();
+        assert!(
+            !ls_cmds.is_empty(),
+            "should send ls after delete, got: {:?}",
+            h.sent()
+        );
+    }
+
+    #[test]
+    fn waiting_delete_failure_shows_error() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::WaitingDelete;
+        fb.core.pending_delete_name = Some("protected.txt".to_string());
+
+        h.feed(b"Couldn't remove file: permission denied\nsftp> ");
+        tick_until_stable(&mut fb);
+
+        assert_eq!(fb.sftp_state, SftpState::WaitingLs);
+        assert_eq!(fb.core.status_color, Color::Red);
+        assert!(fb.core.status_msg.contains("Delete failed: protected.txt"));
+    }
+
+    #[test]
+    fn waiting_delete_chains_next_delete() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::WaitingDelete;
+        fb.core.pending_delete_name = Some("first.txt".to_string());
+        fb.core
+            .pending_deletes
+            .push(crate::browser::common::DeleteTarget {
+                location: DeleteLocation::Remote,
+                kind: DeleteKind::File,
+                path: "/remote/second.txt".to_string(),
+            });
+        h.clear_sent();
+
+        h.feed(b"sftp> ");
+        tick_until_stable(&mut fb);
+
+        assert_eq!(fb.sftp_state, SftpState::WaitingDelete);
+        assert!(fb.core.pending_deletes.is_empty());
+        let rm_cmds: Vec<_> = h
+            .sent()
+            .iter()
+            .filter(|s| s.starts_with("rm "))
+            .cloned()
+            .collect();
+        assert!(
+            !rm_cmds.is_empty(),
+            "should send rm for next delete, got: {:?}",
+            h.sent()
+        );
+    }
+
+    #[test]
+    fn waiting_delete_failure_clears_pending_and_sends_ls() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::WaitingDelete;
+        fb.core.pending_delete_name = Some("bad.txt".to_string());
+        fb.core
+            .pending_deletes
+            .push(crate::browser::common::DeleteTarget {
+                location: DeleteLocation::Remote,
+                kind: DeleteKind::File,
+                path: "/remote/next.txt".to_string(),
+            });
+        h.clear_sent();
+
+        h.feed(b"Couldn't remove file\nsftp> ");
+        tick_until_stable(&mut fb);
+
+        assert_eq!(fb.sftp_state, SftpState::WaitingLs);
+        assert!(fb.core.pending_deletes.is_empty());
+        let ls_cmds: Vec<_> = h
+            .sent()
+            .iter()
+            .filter(|s| s.starts_with("ls "))
+            .cloned()
+            .collect();
+        assert!(
+            !ls_cmds.is_empty(),
+            "should send ls after failed delete, got: {:?}",
+            h.sent()
+        );
+    }
+
+    #[test]
+    fn waiting_delete_rmdir_for_directories() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::Idle;
+        fb.core.confirm_delete = Some(crate::browser::common::DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::Dir,
+            path: "/remote/somedir".to_string(),
+        });
+        h.clear_sent();
+
+        fb.confirm_delete_yes();
+
+        assert_eq!(fb.sftp_state, SftpState::WaitingDelete);
+        let rmdir_cmds: Vec<_> = h
+            .sent()
+            .iter()
+            .filter(|s| s.starts_with("rmdir "))
+            .cloned()
+            .collect();
+        assert!(
+            !rmdir_cmds.is_empty(),
+            "should use rmdir for dirs, got: {:?}",
+            h.sent()
+        );
+    }
+
+    #[test]
+    fn waiting_delete_rm_for_files() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::Idle;
+        fb.core.confirm_delete = Some(crate::browser::common::DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::File,
+            path: "/remote/somefile.txt".to_string(),
+        });
+        h.clear_sent();
+
+        fb.confirm_delete_yes();
+
+        assert_eq!(fb.sftp_state, SftpState::WaitingDelete);
+        let rm_cmds: Vec<_> = h
+            .sent()
+            .iter()
+            .filter(|s| s.starts_with("rm "))
+            .cloned()
+            .collect();
+        assert!(
+            !rm_cmds.is_empty(),
+            "should use rm for files, got: {:?}",
+            h.sent()
+        );
+        let rmdir_cmds: Vec<_> = h
+            .sent()
+            .iter()
+            .filter(|s| s.starts_with("rmdir "))
+            .cloned()
+            .collect();
+        assert!(rmdir_cmds.is_empty(), "should not use rmdir for files");
+    }
+
+    // ---- Process death recovery ----
+
+    #[test]
+    fn process_death_recovers_to_idle() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::WaitingLs;
+        fb.core.pending_transfers.push(PendingTransfer {
+            path: "/a".to_string(),
+            name: "a".to_string(),
+            is_dir: false,
+        });
+        fb.core
+            .pending_deletes
+            .push(crate::browser::common::DeleteTarget {
+                location: DeleteLocation::Remote,
+                kind: DeleteKind::File,
+                path: "/b".to_string(),
+            });
+
+        h.set_exited(true);
+        fb.tick();
+
+        assert_eq!(fb.sftp_state, SftpState::Idle);
+        assert_eq!(fb.core.status_color, Color::Red);
+        assert!(fb.core.status_msg.contains("connection lost"));
+        assert!(
+            fb.core.pending_transfers.is_empty(),
+            "pending_transfers should be cleared"
+        );
+        assert!(
+            fb.core.pending_deletes.is_empty(),
+            "pending_deletes should be cleared"
+        );
+        assert!(fb.core.drop_confirm.is_none());
+    }
+
+    #[test]
+    fn process_death_ignored_in_idle() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::Idle;
+        fb.core.status_msg = "fine".to_string();
+
+        h.set_exited(true);
+        fb.tick();
+
+        assert_eq!(fb.sftp_state, SftpState::Idle);
+        assert_eq!(
+            fb.core.status_msg, "fine",
+            "idle state should not trigger recovery"
+        );
+    }
+
+    #[test]
+    fn process_death_ignored_in_connecting() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::Connecting;
+
+        h.set_exited(true);
+        fb.tick();
+
+        // Connecting is excluded from the death check
+        assert_eq!(fb.sftp_state, SftpState::Connecting);
+    }
+
+    // ---- Prompt stability ----
+
+    #[test]
+    fn no_transition_before_stable() {
+        let (mut fb, h) = make_sftp();
+        h.feed(b"sftp> ");
+
+        // Only 2 ticks — prompt_stable reaches 1 but not 2
+        fb.tick();
+        fb.tick();
+
+        assert_eq!(fb.sftp_state, SftpState::Connecting);
+    }
+
+    #[test]
+    fn changing_raw_len_resets_stability() {
+        let (mut fb, h) = make_sftp();
+        h.feed(b"sftp> ");
+        fb.tick(); // prev_raw_len set
+        fb.tick(); // stable = 1
+
+        h.feed(b" ");
+        fb.tick(); // raw_len changed → stable reset to 0
+
+        assert_eq!(fb.sftp_state, SftpState::Connecting);
+    }
+
+    // ---- Idle state ----
+
+    #[test]
+    fn idle_tick_is_noop() {
+        let (mut fb, _h) = make_sftp();
+        fb.sftp_state = SftpState::Idle;
+        fb.core.status_msg = "idle".to_string();
+
+        fb.tick();
+
+        assert_eq!(fb.sftp_state, SftpState::Idle);
+        assert_eq!(fb.core.status_msg, "idle");
+    }
+
+    // ---- Navigation ----
+
+    #[test]
+    fn enter_on_remote_dir_sends_ls() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::Idle;
+        fb.core.remote_path = "/home".to_string();
+        fb.core.focus = BrowserFocus::Remote;
+        fb.core.remote_entries.push(crate::browser::parse::FsEntry {
+            name: "subdir".to_string(),
+            is_dir: true,
+            size: "4096".to_string(),
+            modified: "Jan 1 12:00".to_string(),
+            perms: "drwxr-xr-x".to_string(),
+        });
+        fb.core.remote_sel.select(Some(0));
+        h.clear_sent();
+
+        fb.enter();
+
+        assert_eq!(fb.sftp_state, SftpState::WaitingLs);
+        assert_eq!(fb.core.remote_path, "/home/subdir");
+        let ls_cmds: Vec<_> = h
+            .sent()
+            .iter()
+            .filter(|s| s.starts_with("ls "))
+            .cloned()
+            .collect();
+        assert!(!ls_cmds.is_empty(), "should send ls, got: {:?}", h.sent());
+    }
+
+    #[test]
+    fn go_up_remote_sends_ls() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::Idle;
+        fb.core.remote_path = "/home/user".to_string();
+        fb.core.focus = BrowserFocus::Remote;
+        h.clear_sent();
+
+        fb.go_up();
+
+        assert_eq!(fb.sftp_state, SftpState::WaitingLs);
+        assert_eq!(fb.core.remote_path, "/home");
+        let ls_cmds: Vec<_> = h
+            .sent()
+            .iter()
+            .filter(|s| s.starts_with("ls "))
+            .cloned()
+            .collect();
+        assert!(!ls_cmds.is_empty());
+    }
+
+    #[test]
+    fn enter_ignored_when_not_idle() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::WaitingLs;
+        fb.core.focus = BrowserFocus::Remote;
+        fb.core.remote_entries.push(crate::browser::parse::FsEntry {
+            name: "dir".to_string(),
+            is_dir: true,
+            size: "4096".to_string(),
+            modified: "Jan 1 12:00".to_string(),
+            perms: "drwxr-xr-x".to_string(),
+        });
+        fb.core.remote_sel.select(Some(0));
+        h.clear_sent();
+
+        fb.enter();
+
+        assert_eq!(
+            fb.sftp_state,
+            SftpState::WaitingLs,
+            "should not change state"
+        );
+        assert!(h.sent().is_empty(), "should not send any command");
+    }
+
+    // ---- send_connect_key ----
+
+    #[test]
+    fn send_connect_key_forwards_chars() {
+        let (mut fb, h) = make_sftp();
+        h.clear_sent();
+
+        fb.send_connect_key(KeyCode::Char('y'));
+        fb.send_connect_key(KeyCode::Enter);
+        fb.send_connect_key(KeyCode::Backspace);
+
+        let s = h.sent();
+        assert_eq!(s.len(), 3);
+        assert_eq!(s[0], "y");
+        assert_eq!(s[1], "\r\n");
+        assert_eq!(s[2], "\x7f");
+    }
+
+    // ---- State label ----
+
+    #[test]
+    fn state_labels() {
+        let (mut fb, _h) = make_sftp();
+
+        let cases = [
+            (SftpState::Connecting, "connecting"),
+            (SftpState::WaitingPwd, "loading"),
+            (SftpState::WaitingLs, "loading"),
+            (SftpState::Idle, "idle"),
+            (SftpState::WaitingDelete, "deleting"),
+            (SftpState::Transferring, "transfer"),
+        ];
+        for (state, expected) in cases {
+            fb.sftp_state = state;
+            assert_eq!(fb.state_label().0, expected, "state_label for {:?}", state);
+        }
+    }
+
+    // ---- Progress suffix ----
+
+    #[test]
+    fn progress_suffix_file() {
+        let (mut fb, _h) = make_sftp();
+        fb.core.last_transfer = Some(TransferStatus {
+            filename: "f.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 42,
+            file_count: 0,
+        });
+        assert_eq!(fb.progress_suffix(), " 42%");
+    }
+
+    #[test]
+    fn progress_suffix_dir() {
+        let (mut fb, _h) = make_sftp();
+        fb.core.last_transfer = Some(TransferStatus {
+            filename: "d".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: true,
+            done: false,
+            progress: 0,
+            file_count: 5,
+        });
+        assert_eq!(fb.progress_suffix(), " (5 files)");
+    }
+
+    #[test]
+    fn progress_suffix_done() {
+        let (mut fb, _h) = make_sftp();
+        fb.core.last_transfer = Some(TransferStatus {
+            filename: "f.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: true,
+            progress: 100,
+            file_count: 0,
+        });
+        assert_eq!(fb.progress_suffix(), "");
+    }
+
+    #[test]
+    fn progress_suffix_none() {
+        let (fb, _h) = make_sftp();
+        assert_eq!(fb.progress_suffix(), "");
     }
 }

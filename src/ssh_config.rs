@@ -116,14 +116,14 @@ mod tests {
         // Regression: ensure the very first Host entry is included
         let content = "AddKeysToAgent yes\nIdentityFile ~/.ssh/id_ed25519\n\n\
                         Host first\n    HostName a.com\nHost second\n    HostName b.com\n";
-        let hosts = parse(&content);
+        let hosts = parse(content);
         assert_eq!(hosts, vec!["first", "second"]);
     }
 
     #[test]
     fn utf8_bom_first_host_not_lost() {
         let content = "\u{feff}Host first\n    HostName a.com\nHost second\n    HostName b.com\n";
-        let hosts = parse(&content);
+        let hosts = parse(content);
         assert_eq!(hosts, vec!["first", "second"]);
     }
 
@@ -131,7 +131,7 @@ mod tests {
     fn host_star_at_top_does_not_hide_entries() {
         let content = "Host *\n    ServerAliveInterval 60\n\n\
                         Host alpha\n    HostName a.com\nHost beta\n    HostName b.com\n";
-        let hosts = parse(&content);
+        let hosts = parse(content);
         assert_eq!(hosts, vec!["alpha", "beta"]);
     }
 

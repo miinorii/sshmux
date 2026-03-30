@@ -2282,4 +2282,233 @@ mod tests {
         assert_eq!(core.prompt_stable, 0);
         assert_eq!(core.status_msg, "Connecting…");
     }
+
+    // ---- render tests ----
+
+    fn render_buf(width: u16, height: u16) -> (Rect, Buffer) {
+        let area = Rect::new(0, 0, width, height);
+        (area, Buffer::empty(area))
+    }
+
+    fn buf_line_text(buf: &Buffer, y: u16) -> String {
+        let w = buf.area().width;
+        (0..w)
+            .map(|x| {
+                buf.cell((x, y))
+                    .map(|c| c.symbol().to_string())
+                    .unwrap_or_default()
+            })
+            .collect::<String>()
+    }
+
+    #[test]
+    fn render_confirm_delete_single_file() {
+        let mut core = BrowserCore::new("host");
+        core.confirm_delete = Some(DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::File,
+            path: "test.txt".to_string(),
+        });
+        let (area, mut buf) = render_buf(60, 1);
+
+        let rendered = core.render_confirm_delete(area, &mut buf);
+
+        assert!(rendered);
+        let text = buf_line_text(&buf, 0);
+        assert!(text.contains("Delete"), "should contain 'Delete': {}", text);
+        assert!(
+            text.contains("test.txt"),
+            "should contain filename: {}",
+            text
+        );
+        assert!(
+            text.contains("[y] Yes"),
+            "should contain yes option: {}",
+            text
+        );
+        assert!(
+            text.contains("[n] No"),
+            "should contain no option: {}",
+            text
+        );
+        assert!(
+            text.contains("remote"),
+            "should indicate remote side: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn render_confirm_delete_with_pending() {
+        let mut core = BrowserCore::new("host");
+        core.confirm_delete = Some(DeleteTarget {
+            location: DeleteLocation::Local,
+            kind: DeleteKind::Dir,
+            path: "mydir".to_string(),
+        });
+        core.pending_deletes.push(DeleteTarget {
+            location: DeleteLocation::Local,
+            kind: DeleteKind::File,
+            path: "other.txt".to_string(),
+        });
+        let (area, mut buf) = render_buf(70, 1);
+
+        core.render_confirm_delete(area, &mut buf);
+
+        let text = buf_line_text(&buf, 0);
+        assert!(text.contains("+1 more"), "should show +N more: {}", text);
+        assert!(
+            text.contains("local"),
+            "should indicate local side: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn render_confirm_delete_returns_false_when_none() {
+        let core = BrowserCore::new("host");
+        let (area, mut buf) = render_buf(60, 1);
+
+        let rendered = core.render_confirm_delete(area, &mut buf);
+
+        assert!(!rendered);
+    }
+
+    #[test]
+    fn render_normal_status_shows_state_and_message() {
+        let mut core = BrowserCore::new("host");
+        core.status_msg = "Connected to host".to_string();
+        let bindings = BrowserBindings::default();
+        let (area, mut buf) = render_buf(80, 1);
+
+        core.render_normal_status(area, &mut buf, "idle", Color::Green, "", &bindings);
+
+        let text = buf_line_text(&buf, 0);
+        assert!(
+            text.contains("[idle]"),
+            "should contain state label: {}",
+            text
+        );
+        assert!(
+            text.contains("Connected to host"),
+            "should contain status message: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn render_normal_status_shows_progress_suffix() {
+        let mut core = BrowserCore::new("host");
+        core.status_msg = "Downloading...".to_string();
+        let bindings = BrowserBindings::default();
+        let (area, mut buf) = render_buf(80, 1);
+
+        core.render_normal_status(area, &mut buf, "transfer", Color::Green, " 42%", &bindings);
+
+        let text = buf_line_text(&buf, 0);
+        assert!(text.contains("42%"), "should contain progress: {}", text);
+    }
+
+    #[test]
+    fn render_normal_status_shows_keybinding_hints() {
+        let mut core = BrowserCore::new("host");
+        core.status_msg = "ok".to_string();
+        let bindings = BrowserBindings::default();
+        let (area, mut buf) = render_buf(80, 1);
+
+        core.render_normal_status(area, &mut buf, "idle", Color::Green, "", &bindings);
+
+        let text = buf_line_text(&buf, 0);
+        assert!(
+            text.contains("xfer"),
+            "should contain transfer hint: {}",
+            text
+        );
+        assert!(text.contains("rm"), "should contain delete hint: {}", text);
+    }
+
+    #[test]
+    fn render_normal_status_shows_duration() {
+        let mut core = BrowserCore::new("host");
+        core.status_msg = "ok".to_string();
+        core.last_duration = Some(std::time::Duration::from_secs(5));
+        let bindings = BrowserBindings::default();
+        let (area, mut buf) = render_buf(80, 1);
+
+        core.render_normal_status(area, &mut buf, "idle", Color::Green, "", &bindings);
+
+        let text = buf_line_text(&buf, 0);
+        assert!(text.contains("5s"), "should contain duration: {}", text);
+    }
+
+    #[test]
+    fn render_transfer_progress_hidden_when_not_transferring() {
+        let core = BrowserCore::new("host");
+        let (area, mut buf) = render_buf(60, 10);
+
+        let rendered = core.render_transfer_progress(area, &mut buf, false);
+
+        assert!(!rendered);
+    }
+
+    #[test]
+    fn render_transfer_progress_shows_gauge_when_active() {
+        let mut core = BrowserCore::new("host");
+        core.last_transfer = Some(TransferStatus {
+            filename: "big.bin".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 50,
+            file_count: 0,
+        });
+        core.batch_done = 0;
+        core.batch_total = 1;
+        core.transfer_start = Some(std::time::Instant::now());
+        let (area, mut buf) = render_buf(60, 10);
+
+        let rendered = core.render_transfer_progress(area, &mut buf, true);
+
+        assert!(rendered);
+        // Check that the progress bar area contains something (not blank)
+        let mut found_content = false;
+        for y in 0..area.height {
+            let text = buf_line_text(&buf, y);
+            if text.contains("big.bin") || text.contains("50") || text.contains("Download") {
+                found_content = true;
+                break;
+            }
+        }
+        assert!(found_content, "should render transfer progress content");
+    }
+
+    #[test]
+    fn render_transfer_progress_shows_batch_info() {
+        let mut core = BrowserCore::new("host");
+        core.last_transfer = Some(TransferStatus {
+            filename: "file2.txt".to_string(),
+            direction: TransferDirection::Upload,
+            is_dir: false,
+            done: false,
+            progress: 75,
+            file_count: 0,
+        });
+        core.batch_done = 1;
+        core.batch_total = 3;
+        core.transfer_start = Some(std::time::Instant::now());
+        let (area, mut buf) = render_buf(60, 10);
+
+        core.render_transfer_progress(area, &mut buf, true);
+
+        // Format: "  File 2 of 3"
+        let mut found_batch = false;
+        for y in 0..area.height {
+            let text = buf_line_text(&buf, y);
+            if text.contains("File 2 of 3") {
+                found_batch = true;
+                break;
+            }
+        }
+        assert!(found_batch, "should show batch progress 'File 2 of 3'");
+    }
 }

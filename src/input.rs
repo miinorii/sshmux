@@ -14,7 +14,7 @@ use crate::pane::{
 // Action — returned by input handlers to signal the main loop
 // ---------------------------------------------------------------------------
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Action {
     Continue,
     Quit,
@@ -963,5 +963,762 @@ pub fn handle_paste(app: &mut App, text: &str) {
         app.send_str(&bracketed);
     } else {
         debug!("handle_paste: ignored (not a session pane)");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::ContextMenu;
+    use crate::keybindings::KeyBindings;
+    use crate::pane::{ConnectOverlay, Pane};
+    use crate::ssh_config::SshHost;
+    use ratatui::layout::Rect;
+
+    fn make_app() -> App {
+        let mut app = App::test_new();
+        app.keybindings = KeyBindings::default();
+        app
+    }
+
+    fn make_app_with_hosts(n: usize) -> App {
+        let mut app = make_app();
+        app.hosts = (0..n)
+            .map(|i| SshHost {
+                label: format!("host{}", i),
+            })
+            .collect();
+        app
+    }
+
+    fn area() -> Rect {
+        Rect::new(0, 0, 80, 24)
+    }
+
+    fn key(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, shift: bool) -> Action {
+        handle_key(app, code, ctrl, alt, shift, area())
+    }
+
+    // ---- Context menu dismissal ----
+
+    #[test]
+    fn context_menu_dismissed_by_any_key() {
+        let mut app = make_app();
+        app.context_menu = Some(ContextMenu {
+            col: 10,
+            row: 10,
+            selected: None,
+        });
+        let action = key(&mut app, KeyCode::Char('x'), false, false, false);
+        assert_eq!(action, Action::Continue);
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn context_menu_dismissed_by_esc() {
+        let mut app = make_app();
+        app.context_menu = Some(ContextMenu {
+            col: 10,
+            row: 10,
+            selected: None,
+        });
+        let action = key(&mut app, KeyCode::Esc, false, false, false);
+        assert_eq!(action, Action::Continue);
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn context_menu_dismissed_by_alt_key() {
+        let mut app = make_app();
+        app.context_menu = Some(ContextMenu {
+            col: 10,
+            row: 10,
+            selected: None,
+        });
+        // Alt+Q would normally quit, but context menu intercepts first
+        let action = key(&mut app, KeyCode::Char('q'), false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert!(app.context_menu.is_none());
+    }
+
+    // ---- Global shortcuts ----
+
+    #[test]
+    fn global_quit() {
+        let mut app = make_app();
+        let action = key(&mut app, KeyCode::Char('q'), false, true, false);
+        assert_eq!(action, Action::Quit);
+    }
+
+    #[test]
+    fn global_new_tab() {
+        let mut app = make_app();
+        assert_eq!(app.tabs.len(), 1);
+        let action = key(&mut app, KeyCode::Char('t'), false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.selected_tab, 1);
+    }
+
+    #[test]
+    fn global_close_last_pane_closes_tab() {
+        let mut app = make_app();
+        app.new_tab(); // 2 tabs
+        app.selected_tab = 0;
+        let action = key(&mut app, KeyCode::Char('w'), false, true, false);
+        assert_eq!(action, Action::Continue);
+        // Closing the only pane in tab 0 closes that tab
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn global_close_one_pane_in_split() {
+        let mut app = make_app();
+        app.tab_mut().split(Split::LeftRight, area());
+        assert_eq!(app.tab().leaf_count(), 2);
+        let action = key(&mut app, KeyCode::Char('w'), false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.tab().leaf_count(), 1);
+    }
+
+    #[test]
+    fn global_next_tab() {
+        let mut app = make_app();
+        app.new_tab();
+        app.selected_tab = 0;
+        let action = key(&mut app, KeyCode::Right, false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.selected_tab, 1);
+    }
+
+    #[test]
+    fn global_next_tab_wraps() {
+        let mut app = make_app();
+        app.new_tab();
+        app.selected_tab = 1;
+        let action = key(&mut app, KeyCode::Right, false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.selected_tab, 0);
+    }
+
+    #[test]
+    fn global_prev_tab() {
+        let mut app = make_app();
+        app.new_tab();
+        app.selected_tab = 1;
+        let action = key(&mut app, KeyCode::Left, false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.selected_tab, 0);
+    }
+
+    #[test]
+    fn global_prev_tab_wraps() {
+        let mut app = make_app();
+        app.new_tab();
+        app.selected_tab = 0;
+        let action = key(&mut app, KeyCode::Left, false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.selected_tab, 1);
+    }
+
+    #[test]
+    fn global_next_pane() {
+        let mut app = make_app();
+        app.tab_mut().split(Split::LeftRight, area());
+        app.tab_mut().focus_idx = 0;
+        let action = key(&mut app, KeyCode::Down, false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.tab().focus_idx, 1);
+    }
+
+    #[test]
+    fn global_prev_pane() {
+        let mut app = make_app();
+        app.tab_mut().split(Split::LeftRight, area());
+        app.tab_mut().focus_idx = 1;
+        let action = key(&mut app, KeyCode::Up, false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.tab().focus_idx, 0);
+    }
+
+    #[test]
+    fn global_split_horizontal() {
+        let mut app = make_app();
+        assert_eq!(app.tab().leaf_count(), 1);
+        let action = key(&mut app, KeyCode::Char('-'), false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.tab().leaf_count(), 2);
+    }
+
+    #[test]
+    fn global_split_vertical() {
+        let mut app = make_app();
+        assert_eq!(app.tab().leaf_count(), 1);
+        let action = key(&mut app, KeyCode::Char('+'), false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.tab().leaf_count(), 2);
+    }
+
+    // ---- Connect pane: host selection ----
+
+    #[test]
+    fn connect_select_next() {
+        let mut app = make_app_with_hosts(3);
+        // Initial selection is 0 (select_first in new_connect)
+        let action = key(&mut app, KeyCode::Down, false, false, false);
+        assert_eq!(action, Action::Continue);
+        if let Some(Pane::Connect { list_state, .. }) = app.tab().focused_pane() {
+            assert_eq!(list_state.selected(), Some(1));
+        } else {
+            panic!("expected Connect pane");
+        }
+    }
+
+    #[test]
+    fn connect_select_prev() {
+        let mut app = make_app_with_hosts(3);
+        // Move to index 1 first
+        key(&mut app, KeyCode::Down, false, false, false);
+        let action = key(&mut app, KeyCode::Up, false, false, false);
+        assert_eq!(action, Action::Continue);
+        if let Some(Pane::Connect { list_state, .. }) = app.tab().focused_pane() {
+            assert_eq!(list_state.selected(), Some(0));
+        } else {
+            panic!("expected Connect pane");
+        }
+    }
+
+    // ---- Connect pane: overlays ----
+
+    #[test]
+    fn connect_open_browser_menu() {
+        let mut app = make_app_with_hosts(1);
+        let action = key(&mut app, KeyCode::Char('b'), false, false, false);
+        assert_eq!(action, Action::Continue);
+        assert!(matches!(
+            app.tab().focused_pane(),
+            Some(Pane::Connect {
+                overlay: ConnectOverlay::BrowserMenu(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn connect_open_manual_connect() {
+        let mut app = make_app();
+        let action = key(&mut app, KeyCode::Char('c'), false, false, false);
+        assert_eq!(action, Action::Continue);
+        assert!(matches!(
+            app.tab().focused_pane(),
+            Some(Pane::Connect {
+                overlay: ConnectOverlay::ConnectInput(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn connect_open_key_editor() {
+        let mut app = make_app();
+        let action = key(&mut app, KeyCode::Char('h'), false, false, false);
+        assert_eq!(action, Action::Continue);
+        assert!(matches!(
+            app.tab().focused_pane(),
+            Some(Pane::Connect {
+                overlay: ConnectOverlay::KeyEditor(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn key_editor_h_in_nav_mode_is_noop() {
+        let mut app = make_app();
+        // Open key editor
+        key(&mut app, KeyCode::Char('h'), false, false, false);
+        assert!(matches!(
+            app.tab().focused_pane(),
+            Some(Pane::Connect {
+                overlay: ConnectOverlay::KeyEditor(_),
+                ..
+            })
+        ));
+        // 'h' inside the editor (nav mode) is unrecognized — overlay stays open
+        key(&mut app, KeyCode::Char('h'), false, false, false);
+        assert!(matches!(
+            app.tab().focused_pane(),
+            Some(Pane::Connect {
+                overlay: ConnectOverlay::KeyEditor(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn connect_esc_closes_overlay() {
+        let mut app = make_app();
+        // Open browser menu
+        key(&mut app, KeyCode::Char('b'), false, false, false);
+        let action = key(&mut app, KeyCode::Esc, false, false, false);
+        assert_eq!(action, Action::Continue);
+        assert!(matches!(
+            app.tab().focused_pane(),
+            Some(Pane::Connect {
+                overlay: ConnectOverlay::None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn connect_esc_on_no_overlay_is_noop() {
+        let mut app = make_app();
+        let action = key(&mut app, KeyCode::Esc, false, false, false);
+        assert_eq!(action, Action::Continue);
+        assert!(matches!(
+            app.tab().focused_pane(),
+            Some(Pane::Connect {
+                overlay: ConnectOverlay::None,
+                ..
+            })
+        ));
+    }
+
+    // ---- Browser menu overlay ----
+
+    #[test]
+    fn browser_menu_navigate() {
+        let mut app = make_app_with_hosts(1);
+        key(&mut app, KeyCode::Char('b'), false, false, false);
+        // Initial selection is 0
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::BrowserMenu(ms),
+            ..
+        }) = app.tab().focused_pane()
+        {
+            assert_eq!(ms.selected(), Some(0));
+        } else {
+            panic!("expected BrowserMenu");
+        }
+        // Move down
+        key(&mut app, KeyCode::Down, false, false, false);
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::BrowserMenu(ms),
+            ..
+        }) = app.tab().focused_pane()
+        {
+            assert_eq!(ms.selected(), Some(1));
+        } else {
+            panic!("expected BrowserMenu");
+        }
+        // Move up
+        key(&mut app, KeyCode::Up, false, false, false);
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::BrowserMenu(ms),
+            ..
+        }) = app.tab().focused_pane()
+        {
+            assert_eq!(ms.selected(), Some(0));
+        } else {
+            panic!("expected BrowserMenu");
+        }
+    }
+
+    #[test]
+    fn browser_menu_esc_closes() {
+        let mut app = make_app_with_hosts(1);
+        key(&mut app, KeyCode::Char('b'), false, false, false);
+        key(&mut app, KeyCode::Esc, false, false, false);
+        assert!(matches!(
+            app.tab().focused_pane(),
+            Some(Pane::Connect {
+                overlay: ConnectOverlay::None,
+                ..
+            })
+        ));
+    }
+
+    // ---- Connect input overlay ----
+
+    #[test]
+    fn connect_input_char_append() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('c'), false, false, false);
+        key(&mut app, KeyCode::Char('h'), false, false, false);
+        key(&mut app, KeyCode::Char('o'), false, false, false);
+        key(&mut app, KeyCode::Char('s'), false, false, false);
+        key(&mut app, KeyCode::Char('t'), false, false, false);
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::ConnectInput(input),
+            ..
+        }) = app.tab().focused_pane()
+        {
+            assert_eq!(input, "host");
+        } else {
+            panic!("expected ConnectInput");
+        }
+    }
+
+    #[test]
+    fn connect_input_backspace() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('c'), false, false, false);
+        key(&mut app, KeyCode::Char('a'), false, false, false);
+        key(&mut app, KeyCode::Char('b'), false, false, false);
+        key(&mut app, KeyCode::Backspace, false, false, false);
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::ConnectInput(input),
+            ..
+        }) = app.tab().focused_pane()
+        {
+            assert_eq!(input, "a");
+        } else {
+            panic!("expected ConnectInput");
+        }
+    }
+
+    #[test]
+    fn connect_input_esc_closes() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('c'), false, false, false);
+        key(&mut app, KeyCode::Esc, false, false, false);
+        assert!(matches!(
+            app.tab().focused_pane(),
+            Some(Pane::Connect {
+                overlay: ConnectOverlay::None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn connect_input_enter_empty_closes() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('c'), false, false, false);
+        // Enter on empty input closes overlay
+        key(&mut app, KeyCode::Enter, false, false, false);
+        assert!(matches!(
+            app.tab().focused_pane(),
+            Some(Pane::Connect {
+                overlay: ConnectOverlay::None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn connect_input_ctrl_char_ignored() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('c'), false, false, false);
+        // Ctrl+char should not be appended
+        key(&mut app, KeyCode::Char('a'), true, false, false);
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::ConnectInput(input),
+            ..
+        }) = app.tab().focused_pane()
+        {
+            assert_eq!(input, "");
+        } else {
+            panic!("expected ConnectInput");
+        }
+    }
+
+    // ---- Key editor overlay: navigation ----
+
+    #[test]
+    fn key_editor_initial_selection() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('h'), false, false, false);
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::KeyEditor(editor),
+            ..
+        }) = app.tab().focused_pane()
+        {
+            // Initial selection is 1 (first binding, index 0 is header)
+            assert_eq!(editor.list_state.selected(), Some(1));
+            assert!(!editor.editing);
+        } else {
+            panic!("expected KeyEditor");
+        }
+    }
+
+    #[test]
+    fn key_editor_nav_down_skips_header() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('h'), false, false, false);
+        // Navigate to index 9 (last global binding), next should skip header at 10
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::KeyEditor(editor),
+            ..
+        }) = app.tab_mut().focused_pane_mut()
+        {
+            editor.list_state.select(Some(9));
+        }
+        key(&mut app, KeyCode::Down, false, false, false);
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::KeyEditor(editor),
+            ..
+        }) = app.tab().focused_pane()
+        {
+            // Should skip header at 10, land on 11
+            assert_eq!(editor.list_state.selected(), Some(11));
+        } else {
+            panic!("expected KeyEditor");
+        }
+    }
+
+    #[test]
+    fn key_editor_nav_up_skips_header() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('h'), false, false, false);
+        // Position at index 11 (first connect binding), up should skip header at 10
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::KeyEditor(editor),
+            ..
+        }) = app.tab_mut().focused_pane_mut()
+        {
+            editor.list_state.select(Some(11));
+        }
+        key(&mut app, KeyCode::Up, false, false, false);
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::KeyEditor(editor),
+            ..
+        }) = app.tab().focused_pane()
+        {
+            // Should skip header at 10, land on 9
+            assert_eq!(editor.list_state.selected(), Some(9));
+        } else {
+            panic!("expected KeyEditor");
+        }
+    }
+
+    #[test]
+    fn key_editor_enter_starts_editing() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('h'), false, false, false);
+        // Selection starts at 1 (a binding row, not a header)
+        key(&mut app, KeyCode::Enter, false, false, false);
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::KeyEditor(editor),
+            ..
+        }) = app.tab().focused_pane()
+        {
+            assert!(editor.editing);
+            assert!(editor.status.is_none());
+        } else {
+            panic!("expected KeyEditor");
+        }
+    }
+
+    #[test]
+    fn key_editor_enter_on_header_noop() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('h'), false, false, false);
+        // Force selection to header index 0
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::KeyEditor(editor),
+            ..
+        }) = app.tab_mut().focused_pane_mut()
+        {
+            editor.list_state.select(Some(0));
+        }
+        key(&mut app, KeyCode::Enter, false, false, false);
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::KeyEditor(editor),
+            ..
+        }) = app.tab().focused_pane()
+        {
+            assert!(!editor.editing);
+        } else {
+            panic!("expected KeyEditor");
+        }
+    }
+
+    #[test]
+    fn key_editor_esc_cancels_editing() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('h'), false, false, false);
+        key(&mut app, KeyCode::Enter, false, false, false); // start editing
+        let action = key(&mut app, KeyCode::Esc, false, false, false);
+        assert_eq!(action, Action::Continue);
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::KeyEditor(editor),
+            ..
+        }) = app.tab().focused_pane()
+        {
+            assert!(!editor.editing);
+            assert_eq!(editor.status.as_deref(), Some("Cancelled"));
+        } else {
+            panic!("expected KeyEditor");
+        }
+    }
+
+    #[test]
+    fn key_editor_esc_closes_in_nav_mode() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('h'), false, false, false);
+        key(&mut app, KeyCode::Esc, false, false, false);
+        assert!(matches!(
+            app.tab().focused_pane(),
+            Some(Pane::Connect {
+                overlay: ConnectOverlay::None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn key_editor_capture_sets_binding() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('h'), false, false, false);
+        // Selection is at 1 = first binding = global.quit (default: Alt+Q)
+        key(&mut app, KeyCode::Enter, false, false, false); // start editing
+        // Capture F5 as new binding
+        key(&mut app, KeyCode::F(5), false, false, false);
+        // Should no longer be editing, status = "Saved!"
+        if let Some(Pane::Connect {
+            overlay: ConnectOverlay::KeyEditor(editor),
+            ..
+        }) = app.tab().focused_pane()
+        {
+            assert!(!editor.editing);
+            assert_eq!(editor.status.as_deref(), Some("Saved!"));
+        } else {
+            panic!("expected KeyEditor");
+        }
+        // The binding should have changed
+        assert_eq!(app.keybindings.global.quit.code, KeyCode::F(5));
+        assert!(!app.keybindings.global.quit.alt);
+    }
+
+    #[test]
+    fn key_editor_capture_bypasses_global_quit() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('h'), false, false, false);
+        key(&mut app, KeyCode::Enter, false, false, false); // start editing
+        // Alt+Q would normally quit, but in capture mode it sets the binding instead
+        let action = key(&mut app, KeyCode::Char('q'), false, true, false);
+        assert_eq!(action, Action::Continue); // NOT Quit
+        // Binding should be set to Alt+Q (same as before, but via capture)
+        assert_eq!(app.keybindings.global.quit.code, KeyCode::Char('q'));
+        assert!(app.keybindings.global.quit.alt);
+    }
+
+    // ---- Global shortcuts not intercepted when editor capturing ----
+
+    #[test]
+    fn editor_capture_blocks_all_global_shortcuts() {
+        let mut app = make_app();
+        app.new_tab(); // 2 tabs
+        app.selected_tab = 0;
+        key(&mut app, KeyCode::Char('h'), false, false, false);
+        key(&mut app, KeyCode::Enter, false, false, false); // start editing
+
+        // Alt+T (new tab) should be captured, not create a new tab
+        let action = key(&mut app, KeyCode::Char('t'), false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.tabs.len(), 2); // no new tab created
+    }
+
+    // ---- Tab switching ----
+
+    #[test]
+    fn prev_tab_single_tab_stays() {
+        let mut app = make_app();
+        let action = key(&mut app, KeyCode::Left, false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.selected_tab, 0);
+    }
+
+    #[test]
+    fn next_tab_single_tab_stays() {
+        let mut app = make_app();
+        let action = key(&mut app, KeyCode::Right, false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.selected_tab, 0);
+    }
+
+    // ---- Focus cycling ----
+
+    #[test]
+    fn focus_next_wraps_around() {
+        let mut app = make_app();
+        app.tab_mut().split(Split::LeftRight, area());
+        app.tab_mut().focus_idx = 1;
+        let action = key(&mut app, KeyCode::Down, false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.tab().focus_idx, 0);
+    }
+
+    #[test]
+    fn focus_prev_wraps_around() {
+        let mut app = make_app();
+        app.tab_mut().split(Split::LeftRight, area());
+        app.tab_mut().focus_idx = 0;
+        let action = key(&mut app, KeyCode::Up, false, true, false);
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.tab().focus_idx, 1);
+    }
+
+    // ---- Alt suppression on Connect pane ----
+
+    #[test]
+    fn unbound_alt_char_on_connect_pane_handled() {
+        let mut app = make_app();
+        // Alt+Z is not bound to anything — on a Connect pane, handle_connect_key
+        // still returns Some(Action::Continue) for any unrecognized key.
+        let action = key(&mut app, KeyCode::Char('z'), false, true, false);
+        assert_eq!(action, Action::Continue);
+    }
+
+    // ---- Browser menu overlay absorbs keys ----
+
+    #[test]
+    fn browser_menu_unrecognized_key_noop() {
+        let mut app = make_app_with_hosts(1);
+        key(&mut app, KeyCode::Char('b'), false, false, false);
+        // An unrecognized key in the menu is handled (returns Continue), menu stays open
+        key(&mut app, KeyCode::Char('x'), false, false, false);
+        assert!(matches!(
+            app.tab().focused_pane(),
+            Some(Pane::Connect {
+                overlay: ConnectOverlay::BrowserMenu(_),
+                ..
+            })
+        ));
+    }
+
+    // ---- Multiple global actions in sequence ----
+
+    #[test]
+    fn new_tab_then_switch_back() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('t'), false, true, false); // new tab
+        assert_eq!(app.selected_tab, 1);
+        key(&mut app, KeyCode::Left, false, true, false); // prev tab
+        assert_eq!(app.selected_tab, 0);
+    }
+
+    #[test]
+    fn split_then_close_returns_to_single() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('+'), false, true, false); // split vertical
+        assert_eq!(app.tab().leaf_count(), 2);
+        key(&mut app, KeyCode::Char('w'), false, true, false); // close pane
+        assert_eq!(app.tab().leaf_count(), 1);
+    }
+
+    // ---- Handle paste ----
+
+    #[test]
+    fn paste_ignored_on_connect_pane() {
+        let mut app = make_app();
+        // Should not panic — paste on non-session pane is a no-op
+        handle_paste(&mut app, "hello world");
     }
 }

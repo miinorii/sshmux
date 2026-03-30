@@ -287,17 +287,17 @@ impl Pane {
         match self {
             Pane::Session { terminal, .. } => terminal.dirty.swap(false, Ordering::AcqRel),
             Pane::FileBrowser { browser } => {
-                let pty_dirty = browser.sftp.dirty.swap(false, Ordering::AcqRel);
+                let pty_dirty = browser.sftp.take_dirty();
                 let state_dirty = browser.core.needs_redraw;
                 browser.core.needs_redraw = false;
                 pty_dirty || state_dirty
             }
             Pane::SshBrowser { browser } => {
-                let pty_dirty = browser.ssh.dirty.swap(false, Ordering::AcqRel);
+                let pty_dirty = browser.ssh.take_dirty();
                 let scp_dirty = browser
                     .scp_pty
-                    .as_ref()
-                    .map(|s| s.dirty.swap(false, Ordering::AcqRel))
+                    .as_mut()
+                    .map(|s| s.take_dirty())
                     .unwrap_or(false);
                 let state_dirty = browser.core.needs_redraw;
                 browser.core.needs_redraw = false;

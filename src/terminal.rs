@@ -33,6 +33,28 @@ pub fn count_dsr(data: &[u8]) -> usize {
     count
 }
 
+/// Trait abstracting the raw-output interface of a pseudo-terminal.
+///
+/// Browsers interact with the PTY exclusively through these methods.
+/// `EmbeddedTerminal` implements this for production; tests can substitute
+/// a `MockPty` to drive state machines without a real PTY.
+pub trait PtyChannel {
+    fn raw_len(&self) -> usize;
+    fn raw_lines(&self) -> Vec<String>;
+    fn drain_raw(&self);
+    fn send_str(&mut self, s: &str);
+    fn send_char(&mut self, c: char) {
+        let mut buf = [0u8; 4];
+        let s = c.encode_utf8(&mut buf);
+        self.send_str(s);
+    }
+    fn process_exited(&self) -> bool;
+    /// Return the last `n` bytes of the raw output buffer (or fewer if shorter).
+    fn raw_tail(&self, n: usize) -> Vec<u8>;
+    /// Atomically swap the dirty flag, returning the previous value.
+    fn take_dirty(&mut self) -> bool;
+}
+
 /// A single pseudo-terminal session driven by an arbitrary command.
 pub struct EmbeddedTerminal {
     pub parser: Arc<Mutex<Parser>>,
@@ -372,6 +394,41 @@ impl EmbeddedTerminal {
         }
         false
     }
+
+    pub fn raw_tail(&self, n: usize) -> Vec<u8> {
+        let Ok(rb) = self.raw_output.lock() else {
+            return vec![];
+        };
+        let start = rb.len().saturating_sub(n);
+        rb[start..].to_vec()
+    }
+}
+
+impl PtyChannel for EmbeddedTerminal {
+    fn raw_len(&self) -> usize {
+        self.raw_len()
+    }
+    fn raw_lines(&self) -> Vec<String> {
+        self.raw_lines()
+    }
+    fn drain_raw(&self) {
+        self.drain_raw()
+    }
+    fn send_str(&mut self, s: &str) {
+        self.send_str(s);
+    }
+    fn send_char(&mut self, c: char) {
+        self.send_char(c);
+    }
+    fn process_exited(&self) -> bool {
+        self.process_exited()
+    }
+    fn raw_tail(&self, n: usize) -> Vec<u8> {
+        self.raw_tail(n)
+    }
+    fn take_dirty(&mut self) -> bool {
+        self.dirty.swap(false, Ordering::AcqRel)
+    }
 }
 
 impl Drop for EmbeddedTerminal {
@@ -387,6 +444,99 @@ impl Drop for EmbeddedTerminal {
                 debug!("background child cleanup finished");
             });
         }
+    }
+}
+
+/// Shared handle for interacting with a `MockPty` from test code.
+/// Provides read access to sent commands and write access to the raw buffer.
+#[cfg(test)]
+#[derive(Clone)]
+pub struct MockPtyHandle {
+    raw: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+    sent: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    exited: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+#[cfg(test)]
+impl MockPtyHandle {
+    /// Append data to the mock's raw buffer (simulates PTY output arriving).
+    pub fn feed(&self, data: &[u8]) {
+        self.raw.borrow_mut().extend_from_slice(data);
+    }
+
+    /// Return a snapshot of all commands sent to the PTY so far.
+    pub fn sent(&self) -> Vec<String> {
+        self.sent.borrow().clone()
+    }
+
+    /// Clear the recorded sent commands.
+    pub fn clear_sent(&self) {
+        self.sent.borrow_mut().clear();
+    }
+
+    /// Mark the mock process as exited.
+    pub fn set_exited(&self, v: bool) {
+        self.exited.set(v);
+    }
+}
+
+/// Mock PTY for testing browser state machines without a real process.
+#[cfg(test)]
+pub struct MockPty {
+    raw: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+    sent: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    exited: std::rc::Rc<std::cell::Cell<bool>>,
+    pub dirty: bool,
+}
+
+#[cfg(test)]
+impl MockPty {
+    pub fn new() -> (Self, MockPtyHandle) {
+        let raw = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let exited = std::rc::Rc::new(std::cell::Cell::new(false));
+        let handle = MockPtyHandle {
+            raw: raw.clone(),
+            sent: sent.clone(),
+            exited: exited.clone(),
+        };
+        let mock = MockPty {
+            raw,
+            sent,
+            exited,
+            dirty: false,
+        };
+        (mock, handle)
+    }
+}
+
+#[cfg(test)]
+impl PtyChannel for MockPty {
+    fn raw_len(&self) -> usize {
+        self.raw.borrow().len()
+    }
+    fn raw_lines(&self) -> Vec<String> {
+        crate::browser::parse::strip_ansi(&self.raw.borrow())
+            .lines()
+            .map(|l| l.trim_end().to_string())
+            .collect()
+    }
+    fn drain_raw(&self) {
+        self.raw.borrow_mut().clear();
+    }
+    fn send_str(&mut self, s: &str) {
+        self.sent.borrow_mut().push(s.to_string());
+    }
+    fn process_exited(&self) -> bool {
+        self.exited.get()
+    }
+    fn raw_tail(&self, n: usize) -> Vec<u8> {
+        let rb = self.raw.borrow();
+        let start = rb.len().saturating_sub(n);
+        rb[start..].to_vec()
+    }
+    fn take_dirty(&mut self) -> bool {
+        std::mem::replace(&mut self.dirty, false)
     }
 }
 

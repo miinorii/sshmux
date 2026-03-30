@@ -281,11 +281,10 @@ impl App {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_app() -> App {
+impl App {
+    /// Test-only constructor: no SSH config parsing, default keybindings, no disk I/O.
+    #[cfg(test)]
+    pub fn test_new() -> Self {
         App {
             tabs: vec![Tab::new("1")],
             selected_tab: 0,
@@ -294,6 +293,15 @@ mod tests {
             keybindings: KeyBindings::default(),
             next_tab_id: 2,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_app() -> App {
+        App::test_new()
     }
 
     #[test]
