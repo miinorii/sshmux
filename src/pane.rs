@@ -39,6 +39,12 @@ pub struct KeyEditorState {
     pub status: Option<String>,
 }
 
+impl Default for KeyEditorState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KeyEditorState {
     pub fn new() -> Self {
         let mut ls = ListState::default();

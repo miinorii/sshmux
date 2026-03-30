@@ -14,22 +14,10 @@ use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
 use time::OffsetDateTime;
 
-// ---------------------------------------------------------------------------
-// Module declarations
-// ---------------------------------------------------------------------------
-
-mod app;
-mod browser;
-mod input;
-mod keybindings;
-mod pane;
-mod ssh_config;
-mod tab;
-mod terminal;
-
-use app::App;
-use input::Action;
-use pane::pane_inner;
+use sshmux::app::App;
+use sshmux::input::{self, Action};
+use sshmux::keybindings::KeyBindings;
+use sshmux::pane::pane_inner;
 
 // ---------------------------------------------------------------------------
 // main
@@ -37,7 +25,7 @@ use pane::pane_inner;
 
 fn main() -> Result<()> {
     if std::env::args().any(|a| a == "--reset-kb") {
-        let kb = crate::keybindings::KeyBindings::default();
+        let kb = KeyBindings::default();
         match kb.save() {
             Ok(()) => {
                 eprintln!("keybindings reset to defaults");

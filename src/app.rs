@@ -52,6 +52,12 @@ pub struct App {
     next_tab_id: usize,
 }
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         App {

@@ -1,0 +1,12 @@
+services:
+  sshd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "2222:22"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "22"]
+      interval: 1s
+      timeout: 2s
+      retries: 10

@@ -2,3 +2,6 @@
 debug.log
 .claude
 *.log
+# Docker integration test SSH keys (private key must never be committed)
+tests/docker/test_key
+tests/docker/test_key.pub
