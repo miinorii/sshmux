@@ -179,10 +179,11 @@ sshmux --reset-kb
 | `browser/sftp.rs` | `FileBrowser` — SFTP state machine and commands |
 | `browser/ssh.rs` | `SshBrowser` — SSH/SCP state machine, password handling |
 | `browser/parse.rs` | `ls -la` parsing, ANSI stripping, transfer progress scraping |
-| `terminal.rs` | `EmbeddedTerminal` — PTY wrapper (portable\_pty + vt100) |
+| `terminal.rs` | `EmbeddedTerminal` — PTY wrapper (portable\_pty + vt100), `PtyChannel` trait, `MockPty` |
 | `keybindings.rs` | `KeyBindings` — key binding definitions, config load/save, editor support |
 | `tab.rs` | `Tab` — pane tree + focus index |
 | `ssh_config.rs` | `~/.ssh/config` parser |
+| `lib.rs` | Public module re-exports for integration tests |
 
 Both `FileBrowser` and `SshBrowser` hold a `BrowserCore` field (`core`) that provides all shared browser functionality: dual-panel rendering, local navigation, click/drag handling, delete confirmation, and the common key dispatch via `handle_browser_key()`. Browser-specific logic (SFTP commands, SCP process spawning, password prompts) stays on the outer struct.
 
@@ -277,6 +278,28 @@ cargo build --release
 ```
 
 Binary: `target/release/sshmux`
+
+## Testing
+
+```bash
+cargo test --lib    # 373 unit tests (inline in source files)
+```
+
+Integration tests require a Docker SSH server and are skipped by default:
+
+```bash
+cd tests/docker && docker compose up -d --build --wait   # start container
+cargo test -- --ignored                                    # 13 integration tests
+cd tests/docker && docker compose down                     # stop container
+```
+
+Or use the helper script:
+
+```bash
+tests/run-integration.sh
+```
+
+Integration tests cover SSH terminal connections, SFTP browser (navigate, download, upload, delete), and SCP browser (navigate, download, upload) against a real SSH daemon.
 
 ## Logging
 
