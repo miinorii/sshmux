@@ -7,11 +7,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cargo build --release        # Release binary at target/release/sshmux
 cargo build                  # Debug build
-cargo test                   # Run all tests (~200 tests, inline in source files)
+cargo test --lib             # Run all tests (~373 tests, inline in source files)
 cargo test pane::tests       # Run tests for a specific module
 cargo test test_name         # Run a single test by name
 cargo clippy --release       # Lint — keep at zero warnings
 cargo fmt                    # Format — run before every commit
+```
+
+### Integration tests (Docker)
+
+Integration tests are `#[ignore]`d so `cargo test` skips them. They require a Docker SSH server:
+
+```bash
+cd tests/docker && docker compose up -d --build --wait   # start container
+cargo test -- --ignored                                    # run integration tests
+cd tests/docker && docker compose down                     # stop container
 ```
 
 Debug logging: `sshmux --log=LEVEL` (trace/debug/info/warn/error).
