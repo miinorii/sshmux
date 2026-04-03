@@ -408,6 +408,7 @@ fn handle_connect_key(
                     let new_kb = KeyBinding::new(code, ctrl, alt, shift);
                     app.keybindings
                         .set_binding(entry.group, entry.field, new_kb);
+                    #[cfg(not(test))]
                     match app.keybindings.save() {
                         Ok(()) => {}
                         Err(e) => error!("save keybindings: {e}"),
