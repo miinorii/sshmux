@@ -1467,4 +1467,238 @@ mod tests {
             );
         }
     }
+
+    // ---- split_areas with unequal ratios (drag resize effect) ---------------
+
+    #[test]
+    fn split_areas_lr_unequal_ratios_left_is_wider() {
+        // ratio [200, 100] should give the left pane roughly double the right pane.
+        let a = split_areas(r(90, 20), &Split::LeftRight, &[200, 100]);
+        // Total pane space = 89 (1 separator). Left ~ 59, right ~ 30.
+        assert!(a[0].width > a[1].width, "left pane should be wider with ratio 200:100");
+        assert!(a[0].width > a[1].width * 3 / 2, "left pane should be at least 1.5x right");
+        assert_eq!(a[0].width + a[1].width, 89);
+    }
+
+    #[test]
+    fn split_areas_tb_unequal_ratios_top_is_taller() {
+        // ratio [300, 100] should give the top pane roughly 3x the bottom.
+        let a = split_areas(r(80, 40), &Split::TopBottom, &[300, 100]);
+        assert!(a[0].height > a[1].height, "top pane should be taller with ratio 300:100");
+        assert!(a[0].height > a[1].height * 2, "top pane should be more than 2x bottom");
+        assert_eq!(a[0].height + a[1].height, 40);
+    }
+
+    #[test]
+    fn split_areas_lr_min_ratio_still_allocates_space() {
+        // Even with a very small ratio, the pane still gets at least some space.
+        let a = split_areas(r(60, 10), &Split::LeftRight, &[1, 99]);
+        assert!(a[0].width >= 1);
+        assert!(a[1].width >= 1);
+        assert_eq!(a[0].width + a[1].width, 59); // 1 separator
+    }
+
+    // ---- hit_test_separator -------------------------------------------------
+
+    #[test]
+    fn hit_test_lr_hits_separator() {
+        // r(21,10) with [100,100]: separator is at x=10 (child[0] has width=10).
+        let p = hsplit();
+        let areas = split_areas(r(21, 10), &Split::LeftRight, &[100, 100]);
+        let sep_x = areas[0].right();
+        let hit = hit_test_separator(&p, r(21, 10), sep_x, 5);
+        assert!(hit.is_some(), "should hit LR separator at x={sep_x}");
+        let hit = hit.unwrap();
+        assert_eq!(hit.sep_idx, 0);
+        assert!(hit.horizontal);
+        assert_eq!(hit.path, vec![]);
+    }
+
+    #[test]
+    fn hit_test_lr_misses_left_of_separator() {
+        let p = hsplit();
+        let areas = split_areas(r(21, 10), &Split::LeftRight, &[100, 100]);
+        let sep_x = areas[0].right();
+        assert!(hit_test_separator(&p, r(21, 10), sep_x - 1, 5).is_none());
+    }
+
+    #[test]
+    fn hit_test_lr_misses_right_of_separator() {
+        let p = hsplit();
+        let areas = split_areas(r(21, 10), &Split::LeftRight, &[100, 100]);
+        let sep_x = areas[0].right();
+        assert!(hit_test_separator(&p, r(21, 10), sep_x + 1, 5).is_none());
+    }
+
+    #[test]
+    fn hit_test_tb_hits_separator() {
+        // r(80,20) with [100,100]: separator is the title bar row of child[1] at y=10.
+        let p = vsplit();
+        let areas = split_areas(r(80, 20), &Split::TopBottom, &[100, 100]);
+        let sep_y = areas[1].y;
+        let hit = hit_test_separator(&p, r(80, 20), 40, sep_y);
+        assert!(hit.is_some(), "should hit TB separator at y={sep_y}");
+        let hit = hit.unwrap();
+        assert_eq!(hit.sep_idx, 0);
+        assert!(!hit.horizontal);
+        assert_eq!(hit.path, vec![]);
+    }
+
+    #[test]
+    fn hit_test_tb_misses_above_separator() {
+        let p = vsplit();
+        let areas = split_areas(r(80, 20), &Split::TopBottom, &[100, 100]);
+        let sep_y = areas[1].y;
+        assert!(hit_test_separator(&p, r(80, 20), 40, sep_y - 1).is_none());
+    }
+
+    #[test]
+    fn hit_test_leaf_returns_none() {
+        assert!(hit_test_separator(&connect(), r(80, 20), 10, 10).is_none());
+    }
+
+    #[test]
+    fn hit_test_lr_three_panes_second_separator() {
+        // 3-child LR split: sep[0] between child[0] and child[1], sep[1] between [1] and [2].
+        let p = Pane::Split {
+            kind: Split::LeftRight,
+            children: vec![connect(), connect(), connect()],
+            ratios: vec![100, 100, 100],
+        };
+        let area = r(62, 10);
+        let areas = split_areas(area, &Split::LeftRight, &[100, 100, 100]);
+        let sep1_x = areas[1].right(); // right edge of child[1] = second separator
+        let hit = hit_test_separator(&p, area, sep1_x, 5);
+        assert!(hit.is_some(), "should hit second LR separator");
+        assert_eq!(hit.unwrap().sep_idx, 1);
+    }
+
+    #[test]
+    fn hit_test_nested_prepends_path() {
+        // Outer LeftRight: child[0]=connect, child[1]=TopBottom(connect, connect).
+        // Clicking the TB separator inside child[1] should return path=[1].
+        let inner_area_r = r(80, 20);
+        let outer = Pane::Split {
+            kind: Split::LeftRight,
+            children: vec![
+                connect(),
+                Pane::Split {
+                    kind: Split::TopBottom,
+                    children: vec![connect(), connect()],
+                    ratios: vec![100, 100],
+                },
+            ],
+            ratios: vec![100, 100],
+        };
+        let outer_areas = split_areas(inner_area_r, &Split::LeftRight, &[100, 100]);
+        let right_area = outer_areas[1];
+        let inner_areas = split_areas(right_area, &Split::TopBottom, &[100, 100]);
+        let sep_y = inner_areas[1].y;
+        // Click in the right child's TB separator row.
+        let hit = hit_test_separator(&outer, inner_area_r, right_area.x + 2, sep_y);
+        assert!(hit.is_some(), "should hit nested TB separator");
+        let hit = hit.unwrap();
+        assert_eq!(hit.path, vec![1], "path should point to child[1]");
+        assert!(!hit.horizontal);
+        assert_eq!(hit.sep_idx, 0);
+    }
+
+    #[test]
+    fn hit_test_split_area_is_containing_node_area() {
+        // The split_area in the returned hit should match the area passed to the hit-testing Split.
+        let p = hsplit();
+        let area = r(21, 10);
+        let areas = split_areas(area, &Split::LeftRight, &[100, 100]);
+        let sep_x = areas[0].right();
+        let hit = hit_test_separator(&p, area, sep_x, 5).unwrap();
+        assert_eq!(hit.split_area, area);
+    }
+
+    // ---- split_at_path_mut --------------------------------------------------
+
+    #[test]
+    fn split_at_path_empty_returns_root() {
+        let mut p = hsplit();
+        let result = split_at_path_mut(&mut p, &[]);
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap(), Pane::Split { kind: Split::LeftRight, .. }));
+    }
+
+    #[test]
+    fn split_at_path_single_step_child0() {
+        // path [0] navigates into child[0] — which is a leaf, so returns Some(leaf)
+        let mut p = Pane::Split {
+            kind: Split::LeftRight,
+            children: vec![vsplit(), connect()],
+            ratios: vec![100, 100],
+        };
+        let result = split_at_path_mut(&mut p, &[0]);
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap(), Pane::Split { kind: Split::TopBottom, .. }));
+    }
+
+    #[test]
+    fn split_at_path_single_step_child1() {
+        let mut p = Pane::Split {
+            kind: Split::LeftRight,
+            children: vec![connect(), vsplit()],
+            ratios: vec![100, 100],
+        };
+        let result = split_at_path_mut(&mut p, &[1]);
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap(), Pane::Split { kind: Split::TopBottom, .. }));
+    }
+
+    #[test]
+    fn split_at_path_nested_two_levels() {
+        // root=LR(connect, TB(connect, LR(connect, connect)))
+        // path [1, 1] should reach the inner LR split
+        let mut p = Pane::Split {
+            kind: Split::LeftRight,
+            children: vec![
+                connect(),
+                Pane::Split {
+                    kind: Split::TopBottom,
+                    children: vec![
+                        connect(),
+                        Pane::Split {
+                            kind: Split::LeftRight,
+                            children: vec![connect(), connect()],
+                            ratios: vec![100, 100],
+                        },
+                    ],
+                    ratios: vec![100, 100],
+                },
+            ],
+            ratios: vec![100, 100],
+        };
+        let result = split_at_path_mut(&mut p, &[1, 1]);
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap(), Pane::Split { kind: Split::LeftRight, .. }));
+    }
+
+    #[test]
+    fn split_at_path_out_of_bounds_returns_none() {
+        let mut p = hsplit(); // 2 children
+        assert!(split_at_path_mut(&mut p, &[5]).is_none());
+    }
+
+    #[test]
+    fn split_at_path_into_leaf_returns_none() {
+        // path [0, 0] into an LR split whose children are leaves — can't descend further
+        let mut p = hsplit();
+        assert!(split_at_path_mut(&mut p, &[0, 0]).is_none());
+    }
+
+    #[test]
+    fn split_at_path_mut_modifies_ratios() {
+        // Verify we can actually mutate the node returned by split_at_path_mut.
+        let mut p = hsplit();
+        if let Some(Pane::Split { ratios, .. }) = split_at_path_mut(&mut p, &[]) {
+            ratios[0] = 200;
+        }
+        if let Pane::Split { ratios, .. } = &p {
+            assert_eq!(ratios[0], 200, "mutation through split_at_path_mut should be visible");
+        }
+    }
 }
