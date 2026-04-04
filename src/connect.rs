@@ -288,10 +288,7 @@ impl ConnectPane {
                     buf.set_line(
                         ed_area.x + 2,
                         status_y,
-                        &Line::from(Span::styled(
-                            status_line,
-                            Style::default().fg(Color::Green),
-                        )),
+                        &Line::from(Span::styled(status_line, Style::default().fg(Color::Green))),
                         ed_area.width.saturating_sub(4),
                     );
                 }
@@ -309,9 +306,7 @@ impl ConnectPane {
                 };
                 let display = format!("{}_", input);
                 let paragraph = Paragraph::new(vec![
-                    Line::from(
-                        Span::raw(display).style(Style::default().fg(Color::White)),
-                    ),
+                    Line::from(Span::raw(display).style(Style::default().fg(Color::White))),
                     Line::from(
                         Span::raw("e.g. -o StrictHostKeyChecking=no user@host")
                             .style(Style::default().fg(Color::DarkGray)),
