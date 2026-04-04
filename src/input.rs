@@ -2,12 +2,13 @@ use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 use log::{debug, error, trace};
 use ratatui::{layout::Rect, style::Color, widgets::ListState};
 
-use crate::app::App;
+use crate::app::{App, PaneResizeDrag};
 use crate::browser::{BrowserKeyAction, DragAction, SshBrowserState, handle_browser_key};
 use crate::keybindings::KeyBinding;
 use crate::pane::{
     ConnectOverlay, KeyEditorState, Pane, Split, editor_binding_index, editor_nav_down,
-    editor_nav_up, pane_border_inner, pane_inner,
+    editor_nav_up, hit_test_separator, pane_border_inner, pane_inner, split_areas,
+    split_at_path_mut,
 };
 
 // ---------------------------------------------------------------------------
@@ -752,6 +753,89 @@ pub fn handle_mouse(
     if app.context_menu.is_some() {
         return handle_context_menu_mouse(app, kind, column, row, last_area);
     }
+
+    // ---- Pane resize drag intercept ----
+    if let Some(ref drag) = app.pane_resize_drag {
+        match kind {
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved => {
+                let pos = if drag.horizontal { column } else { row };
+                let delta = pos as i32 - drag.start_pos as i32;
+                let total = drag.start_ratios.0 + drag.start_ratios.1;
+                // Compute new left/top ratio from pixel delta.
+                let orig_left_px = (drag.start_ratios.0 as u32 * drag.span as u32
+                    / total as u32) as i32;
+                let new_left_px = (orig_left_px + delta).max(3).min(drag.span as i32 - 3);
+                let new_r0 =
+                    ((new_left_px as u32 * total as u32) / drag.span as u32).max(1) as u16;
+                let new_r1 = total.saturating_sub(new_r0).max(1);
+                // Apply to the target Split node.
+                let path = drag.path.clone();
+                let sep_idx = drag.sep_idx;
+                if let Some(Pane::Split { ratios, .. }) =
+                    split_at_path_mut(&mut app.tabs[app.selected_tab].root, &path)
+                {
+                    ratios[sep_idx] = new_r0;
+                    ratios[sep_idx + 1] = new_r1;
+                }
+                app.resize_all(last_area);
+                return Action::Continue;
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                app.pane_resize_drag = None;
+                return Action::Continue;
+            }
+            _ => {
+                app.pane_resize_drag = None;
+                return Action::Continue;
+            }
+        }
+    }
+
+    // ---- Separator drag start ----
+    if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+        let content = pane_inner(last_area);
+        if let Some(hit) =
+            hit_test_separator(&app.tabs[app.selected_tab].root, content, column, row)
+        {
+            // Look up the Split node to read current ratios and compute span.
+            let (start_ratios, span) = {
+                let split_pane =
+                    split_at_path_mut(&mut app.tabs[app.selected_tab].root, &hit.path);
+                if let Some(Pane::Split {
+                    kind,
+                    ratios,
+                    ..
+                }) = split_pane
+                {
+                    let r0 = ratios[hit.sep_idx];
+                    let r1 = ratios[hit.sep_idx + 1];
+                    let areas = split_areas(hit.split_area, kind, ratios);
+                    let a0 = areas[hit.sep_idx];
+                    let a1 = areas[hit.sep_idx + 1];
+                    let span = if hit.horizontal {
+                        a0.width + 1 + a1.width
+                    } else {
+                        a0.height + a1.height
+                    };
+                    ((r0, r1), span)
+                } else {
+                    return Action::Continue;
+                }
+            };
+            let start_pos = if hit.horizontal { column } else { row };
+            app.pane_resize_drag = Some(PaneResizeDrag {
+                path: hit.path,
+                sep_idx: hit.sep_idx,
+                horizontal: hit.horizontal,
+                start_pos,
+                start_ratios,
+                span,
+                split_area: hit.split_area,
+            });
+            return Action::Continue;
+        }
+    }
+
     let content = pane_inner(last_area);
     let areas = app.tabs[app.selected_tab].root.leaf_areas(content);
 

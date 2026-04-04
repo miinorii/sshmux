@@ -9,8 +9,8 @@ use ratatui::{
 
 use crate::browser::{FileBrowser, SshBrowser};
 use crate::keybindings::KeyBindings;
-use crate::pane::{Pane, pane_border_inner, pane_inner};
-use crate::ssh_config::SshHost;
+use crate::pane::{Pane, pane_border_inner, pane_inner, split_areas, split_at_path_mut};
+use crate::ssh_config::{SshHost, parse_ssh_config};
 use crate::tab::Tab;
 use crate::terminal::EmbeddedTerminal;
 
@@ -43,12 +43,30 @@ pub fn context_menu_rect(col: u16, row: u16, screen: Rect) -> Rect {
     Rect::new(x, y, w, h)
 }
 
+pub struct PaneResizeDrag {
+    /// Path from root to the Split node being resized.
+    pub path: Vec<usize>,
+    /// Separator index: between `children[sep_idx]` and `children[sep_idx + 1]`.
+    pub sep_idx: usize,
+    /// True for LeftRight (horizontal drag), false for TopBottom (vertical drag).
+    pub horizontal: bool,
+    /// Mouse coordinate at drag start (column for LR, row for TB).
+    pub start_pos: u16,
+    /// Original ratios of the two children adjacent to the separator.
+    pub start_ratios: (u16, u16),
+    /// Combined pixel span of the two adjacent children (plus separator for LR).
+    pub span: u16,
+    /// Screen area of the Split node — used for highlight rendering.
+    pub split_area: ratatui::layout::Rect,
+}
+
 pub struct App {
     pub tabs: Vec<Tab>,
     pub selected_tab: usize,
     pub hosts: Vec<SshHost>,
     pub context_menu: Option<ContextMenu>,
     pub keybindings: KeyBindings,
+    pub pane_resize_drag: Option<PaneResizeDrag>,
     next_tab_id: usize,
 }
 
@@ -63,9 +81,10 @@ impl App {
         App {
             tabs: vec![Tab::new("1")],
             selected_tab: 0,
-            hosts: crate::ssh_config::parse_ssh_config(),
+            hosts: parse_ssh_config(),
             context_menu: None,
             keybindings: KeyBindings::load(),
+            pane_resize_drag: None,
             next_tab_id: 2,
         }
     }
@@ -257,6 +276,34 @@ impl App {
             &self.keybindings,
         );
 
+        // Active resize drag: highlight the separator being dragged in Yellow.
+        if let Some(ref drag) = self.pane_resize_drag {
+            let highlight = Style::default().fg(Color::Yellow);
+            let a = drag.split_area;
+            if let Some(Pane::Split { kind, ratios, .. }) =
+                split_at_path_mut(&mut self.tabs[self.selected_tab].root, &drag.path)
+            {
+                let areas = split_areas(a, kind, ratios);
+                if drag.horizontal {
+                    // Re-color the LeftRight separator column computed from current ratios.
+                    if let Some(pair) = areas.windows(2).nth(drag.sep_idx) {
+                        let x = pair[0].right();
+                        for y in a.y..a.y + a.height {
+                            buf[(x, y)].set_style(highlight);
+                        }
+                    }
+                } else {
+                    // Re-color the TopBottom title-bar row (a.y of child[sep_idx+1]).
+                    if let Some(child_area) = areas.get(drag.sep_idx + 1) {
+                        let ty = child_area.y;
+                        for x in child_area.x..child_area.x + child_area.width {
+                            buf[(x, ty)].set_style(highlight);
+                        }
+                    }
+                }
+            }
+        }
+
         // Context menu overlay (on top of everything)
         if let Some(ref menu) = self.context_menu {
             let rect = context_menu_rect(menu.col, menu.row, full);
@@ -303,6 +350,7 @@ impl App {
             hosts: vec![],
             context_menu: None,
             keybindings: KeyBindings::default(),
+            pane_resize_drag: None,
             next_tab_id: 2,
         }
     }

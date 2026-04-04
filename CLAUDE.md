@@ -88,6 +88,7 @@ The Connect pane's `KeyEditor` overlay (replacing the old Help overlay) lets use
 - **Zero code duplication.** When two or more types share the same logic, extract it into a trait, a shared method, or a helper function. Never write parallel match arms or if/else branches that do the same thing. Example: `FileBrowser` and `SshBrowser` both implement the `Browser` trait; `Pane::as_browser_mut()` returns `&mut dyn Browser` so callers never duplicate per-type logic.
 - **Think big picture first.** Before writing new code, ask: does a shared type, trait, or helper already exist for this? Can the logic live on a common struct or behind an existing abstraction? Exhaust these options before introducing new code paths.
 - **No bool-flag dispatch.** Never pass a bool to select between types. Use traits, enums, or polymorphism instead.
+- **Always import at the top.** Never use inline `crate::module::Item` paths inside function bodies or match arms. Always add items to the `use` block at the top of the file.
 
 ## Code review expectations
 

@@ -145,6 +145,7 @@ pub enum Pane {
     Split {
         kind: Split,
         children: Vec<Pane>,
+        ratios: Vec<u16>,
     },
 }
 
@@ -187,8 +188,12 @@ impl Pane {
             | Pane::Session { .. }
             | Pane::FileBrowser { .. }
             | Pane::SshBrowser { .. } => vec![area],
-            Pane::Split { kind, children } => {
-                let areas = split_areas(area, kind, children.len());
+            Pane::Split {
+                kind,
+                children,
+                ratios,
+            } => {
+                let areas = split_areas(area, kind, ratios);
                 children
                     .iter()
                     .zip(areas)
@@ -276,6 +281,7 @@ impl Pane {
                             *child = Pane::Split {
                                 kind,
                                 children: vec![old, Pane::new_connect()],
+                                ratios: vec![100, 100],
                             };
                         } else {
                             child.split_leaf(n - offset, kind);
@@ -334,8 +340,12 @@ impl Pane {
                 terminal.resize(h, w);
             }
             Pane::FileBrowser { .. } | Pane::SshBrowser { .. } => {}
-            Pane::Split { kind, children } => {
-                let areas = split_areas(area, kind, children.len());
+            Pane::Split {
+                kind,
+                children,
+                ratios,
+            } => {
+                let areas = split_areas(area, kind, ratios);
                 for (child, a) in children.iter_mut().zip(areas) {
                     child.resize_all(a, true);
                 }
@@ -615,8 +625,12 @@ impl Pane {
                 browser.render(area, buf, is_focus, leaf_count, &keybindings.browser);
             }
 
-            Pane::Split { kind, children } => {
-                let areas = split_areas(area, kind, children.len());
+            Pane::Split {
+                kind,
+                children,
+                ratios,
+            } => {
+                let areas = split_areas(area, kind, ratios);
                 match kind {
                     Split::LeftRight => {
                         let sep_style = Style::default().fg(Color::DarkGray);
@@ -693,8 +707,8 @@ impl Pane {
 // split_areas
 // ---------------------------------------------------------------------------
 
-pub fn split_areas(area: Rect, kind: &Split, count: usize) -> Vec<Rect> {
-    if count == 0 {
+pub fn split_areas(area: Rect, kind: &Split, ratios: &[u16]) -> Vec<Rect> {
+    if ratios.is_empty() {
         return vec![];
     }
     let direction = match kind {
@@ -703,14 +717,14 @@ pub fn split_areas(area: Rect, kind: &Split, count: usize) -> Vec<Rect> {
     };
     match kind {
         Split::LeftRight => {
-            // Interleave Fill(1) pane constraints with Length(1) separator constraints so
+            // Interleave Fill(ratio) pane constraints with Length(1) separator constraints so
             // a single-cell │ can be drawn between adjacent panes.
-            let mut constraints = Vec::with_capacity(count * 2 - 1);
-            for i in 0..count {
+            let mut constraints = Vec::with_capacity(ratios.len() * 2 - 1);
+            for (i, &r) in ratios.iter().enumerate() {
                 if i > 0 {
                     constraints.push(Constraint::Length(1));
                 }
-                constraints.push(Constraint::Fill(1));
+                constraints.push(Constraint::Fill(r));
             }
             let all_areas = Layout::default()
                 .direction(direction)
@@ -723,9 +737,10 @@ pub fn split_areas(area: Rect, kind: &Split, count: usize) -> Vec<Rect> {
         Split::TopBottom => {
             // No spacing: each pane's own top-border title line acts as the visual
             // separator between stacked panes.
+            let constraints: Vec<Constraint> = ratios.iter().map(|&r| Constraint::Fill(r)).collect();
             Layout::default()
                 .direction(direction)
-                .constraints(vec![Constraint::Fill(1); count])
+                .constraints(constraints)
                 .split(area)
                 .to_vec()
         }
@@ -800,6 +815,97 @@ pub fn render_pane_border(
 }
 
 // ---------------------------------------------------------------------------
+// Separator hit-testing and resize support
+// ---------------------------------------------------------------------------
+
+/// Identifies which separator was hit by a mouse click.
+pub struct SeparatorHit {
+    /// Path from root to the Split node, as child indices.
+    pub path: Vec<usize>,
+    /// Index of the separator: between `children[sep_idx]` and `children[sep_idx + 1]`.
+    pub sep_idx: usize,
+    /// True for LeftRight (drag horizontally), false for TopBottom (drag vertically).
+    pub horizontal: bool,
+    /// The screen area of the Split node that owns this separator.
+    pub split_area: Rect,
+}
+
+/// Walk the pane tree and check if `(col, row)` lands on a separator.
+/// Returns the innermost separator hit, or `None`.
+pub fn hit_test_separator(
+    pane: &Pane,
+    area: Rect,
+    col: u16,
+    row: u16,
+) -> Option<SeparatorHit> {
+    match pane {
+        Pane::Split {
+            kind,
+            children,
+            ratios,
+        } => {
+            let areas = split_areas(area, kind, ratios);
+            match kind {
+                Split::LeftRight => {
+                    // Check explicit 1-cell separator columns first.
+                    for (i, pair) in areas.windows(2).enumerate() {
+                        let sep_x = pair[0].right();
+                        if col == sep_x && row >= area.y && row < area.y + area.height {
+                            return Some(SeparatorHit {
+                                path: vec![],
+                                sep_idx: i,
+                                horizontal: true,
+                                split_area: area,
+                            });
+                        }
+                    }
+                }
+                Split::TopBottom => {
+                    // The separator is the title-bar row of child[i] for i > 0.
+                    for (i, a) in areas.iter().enumerate().skip(1) {
+                        if row == a.y && col >= a.x && col < a.x + a.width {
+                            return Some(SeparatorHit {
+                                path: vec![],
+                                sep_idx: i - 1,
+                                horizontal: false,
+                                split_area: area,
+                            });
+                        }
+                    }
+                }
+            }
+            // Not a separator at this level — recurse into the child that contains
+            // the point and prepend our child index to the path.
+            for (i, (child, a)) in children.iter().zip(areas.iter()).enumerate() {
+                if col >= a.x && col < a.x + a.width && row >= a.y && row < a.y + a.height {
+                    if let Some(mut hit) = hit_test_separator(child, *a, col, row) {
+                        hit.path.insert(0, i);
+                        return Some(hit);
+                    }
+                    break;
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Navigate the pane tree to the Split node identified by `path`.
+pub fn split_at_path_mut<'a>(pane: &'a mut Pane, path: &[usize]) -> Option<&'a mut Pane> {
+    if path.is_empty() {
+        return Some(pane);
+    }
+    if let Pane::Split { children, .. } = pane {
+        children
+            .get_mut(path[0])
+            .and_then(|child| split_at_path_mut(child, &path[1..]))
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // remove_leaf
 // ---------------------------------------------------------------------------
 
@@ -809,7 +915,9 @@ pub fn remove_leaf(pane: &mut Pane, n: usize) {
         | Pane::Session { .. }
         | Pane::FileBrowser { .. }
         | Pane::SshBrowser { .. } => {}
-        Pane::Split { children, .. } => {
+        Pane::Split {
+            children, ratios, ..
+        } => {
             let mut offset = 0;
             let mut to_remove = None;
             for (i, child) in children.iter_mut().enumerate() {
@@ -826,6 +934,7 @@ pub fn remove_leaf(pane: &mut Pane, n: usize) {
             }
             if let Some(i) = to_remove {
                 children.remove(i);
+                ratios.remove(i);
             }
         }
     }
@@ -857,12 +966,14 @@ mod tests {
         Pane::Split {
             kind: Split::LeftRight,
             children: vec![connect(), connect()],
+            ratios: vec![100, 100],
         }
     }
     fn vsplit() -> Pane {
         Pane::Split {
             kind: Split::TopBottom,
             children: vec![connect(), connect()],
+            ratios: vec![100, 100],
         }
     }
 
@@ -871,7 +982,7 @@ mod tests {
     #[test]
     fn split_areas_horizontal_even() {
         // 100-wide split into 2 panes with a 1-cell separator: widths are 50 + 49 = 99.
-        let a = split_areas(r(100, 20), &Split::LeftRight, 2);
+        let a = split_areas(r(100, 20), &Split::LeftRight, &[100, 100]);
         assert_eq!(
             a[0],
             Rect {
@@ -895,14 +1006,14 @@ mod tests {
     #[test]
     fn split_areas_horizontal_remainder() {
         // 1 cell reserved for separator between the 2 panes.
-        let a = split_areas(r(101, 20), &Split::LeftRight, 2);
+        let a = split_areas(r(101, 20), &Split::LeftRight, &[100, 100]);
         assert_eq!(a[0].width + a[1].width, 100);
     }
 
     #[test]
     fn split_areas_vertical_even() {
         // TopBottom has no spacing: each pane's title bar acts as the visual separator.
-        let a = split_areas(r(80, 40), &Split::TopBottom, 2);
+        let a = split_areas(r(80, 40), &Split::TopBottom, &[100, 100]);
         assert_eq!(
             a[0],
             Rect {
@@ -926,14 +1037,14 @@ mod tests {
     #[test]
     fn split_areas_vertical_three() {
         // TopBottom has no spacing: heights sum to the full parent height.
-        let a = split_areas(r(80, 30), &Split::TopBottom, 3);
+        let a = split_areas(r(80, 30), &Split::TopBottom, &[100, 100, 100]);
         assert_eq!(a.len(), 3);
         assert_eq!(a.iter().map(|x| x.height).sum::<u16>(), 30);
     }
 
     #[test]
     fn split_areas_empty() {
-        assert!(split_areas(r(80, 40), &Split::LeftRight, 0).is_empty());
+        assert!(split_areas(r(80, 40), &Split::LeftRight, &[]).is_empty());
     }
 
     // ---- leaf_count --------------------------------------------------------
@@ -953,6 +1064,7 @@ mod tests {
         let p = Pane::Split {
             kind: Split::LeftRight,
             children: vec![connect(), vsplit()],
+            ratios: vec![100, 100],
         };
         assert_eq!(p.leaf_count(), 3);
     }
@@ -990,6 +1102,7 @@ mod tests {
         let p = Pane::Split {
             kind: Split::LeftRight,
             children: vec![connect(), vsplit()],
+            ratios: vec![100, 100],
         };
         assert_eq!(p.leaf_areas(r(120, 60)).len(), p.leaf_count());
     }
@@ -1015,6 +1128,7 @@ mod tests {
         let mut p = Pane::Split {
             kind: Split::LeftRight,
             children: vec![connect(), vsplit()],
+            ratios: vec![100, 100],
         };
         remove_leaf(&mut p, 1);
         assert_eq!(p.leaf_count(), 2);
@@ -1072,6 +1186,7 @@ mod tests {
         let mut p = Pane::Split {
             kind: Split::LeftRight,
             children: vec![connect(), vsplit()],
+            ratios: vec![100, 100],
         };
         assert!(p.leaf_mut(0).is_some());
         assert!(p.leaf_mut(1).is_some());
@@ -1103,6 +1218,7 @@ mod tests {
         let mut p = Pane::Split {
             kind: Split::LeftRight,
             children: vec![connect(), vsplit()],
+            ratios: vec![100, 100],
         };
         p.split_leaf(2, Split::LeftRight);
         assert_eq!(p.leaf_count(), 4);
@@ -1140,10 +1256,13 @@ mod tests {
                         Pane::Split {
                             kind: Split::LeftRight,
                             children: vec![connect(), connect()],
+                            ratios: vec![100, 100],
                         },
                     ],
+                    ratios: vec![100, 100],
                 },
             ],
+            ratios: vec![100, 100],
         };
         assert_eq!(p.leaf_count(), 4);
         remove_leaf(&mut p, 3); // remove deepest right leaf
@@ -1154,7 +1273,7 @@ mod tests {
 
     #[test]
     fn split_areas_single_element() {
-        let a = split_areas(r(100, 50), &Split::LeftRight, 1);
+        let a = split_areas(r(100, 50), &Split::LeftRight, &[100]);
         assert_eq!(a.len(), 1);
         assert_eq!(a[0], r(100, 50));
     }
@@ -1162,7 +1281,7 @@ mod tests {
     #[test]
     fn split_areas_vertical_remainder() {
         // TopBottom has no spacing: heights sum to the full parent height.
-        let a = split_areas(r(80, 31), &Split::TopBottom, 2);
+        let a = split_areas(r(80, 31), &Split::TopBottom, &[100, 100]);
         assert_eq!(a[0].height + a[1].height, 31);
     }
 
@@ -1231,6 +1350,7 @@ mod tests {
         let mut p = Pane::Split {
             kind: Split::LeftRight,
             children: vec![connect(), connect()],
+            ratios: vec![100, 100],
         };
         let buf = render_to_buf(&mut p, area);
         assert_eq!(buf[(10u16, 0u16)].symbol(), "┬", "top of separator should be ┬");
@@ -1241,10 +1361,6 @@ mod tests {
 
     #[test]
     fn junction_title_bar_below_lr_separator_gets_tee_up() {
-        // TopBottom { LR { connect, connect }, connect }
-        // The LR separator (x=20) ends at y=4; the bottom pane's title bar
-        // at y=5 should have ┴ at x=20 after post-processing.
-        // Width=41 so x=20 is not covered by the 11-char title text.
         let area = Rect { x: 0, y: 0, width: 41, height: 10 };
         let mut p = Pane::Split {
             kind: Split::TopBottom,
@@ -1252,9 +1368,11 @@ mod tests {
                 Pane::Split {
                     kind: Split::LeftRight,
                     children: vec![connect(), connect()],
+                    ratios: vec![100, 100],
                 },
                 connect(),
             ],
+            ratios: vec![100, 100],
         };
         let buf = render_to_buf(&mut p, area);
         assert_eq!(buf[(20u16, 0u16)].symbol(), "┬", "separator top should be ┬");
@@ -1266,9 +1384,6 @@ mod tests {
 
     #[test]
     fn junction_lr_separator_left_of_inner_tb_becomes_tee_right() {
-        // LR { connect, TopBottom { connect, connect } }
-        // Separator at x=10; the TopBottom's second child title bar row (y=5)
-        // is to the right of the separator → ├ at (10,5).
         let area = Rect { x: 0, y: 0, width: 21, height: 10 };
         let mut p = Pane::Split {
             kind: Split::LeftRight,
@@ -1277,8 +1392,10 @@ mod tests {
                 Pane::Split {
                     kind: Split::TopBottom,
                     children: vec![connect(), connect()],
+                    ratios: vec![100, 100],
                 },
             ],
+            ratios: vec![100, 100],
         };
         let buf = render_to_buf(&mut p, area);
         assert_eq!(buf[(10u16, 5u16)].symbol(), "├");
@@ -1286,9 +1403,6 @@ mod tests {
 
     #[test]
     fn junction_lr_separator_right_of_inner_tb_becomes_tee_left() {
-        // LR { TopBottom { connect, connect }, connect }
-        // Separator at x=10; the TopBottom's second child title bar row (y=5)
-        // is to the left of the separator → ┤ at (10,5).
         let area = Rect { x: 0, y: 0, width: 21, height: 10 };
         let mut p = Pane::Split {
             kind: Split::LeftRight,
@@ -1296,9 +1410,11 @@ mod tests {
                 Pane::Split {
                     kind: Split::TopBottom,
                     children: vec![connect(), connect()],
+                    ratios: vec![100, 100],
                 },
                 connect(),
             ],
+            ratios: vec![100, 100],
         };
         let buf = render_to_buf(&mut p, area);
         assert_eq!(buf[(10u16, 5u16)].symbol(), "┤");
@@ -1306,9 +1422,6 @@ mod tests {
 
     #[test]
     fn junction_stacked_lr_separators_at_same_column_produce_cross() {
-        // TopBottom { LR { connect, connect }, LR { connect, connect } }
-        // Both LR separators land at x=20; the second LR sees │ above → ┼.
-        // Width=41 so x=20 is not covered by the title text of either row.
         let area = Rect { x: 0, y: 0, width: 41, height: 10 };
         let mut p = Pane::Split {
             kind: Split::TopBottom,
@@ -1316,12 +1429,15 @@ mod tests {
                 Pane::Split {
                     kind: Split::LeftRight,
                     children: vec![connect(), connect()],
+                    ratios: vec![100, 100],
                 },
                 Pane::Split {
                     kind: Split::LeftRight,
                     children: vec![connect(), connect()],
+                    ratios: vec![100, 100],
                 },
             ],
+            ratios: vec![100, 100],
         };
         let buf = render_to_buf(&mut p, area);
         assert_eq!(buf[(20u16, 5u16)].symbol(), "┼");

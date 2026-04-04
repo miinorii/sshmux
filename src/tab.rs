@@ -57,6 +57,7 @@ impl Tab {
             self.root = Pane::Split {
                 kind,
                 children: vec![old, Pane::new_connect()],
+                ratios: vec![100, 100],
             };
         } else {
             self.root.split_leaf(n, kind);
