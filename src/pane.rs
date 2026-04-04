@@ -327,7 +327,7 @@ impl Pane {
         match self {
             Pane::Session { terminal, .. } => {
                 let (h, w) = if multi_pane {
-                    (area.height.saturating_sub(2), area.width.saturating_sub(2))
+                    (area.height.saturating_sub(1), area.width)
                 } else {
                     (area.height, area.width)
                 };
@@ -363,7 +363,7 @@ impl Pane {
                 let is_focus = *my_idx == focus_idx;
                 *my_idx += 1;
 
-                let inner = render_pane_border(area, buf, is_focus, leaf_count, Some(" connect "));
+                let inner = render_pane_border(area, buf, is_focus, leaf_count, "connect");
 
                 let list_area = Rect {
                     x: inner.x,
@@ -552,12 +552,13 @@ impl Pane {
             Pane::Session {
                 terminal,
                 exit_selection,
-                ..
+                ssh_args,
             } => {
                 let is_focus = *my_idx == focus_idx;
                 *my_idx += 1;
 
-                let inner = render_pane_border(area, buf, is_focus, leaf_count, None);
+                let host = ssh_args.split_whitespace().last().unwrap_or("ssh");
+                let inner = render_pane_border(area, buf, is_focus, leaf_count, host);
                 terminal.render_into(inner, buf);
 
                 if terminal.process_exited() {
@@ -616,8 +617,72 @@ impl Pane {
 
             Pane::Split { kind, children } => {
                 let areas = split_areas(area, kind, children.len());
-                for (child, a) in children.iter_mut().zip(areas) {
-                    child.render(a, buf, hosts, focus_idx, leaf_count, my_idx, keybindings);
+                match kind {
+                    Split::LeftRight => {
+                        let sep_style = Style::default().fg(Color::DarkGray);
+                        for pair in areas.windows(2) {
+                            let x = pair[0].right();
+                            // Use ┼ instead of ┬ when a vertical separator from a sibling
+                            // above ends exactly at this row (TopBottom split above us).
+                            if area.height > 0 {
+                                let top_sym =
+                                    if area.y > 0 { buf[(x, area.y - 1)].symbol() } else { "" };
+                                let top_connects =
+                                    matches!(top_sym, "│" | "┬" | "├" | "┤" | "┼");
+                                let junction = if top_connects { '┼' } else { '┬' };
+                                buf[(x, area.y)].set_char(junction).set_style(sep_style);
+                            }
+                            for y in (area.y + 1)..(area.y + area.height) {
+                                buf[(x, y)].set_char('│').set_style(sep_style);
+                            }
+                        }
+                        for (child, a) in children.iter_mut().zip(areas.iter()) {
+                            child.render(
+                                *a, buf, hosts, focus_idx, leaf_count, my_idx, keybindings,
+                            );
+                        }
+                    }
+                    Split::TopBottom => {
+                        for (i, (child, a)) in
+                            children.iter_mut().zip(areas.iter()).enumerate()
+                        {
+                            child.render(
+                                *a, buf, hosts, focus_idx, leaf_count, my_idx, keybindings,
+                            );
+                            if i > 0 {
+                                // Fix ├/┤/┼ junction characters where outer vertical
+                                // separators meet the title-bar row of this pane.
+                                let ty = a.y;
+                                let buf_right = buf.area().x + buf.area().width;
+                                if a.x > 0 {
+                                    let lx = a.x - 1;
+                                    let s = buf[(lx, ty)].style();
+                                    match buf[(lx, ty)].symbol() {
+                                        "│" => {
+                                            buf[(lx, ty)].set_char('├').set_style(s);
+                                        }
+                                        "┬" => {
+                                            buf[(lx, ty)].set_char('┼').set_style(s);
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                let rx = a.x + a.width;
+                                if rx < buf_right {
+                                    let s = buf[(rx, ty)].style();
+                                    match buf[(rx, ty)].symbol() {
+                                        "│" => {
+                                            buf[(rx, ty)].set_char('┤').set_style(s);
+                                        }
+                                        "┬" => {
+                                            buf[(rx, ty)].set_char('┼').set_style(s);
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -636,46 +701,98 @@ pub fn split_areas(area: Rect, kind: &Split, count: usize) -> Vec<Rect> {
         Split::LeftRight => Direction::Horizontal,
         Split::TopBottom => Direction::Vertical,
     };
-    let constraints = vec![Constraint::Fill(1); count];
-    Layout::default()
-        .direction(direction)
-        .constraints(constraints)
-        .split(area)
-        .to_vec()
+    match kind {
+        Split::LeftRight => {
+            // Interleave Fill(1) pane constraints with Length(1) separator constraints so
+            // a single-cell │ can be drawn between adjacent panes.
+            let mut constraints = Vec::with_capacity(count * 2 - 1);
+            for i in 0..count {
+                if i > 0 {
+                    constraints.push(Constraint::Length(1));
+                }
+                constraints.push(Constraint::Fill(1));
+            }
+            let all_areas = Layout::default()
+                .direction(direction)
+                .constraints(constraints)
+                .split(area)
+                .to_vec();
+            // Return only the even-indexed areas (the pane areas, not the separators).
+            all_areas.into_iter().step_by(2).collect()
+        }
+        Split::TopBottom => {
+            // No spacing: each pane's own top-border title line acts as the visual
+            // separator between stacked panes.
+            Layout::default()
+                .direction(direction)
+                .constraints(vec![Constraint::Fill(1); count])
+                .split(area)
+                .to_vec()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // pane_inner / render_pane_border
 // ---------------------------------------------------------------------------
 
-/// The drawable area inside a pane's own border (1-cell inset on all sides).
+/// The drawable area above the tab-bar row: strips the single bottom row, full width, no borders.
 pub fn pane_inner(area: Rect) -> Rect {
-    Block::default().borders(Borders::ALL).inner(area)
+    Rect {
+        height: area.height.saturating_sub(1),
+        ..area
+    }
 }
 
-/// Render a pane border when in multi-pane mode and return the inner area.
-/// In single-pane mode the full area is returned unchanged.
+/// The drawable area inside a pane's top-border title line: 1 row from the top, full width.
+pub fn pane_border_inner(area: Rect) -> Rect {
+    Rect {
+        y: area.y.saturating_add(1).min(area.y + area.height),
+        height: area.height.saturating_sub(1),
+        ..area
+    }
+}
+
+/// Render a pane title in the top-border line when in multi-pane mode and return the
+/// content area below it. In single-pane mode returns the full area unchanged.
 pub fn render_pane_border(
     area: Rect,
     buf: &mut Buffer,
     is_focus: bool,
     leaf_count: usize,
-    title: Option<&str>,
+    title: &str,
 ) -> Rect {
     if leaf_count > 1 {
-        let border_style = if is_focus {
-            Style::default().fg(Color::Cyan)
+        let border_style = Style::default().fg(Color::DarkGray);
+        let name_style = if is_focus {
+            Style::default().fg(Color::Yellow)
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        let mut block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style);
-        if let Some(t) = title {
-            block = block.title(t);
-        }
+        let block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(border_style)
+            .title(Line::from(vec![
+                Span::styled("── ", border_style),
+                Span::styled(title, name_style),
+                Span::styled(" ", border_style),
+            ]));
         let inner = block.inner(area);
         block.render(area, buf);
+        // Post-process title-bar row: replace ─ with ┴ where a vertical separator
+        // from a sibling above ends at this pane's top edge.
+        if area.y > 0 {
+            let ty = area.y;
+            for x in area.x..area.x + area.width {
+                if buf[(x, ty)].symbol() == "─" {
+                    let above = buf[(x, ty - 1)].symbol();
+                    if matches!(above, "│" | "┬" | "├" | "┤" | "┼") {
+                        let s = buf[(x, ty)].style();
+                        buf[(x, ty)].set_char('┴').set_style(s);
+                    }
+                }
+            }
+        }
         inner
     } else {
         area
@@ -723,7 +840,7 @@ pub fn remove_leaf(pane: &mut Pane, n: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::layout::Rect;
+    use ratatui::{buffer::Buffer, layout::Rect};
 
     fn r(w: u16, h: u16) -> Rect {
         Rect {
@@ -753,6 +870,7 @@ mod tests {
 
     #[test]
     fn split_areas_horizontal_even() {
+        // 100-wide split into 2 panes with a 1-cell separator: widths are 50 + 49 = 99.
         let a = split_areas(r(100, 20), &Split::LeftRight, 2);
         assert_eq!(
             a[0],
@@ -766,9 +884,9 @@ mod tests {
         assert_eq!(
             a[1],
             Rect {
-                x: 50,
+                x: 51,
                 y: 0,
-                width: 50,
+                width: 49,
                 height: 20
             }
         );
@@ -776,12 +894,14 @@ mod tests {
 
     #[test]
     fn split_areas_horizontal_remainder() {
+        // 1 cell reserved for separator between the 2 panes.
         let a = split_areas(r(101, 20), &Split::LeftRight, 2);
-        assert_eq!(a[0].width + a[1].width, 101);
+        assert_eq!(a[0].width + a[1].width, 100);
     }
 
     #[test]
     fn split_areas_vertical_even() {
+        // TopBottom has no spacing: each pane's title bar acts as the visual separator.
         let a = split_areas(r(80, 40), &Split::TopBottom, 2);
         assert_eq!(
             a[0],
@@ -805,6 +925,7 @@ mod tests {
 
     #[test]
     fn split_areas_vertical_three() {
+        // TopBottom has no spacing: heights sum to the full parent height.
         let a = split_areas(r(80, 30), &Split::TopBottom, 3);
         assert_eq!(a.len(), 3);
         assert_eq!(a.iter().map(|x| x.height).sum::<u16>(), 30);
@@ -859,8 +980,9 @@ mod tests {
 
     #[test]
     fn leaf_areas_sum_equals_parent() {
+        // 1 cell is the separator between the two panes.
         let a = hsplit().leaf_areas(r(100, 50));
-        assert_eq!(a[0].width + a[1].width, 100);
+        assert_eq!(a[0].width + a[1].width, 99);
     }
 
     #[test]
@@ -909,11 +1031,12 @@ mod tests {
 
     #[test]
     fn pane_inner_shrinks_by_one() {
+        // pane_inner strips the bottom tab-bar row; x/y/width are unchanged.
         let inner = pane_inner(r(10, 8));
-        assert_eq!(inner.x, 1);
-        assert_eq!(inner.y, 1);
-        assert_eq!(inner.width, 8);
-        assert_eq!(inner.height, 6);
+        assert_eq!(inner.x, 0);
+        assert_eq!(inner.y, 0);
+        assert_eq!(inner.width, 10);
+        assert_eq!(inner.height, 7);
     }
 
     #[test]
@@ -924,7 +1047,6 @@ mod tests {
             width: 1,
             height: 1,
         });
-        assert_eq!(inner.width, 0);
         assert_eq!(inner.height, 0);
     }
 
@@ -1039,6 +1161,7 @@ mod tests {
 
     #[test]
     fn split_areas_vertical_remainder() {
+        // TopBottom has no spacing: heights sum to the full parent height.
         let a = split_areas(r(80, 31), &Split::TopBottom, 2);
         assert_eq!(a[0].height + a[1].height, 31);
     }
@@ -1085,6 +1208,123 @@ mod tests {
         let sel = ls.selected().unwrap();
         assert!(!is_editor_header(sel));
         assert_eq!(sel, EDITOR_ROW_COUNT - 1);
+    }
+
+    // ---- junction rendering ------------------------------------------------
+
+    fn render_to_buf(p: &mut Pane, area: Rect) -> Buffer {
+        let mut buf = Buffer::empty(area);
+        let leaf_count = p.leaf_count();
+        let kb = crate::keybindings::KeyBindings::default();
+        p.render(area, &mut buf, &[], 0, leaf_count, &mut 0, &kb);
+        buf
+    }
+
+    // With Fill(1)/Length(1)/Fill(1) constraints and width=21, the two pane
+    // areas are x=0 w=10 and x=11 w=10, with the separator drawn at x=10.
+    // With width=41 the separator is at x=20, safely past the 11-char title.
+
+    #[test]
+    fn junction_lr_separator_is_tee_down_at_top() {
+        // LeftRight 2-pane: separator column starts with ┬ then │ below.
+        let area = Rect { x: 0, y: 0, width: 21, height: 5 };
+        let mut p = Pane::Split {
+            kind: Split::LeftRight,
+            children: vec![connect(), connect()],
+        };
+        let buf = render_to_buf(&mut p, area);
+        assert_eq!(buf[(10u16, 0u16)].symbol(), "┬", "top of separator should be ┬");
+        for y in 1..5u16 {
+            assert_eq!(buf[(10u16, y)].symbol(), "│", "separator body at y={y} should be │");
+        }
+    }
+
+    #[test]
+    fn junction_title_bar_below_lr_separator_gets_tee_up() {
+        // TopBottom { LR { connect, connect }, connect }
+        // The LR separator (x=20) ends at y=4; the bottom pane's title bar
+        // at y=5 should have ┴ at x=20 after post-processing.
+        // Width=41 so x=20 is not covered by the 11-char title text.
+        let area = Rect { x: 0, y: 0, width: 41, height: 10 };
+        let mut p = Pane::Split {
+            kind: Split::TopBottom,
+            children: vec![
+                Pane::Split {
+                    kind: Split::LeftRight,
+                    children: vec![connect(), connect()],
+                },
+                connect(),
+            ],
+        };
+        let buf = render_to_buf(&mut p, area);
+        assert_eq!(buf[(20u16, 0u16)].symbol(), "┬", "separator top should be ┬");
+        for y in 1..5u16 {
+            assert_eq!(buf[(20u16, y)].symbol(), "│", "separator body at y={y} should be │");
+        }
+        assert_eq!(buf[(20u16, 5u16)].symbol(), "┴", "title bar below separator should be ┴");
+    }
+
+    #[test]
+    fn junction_lr_separator_left_of_inner_tb_becomes_tee_right() {
+        // LR { connect, TopBottom { connect, connect } }
+        // Separator at x=10; the TopBottom's second child title bar row (y=5)
+        // is to the right of the separator → ├ at (10,5).
+        let area = Rect { x: 0, y: 0, width: 21, height: 10 };
+        let mut p = Pane::Split {
+            kind: Split::LeftRight,
+            children: vec![
+                connect(),
+                Pane::Split {
+                    kind: Split::TopBottom,
+                    children: vec![connect(), connect()],
+                },
+            ],
+        };
+        let buf = render_to_buf(&mut p, area);
+        assert_eq!(buf[(10u16, 5u16)].symbol(), "├");
+    }
+
+    #[test]
+    fn junction_lr_separator_right_of_inner_tb_becomes_tee_left() {
+        // LR { TopBottom { connect, connect }, connect }
+        // Separator at x=10; the TopBottom's second child title bar row (y=5)
+        // is to the left of the separator → ┤ at (10,5).
+        let area = Rect { x: 0, y: 0, width: 21, height: 10 };
+        let mut p = Pane::Split {
+            kind: Split::LeftRight,
+            children: vec![
+                Pane::Split {
+                    kind: Split::TopBottom,
+                    children: vec![connect(), connect()],
+                },
+                connect(),
+            ],
+        };
+        let buf = render_to_buf(&mut p, area);
+        assert_eq!(buf[(10u16, 5u16)].symbol(), "┤");
+    }
+
+    #[test]
+    fn junction_stacked_lr_separators_at_same_column_produce_cross() {
+        // TopBottom { LR { connect, connect }, LR { connect, connect } }
+        // Both LR separators land at x=20; the second LR sees │ above → ┼.
+        // Width=41 so x=20 is not covered by the title text of either row.
+        let area = Rect { x: 0, y: 0, width: 41, height: 10 };
+        let mut p = Pane::Split {
+            kind: Split::TopBottom,
+            children: vec![
+                Pane::Split {
+                    kind: Split::LeftRight,
+                    children: vec![connect(), connect()],
+                },
+                Pane::Split {
+                    kind: Split::LeftRight,
+                    children: vec![connect(), connect()],
+                },
+            ],
+        };
+        let buf = render_to_buf(&mut p, area);
+        assert_eq!(buf[(20u16, 5u16)].symbol(), "┼");
     }
 
     #[test]

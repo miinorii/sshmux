@@ -7,7 +7,7 @@ use crate::browser::{BrowserKeyAction, DragAction, SshBrowserState, handle_brows
 use crate::keybindings::KeyBinding;
 use crate::pane::{
     ConnectOverlay, KeyEditorState, Pane, Split, editor_binding_index, editor_nav_down,
-    editor_nav_up, pane_inner,
+    editor_nav_up, pane_border_inner, pane_inner,
 };
 
 // ---------------------------------------------------------------------------
@@ -854,7 +854,7 @@ pub fn handle_mouse(
     if same_pane && pane_wants_mouse {
         let leaf_count = app.tabs[app.selected_tab].root.leaf_count();
         let inner = if leaf_count > 1 {
-            pane_inner(pane_area)
+            pane_border_inner(pane_area)
         } else {
             pane_area
         };

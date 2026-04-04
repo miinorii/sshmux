@@ -18,7 +18,7 @@ use ratatui::{
 use super::browser_layout;
 use super::parse::{FsEntry, list_drives, read_local_dir};
 use crate::keybindings::{BrowserBindings, KeyBinding};
-use crate::pane::{pane_inner, render_pane_border};
+use crate::pane::{pane_border_inner, render_pane_border};
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -751,7 +751,7 @@ impl BrowserCore {
 
     pub fn click_select(&mut self, col: u16, row: u16, pane_area: Rect, leaf_count: usize) {
         let outer_inner = if leaf_count > 1 {
-            pane_inner(pane_area)
+            pane_border_inner(pane_area)
         } else {
             pane_area
         };
@@ -805,7 +805,7 @@ impl BrowserCore {
 
     pub fn handle_click(&mut self, col: u16, row: u16, pane_area: Rect, leaf_count: usize) {
         let outer_inner = if leaf_count > 1 {
-            pane_inner(pane_area)
+            pane_border_inner(pane_area)
         } else {
             pane_area
         };
@@ -872,7 +872,7 @@ impl BrowserCore {
         leaf_count: usize,
     ) -> Option<DragAction> {
         let outer_inner = if leaf_count > 1 {
-            pane_inner(pane_area)
+            pane_border_inner(pane_area)
         } else {
             pane_area
         };
@@ -904,7 +904,7 @@ impl BrowserCore {
         leaf_count: usize,
         title: &str,
     ) -> Rect {
-        let inner = render_pane_border(area, buf, is_focus, leaf_count, Some(title));
+        let inner = render_pane_border(area, buf, is_focus, leaf_count, title);
         let layout = browser_layout(inner);
         self.render_panel(layout.local_panel, buf, BrowserFocus::Local, is_focus);
         self.render_panel(layout.remote_panel, buf, BrowserFocus::Remote, is_focus);
@@ -1379,7 +1379,7 @@ impl BrowserCore {
             None => return,
         };
         let inner = if leaf_count > 1 {
-            pane_inner(area)
+            pane_border_inner(area)
         } else {
             area
         };

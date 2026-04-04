@@ -1,6 +1,6 @@
 use ratatui::layout::Rect;
 
-use crate::pane::{Pane, Split, pane_inner, remove_leaf};
+use crate::pane::{Pane, Split, pane_border_inner, remove_leaf};
 
 pub struct Tab {
     pub name: String,
@@ -79,7 +79,7 @@ impl Tab {
         let pane_area = areas.get(self.focus_idx)?;
         let leaf_count = self.leaf_count();
         let inner = if leaf_count > 1 {
-            pane_inner(*pane_area)
+            pane_border_inner(*pane_area)
         } else {
             *pane_area
         };

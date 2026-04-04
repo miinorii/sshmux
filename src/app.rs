@@ -9,7 +9,7 @@ use ratatui::{
 
 use crate::browser::{FileBrowser, SshBrowser};
 use crate::keybindings::KeyBindings;
-use crate::pane::{Pane, pane_inner};
+use crate::pane::{Pane, pane_border_inner, pane_inner};
 use crate::ssh_config::SshHost;
 use crate::tab::Tab;
 use crate::terminal::EmbeddedTerminal;
@@ -120,7 +120,7 @@ impl App {
     pub fn open_session_raw(&mut self, args: &str, area: Rect) -> Result<()> {
         let pane_area = self.focused_pane_area(area);
         let term_area = if self.tab().leaf_count() > 1 {
-            pane_inner(pane_area)
+            pane_border_inner(pane_area)
         } else {
             pane_area
         };
@@ -212,30 +212,36 @@ impl App {
     }
 
     pub fn render(&mut self, full: Rect, buf: &mut Buffer) {
+        let content = pane_inner(full);
+        let tab_y = full.y + content.height;
+
+        // Fill the entire tab bar row with a solid background.
+        let bar_bg = Style::default().bg(Color::DarkGray);
+        buf.set_style(
+            Rect { x: full.x, y: tab_y, width: full.width, height: 1 },
+            bar_bg,
+        );
+
+        // Tab entries — no separators, each tab is a styled block.
         let mut spans: Vec<Span> = Vec::new();
         for (i, tab) in self.tabs.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::raw(" │ ").style(Style::default().fg(Color::DarkGray)));
-            }
-            let span = Span::raw(format!(" {} ", tab.display_name()));
+            let label = format!(" {} ", tab.display_name());
             if i == self.selected_tab {
-                spans.push(
-                    span.style(
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                );
+                spans.push(Span::styled(
+                    label,
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
             } else {
-                spans.push(span.style(Style::default().fg(Color::White)));
+                spans.push(Span::styled(
+                    label,
+                    Style::default().fg(Color::White).bg(Color::DarkGray),
+                ));
             }
         }
-
-        let outer_block = Block::default()
-            .borders(Borders::ALL)
-            .title(Line::from(spans));
-        let content = outer_block.inner(full);
-        outer_block.render(full, buf);
+        buf.set_line(full.x, tab_y, &Line::from(spans), full.width);
 
         let focus_idx = self.tabs[self.selected_tab].focus_idx;
         let hosts = &self.hosts;
