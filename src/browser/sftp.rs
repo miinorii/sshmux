@@ -6,14 +6,17 @@ use log::{debug, info, warn};
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
 use super::common::{
-    Browser, BrowserCore, BrowserFocus, DeleteLocation, TransferDirection, TransferStatus,
-    PROMPT_TAIL_BYTES,
+    Browser, BrowserCore, BrowserFocus, COMMAND_TIMEOUT_SECS, DeleteLocation, PROMPT_TAIL_BYTES,
+    TransferDirection, TransferStatus,
 };
 use super::parse::{
     parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote, strip_ansi,
 };
 use crate::keybindings::BrowserBindings;
 use crate::terminal::{EmbeddedTerminal, PtyChannel};
+
+#[cfg(test)]
+use crate::terminal::{MockPty, MockPtyHandle};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -50,8 +53,8 @@ impl FileBrowser {
     }
 
     #[cfg(test)]
-    pub fn with_mock() -> (Self, crate::terminal::MockPtyHandle) {
-        let (mock, handle) = crate::terminal::MockPty::new();
+    pub fn with_mock() -> (Self, MockPtyHandle) {
+        let (mock, handle) = MockPty::new();
         let browser = FileBrowser {
             core: BrowserCore::new("test-host"),
             sftp: Box::new(mock),
@@ -96,6 +99,22 @@ impl FileBrowser {
             self.core.transfer_start = None;
             self.sftp_state = SftpState::Idle;
             self.core.status_msg = "SFTP connection lost".to_string();
+            self.core.status_color = Color::Red;
+            self.core.needs_redraw = true;
+            return;
+        }
+
+        // Command timeout: waiting states that should not stall indefinitely.
+        if matches!(
+            self.sftp_state,
+            SftpState::WaitingPwd | SftpState::WaitingLs | SftpState::WaitingDelete
+        ) && let Some(start) = self.core.cmd_start
+            && start.elapsed().as_secs() >= COMMAND_TIMEOUT_SECS
+        {
+            warn!("SFTP command timed out in state {:?}", self.sftp_state);
+            self.core.cmd_start = None;
+            self.sftp_state = SftpState::Idle;
+            self.core.status_msg = "Command timed out".to_string();
             self.core.status_color = Color::Red;
             self.core.needs_redraw = true;
             return;
@@ -580,13 +599,16 @@ impl Browser for FileBrowser {
             _ => {}
         }
     }
+    fn process_exited(&self) -> bool {
+        self.sftp.process_exited()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::common::{DeleteKind, PendingTransfer};
-    use crate::terminal::MockPtyHandle;
+    use crate::browser::common::{DeleteKind, DeleteTarget, PendingTransfer};
+    use crate::browser::parse::FsEntry;
 
     /// Run tick() enough times for prompt stability to trigger a transition.
     /// The prompt-stability counter requires 2 consecutive ticks where:
@@ -779,13 +801,11 @@ mod tests {
     fn waiting_ls_chains_pending_delete() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::WaitingLs;
-        fb.core
-            .pending_deletes
-            .push(crate::browser::common::DeleteTarget {
-                location: DeleteLocation::Remote,
-                kind: DeleteKind::File,
-                path: "/remote/todelete.txt".to_string(),
-            });
+        fb.core.pending_deletes.push(DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::File,
+            path: "/remote/todelete.txt".to_string(),
+        });
         // pop_pending_delete moves from pending_deletes to confirm_delete
         // then confirm_delete_yes processes it
 
@@ -1030,13 +1050,11 @@ mod tests {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::WaitingDelete;
         fb.core.pending_delete_name = Some("first.txt".to_string());
-        fb.core
-            .pending_deletes
-            .push(crate::browser::common::DeleteTarget {
-                location: DeleteLocation::Remote,
-                kind: DeleteKind::File,
-                path: "/remote/second.txt".to_string(),
-            });
+        fb.core.pending_deletes.push(DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::File,
+            path: "/remote/second.txt".to_string(),
+        });
         h.clear_sent();
 
         h.feed(b"sftp> ");
@@ -1062,13 +1080,11 @@ mod tests {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::WaitingDelete;
         fb.core.pending_delete_name = Some("bad.txt".to_string());
-        fb.core
-            .pending_deletes
-            .push(crate::browser::common::DeleteTarget {
-                location: DeleteLocation::Remote,
-                kind: DeleteKind::File,
-                path: "/remote/next.txt".to_string(),
-            });
+        fb.core.pending_deletes.push(DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::File,
+            path: "/remote/next.txt".to_string(),
+        });
         h.clear_sent();
 
         h.feed(b"Couldn't remove file\nsftp> ");
@@ -1093,7 +1109,7 @@ mod tests {
     fn waiting_delete_rmdir_for_directories() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::Idle;
-        fb.core.confirm_delete = Some(crate::browser::common::DeleteTarget {
+        fb.core.confirm_delete = Some(DeleteTarget {
             location: DeleteLocation::Remote,
             kind: DeleteKind::Dir,
             path: "/remote/somedir".to_string(),
@@ -1120,7 +1136,7 @@ mod tests {
     fn waiting_delete_rm_for_files() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::Idle;
-        fb.core.confirm_delete = Some(crate::browser::common::DeleteTarget {
+        fb.core.confirm_delete = Some(DeleteTarget {
             location: DeleteLocation::Remote,
             kind: DeleteKind::File,
             path: "/remote/somefile.txt".to_string(),
@@ -1161,13 +1177,11 @@ mod tests {
             name: "a".to_string(),
             is_dir: false,
         });
-        fb.core
-            .pending_deletes
-            .push(crate::browser::common::DeleteTarget {
-                location: DeleteLocation::Remote,
-                kind: DeleteKind::File,
-                path: "/b".to_string(),
-            });
+        fb.core.pending_deletes.push(DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::File,
+            path: "/b".to_string(),
+        });
 
         h.set_exited(true);
         fb.tick();
@@ -1263,7 +1277,7 @@ mod tests {
         fb.sftp_state = SftpState::Idle;
         fb.core.remote_path = "/home".to_string();
         fb.core.focus = BrowserFocus::Remote;
-        fb.core.remote_entries.push(crate::browser::parse::FsEntry {
+        fb.core.remote_entries.push(FsEntry {
             name: "subdir".to_string(),
             is_dir: true,
             size: "4096".to_string(),
@@ -1312,7 +1326,7 @@ mod tests {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::WaitingLs;
         fb.core.focus = BrowserFocus::Remote;
-        fb.core.remote_entries.push(crate::browser::parse::FsEntry {
+        fb.core.remote_entries.push(FsEntry {
             name: "dir".to_string(),
             is_dir: true,
             size: "4096".to_string(),
@@ -1418,5 +1432,52 @@ mod tests {
     fn progress_suffix_none() {
         let (fb, _h) = make_sftp();
         assert_eq!(fb.progress_suffix(), "");
+    }
+
+    // ---- Command timeout ----
+
+    #[test]
+    fn waiting_ls_times_out_to_idle() {
+        let (mut fb, _h) = make_sftp();
+        fb.sftp_state = SftpState::WaitingLs;
+        // Simulate an expired timer (1 second past the timeout threshold)
+        fb.core.cmd_start =
+            Some(Instant::now() - std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS + 1));
+        fb.tick();
+        assert_eq!(fb.sftp_state, SftpState::Idle);
+        assert_eq!(fb.core.status_color, Color::Red);
+        assert!(fb.core.status_msg.contains("timed out"));
+        assert!(fb.core.cmd_start.is_none());
+    }
+
+    #[test]
+    fn waiting_pwd_times_out_to_idle() {
+        let (mut fb, _h) = make_sftp();
+        fb.sftp_state = SftpState::WaitingPwd;
+        fb.core.cmd_start =
+            Some(Instant::now() - std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS + 1));
+        fb.tick();
+        assert_eq!(fb.sftp_state, SftpState::Idle);
+        assert_eq!(fb.core.status_color, Color::Red);
+    }
+
+    #[test]
+    fn waiting_delete_times_out_to_idle() {
+        let (mut fb, _h) = make_sftp();
+        fb.sftp_state = SftpState::WaitingDelete;
+        fb.core.cmd_start =
+            Some(Instant::now() - std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS + 1));
+        fb.tick();
+        assert_eq!(fb.sftp_state, SftpState::Idle);
+    }
+
+    #[test]
+    fn no_timeout_without_cmd_start() {
+        let (mut fb, _h) = make_sftp();
+        fb.sftp_state = SftpState::WaitingLs;
+        fb.core.cmd_start = None;
+        fb.tick();
+        // Should not time out (no cmd_start means no timer running)
+        assert_eq!(fb.sftp_state, SftpState::WaitingLs);
     }
 }

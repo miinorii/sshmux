@@ -9,7 +9,7 @@ use ratatui::{
 
 use crate::browser::{FileBrowser, SshBrowser};
 use crate::keybindings::KeyBindings;
-use crate::pane::{Pane, pane_border_inner, pane_inner, split_areas, split_at_path_mut};
+use crate::pane::{Pane, RenderCtx, pane_border_inner, pane_inner, split_areas, split_at_path_mut};
 use crate::ssh_config::{SshHost, parse_ssh_config};
 use crate::tab::Tab;
 use crate::terminal::EmbeddedTerminal;
@@ -237,7 +237,12 @@ impl App {
         // Fill the entire tab bar row with a solid background.
         let bar_bg = Style::default().bg(Color::DarkGray);
         buf.set_style(
-            Rect { x: full.x, y: tab_y, width: full.width, height: 1 },
+            Rect {
+                x: full.x,
+                y: tab_y,
+                width: full.width,
+                height: 1,
+            },
             bar_bg,
         );
 
@@ -262,14 +267,16 @@ impl App {
         }
         buf.set_line(full.x, tab_y, &Line::from(spans), full.width);
 
-        let mut ctx = crate::pane::RenderCtx {
+        let mut ctx = RenderCtx {
             hosts: &self.hosts,
             focus_idx: self.tabs[self.selected_tab].focus_idx,
             leaf_count: self.tabs[self.selected_tab].root.leaf_count(),
             my_idx: 0,
             keybindings: &self.keybindings,
         };
-        self.tabs[self.selected_tab].root.render(content, buf, &mut ctx);
+        self.tabs[self.selected_tab]
+            .root
+            .render(content, buf, &mut ctx);
 
         // Active resize drag: highlight the separator being dragged in Yellow.
         if let Some(ref drag) = self.pane_resize_drag {
@@ -459,10 +466,7 @@ mod tests {
     #[test]
     fn focused_pane_is_connect_by_default() {
         let app = make_app();
-        assert!(matches!(
-            app.tab().focused_pane(),
-            Some(Pane::Connect(_))
-        ));
+        assert!(matches!(app.tab().focused_pane(), Some(Pane::Connect(_))));
     }
 
     // ---- context_menu_rect tests ----

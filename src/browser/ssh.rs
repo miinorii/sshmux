@@ -12,14 +12,17 @@ use ratatui::{
 };
 
 use super::common::{
-    Browser, BrowserCore, BrowserFocus, DeleteLocation, TransferDirection, TransferStatus,
-    PROMPT_TAIL_BYTES,
+    Browser, BrowserCore, BrowserFocus, COMMAND_TIMEOUT_SECS, DeleteLocation, PROMPT_TAIL_BYTES,
+    TransferDirection, TransferStatus,
 };
 use super::parse::{
     parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote, strip_ansi,
 };
 use crate::keybindings::BrowserBindings;
 use crate::terminal::{EmbeddedTerminal, PtyChannel};
+
+#[cfg(test)]
+use crate::terminal::{MockPty, MockPtyHandle};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -78,8 +81,8 @@ impl SshBrowser {
     }
 
     #[cfg(test)]
-    pub fn with_mock() -> (Self, crate::terminal::MockPtyHandle) {
-        let (mock, handle) = crate::terminal::MockPty::new();
+    pub fn with_mock() -> (Self, MockPtyHandle) {
+        let (mock, handle) = MockPty::new();
         let browser = SshBrowser {
             core: BrowserCore::new("test-host"),
             ssh: Box::new(mock),
@@ -267,6 +270,24 @@ impl SshBrowser {
             SshBrowserState::Connecting | SshBrowserState::SettingPrompt
         ) {
             self.core.raw_snapshot = self.ssh.raw_lines();
+        }
+
+        // Command timeout: waiting states that should not stall indefinitely.
+        if matches!(
+            self.ssh_state,
+            SshBrowserState::WaitingPwd
+                | SshBrowserState::WaitingLs
+                | SshBrowserState::WaitingDelete
+        ) && let Some(start) = self.core.cmd_start
+            && start.elapsed().as_secs() >= COMMAND_TIMEOUT_SECS
+        {
+            warn!("SCP command timed out in state {:?}", self.ssh_state);
+            self.core.cmd_start = None;
+            self.ssh_state = SshBrowserState::Idle;
+            self.core.status_msg = "Command timed out".to_string();
+            self.core.status_color = Color::Red;
+            self.core.needs_redraw = true;
+            return;
         }
 
         match self.ssh_state {
@@ -824,14 +845,16 @@ impl Browser for SshBrowser {
             _ => {}
         }
     }
+    fn process_exited(&self) -> bool {
+        self.ssh.process_exited()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::common::DeleteKind;
+    use crate::browser::common::{DeleteKind, DeleteTarget};
     use crate::browser::parse::FsEntry;
-    use crate::terminal::MockPtyHandle;
 
     fn tick_until_stable(browser: &mut SshBrowser) {
         browser.tick();
@@ -845,7 +868,7 @@ mod tests {
 
     /// Create a mock SCP pty and return its handle for feeding data.
     fn attach_scp_pty(browser: &mut SshBrowser) -> MockPtyHandle {
-        let (mock, handle) = crate::terminal::MockPty::new();
+        let (mock, handle) = MockPty::new();
         browser.scp_pty = Some(Box::new(mock));
         handle
     }
@@ -1100,13 +1123,11 @@ mod tests {
     fn waiting_ls_chains_pending_delete() {
         let (mut sb, h) = make_ssh();
         sb.ssh_state = SshBrowserState::WaitingLs;
-        sb.core
-            .pending_deletes
-            .push(crate::browser::common::DeleteTarget {
-                location: DeleteLocation::Remote,
-                kind: DeleteKind::File,
-                path: "/remote/todelete.txt".to_string(),
-            });
+        sb.core.pending_deletes.push(DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::File,
+            path: "/remote/todelete.txt".to_string(),
+        });
 
         h.feed(b"-rw-r--r-- 1 u u 10 Jan 1 12:00 a.txt\nSSHMUX> ");
         tick_until_stable(&mut sb);
@@ -1344,13 +1365,11 @@ mod tests {
         let (mut sb, h) = make_ssh();
         sb.ssh_state = SshBrowserState::WaitingDelete;
         sb.core.pending_delete_name = Some("first.txt".to_string());
-        sb.core
-            .pending_deletes
-            .push(crate::browser::common::DeleteTarget {
-                location: DeleteLocation::Remote,
-                kind: DeleteKind::File,
-                path: "/remote/second.txt".to_string(),
-            });
+        sb.core.pending_deletes.push(DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::File,
+            path: "/remote/second.txt".to_string(),
+        });
         h.clear_sent();
 
         h.feed(b"SSHMUX> ");
@@ -1370,7 +1389,7 @@ mod tests {
     fn waiting_delete_uses_rm_rf_for_dirs() {
         let (mut sb, h) = make_ssh();
         sb.ssh_state = SshBrowserState::Idle;
-        sb.core.confirm_delete = Some(crate::browser::common::DeleteTarget {
+        sb.core.confirm_delete = Some(DeleteTarget {
             location: DeleteLocation::Remote,
             kind: DeleteKind::Dir,
             path: "/remote/somedir".to_string(),
@@ -1392,7 +1411,7 @@ mod tests {
     fn waiting_delete_uses_rm_for_files() {
         let (mut sb, h) = make_ssh();
         sb.ssh_state = SshBrowserState::Idle;
-        sb.core.confirm_delete = Some(crate::browser::common::DeleteTarget {
+        sb.core.confirm_delete = Some(DeleteTarget {
             location: DeleteLocation::Remote,
             kind: DeleteKind::File,
             path: "/remote/somefile.txt".to_string(),
@@ -1638,5 +1657,50 @@ mod tests {
             "should have no stars for empty password: {}",
             text
         );
+    }
+
+    // ---- Command timeout ----
+
+    #[test]
+    fn waiting_ls_times_out_to_idle() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::WaitingLs;
+        sb.core.cmd_start =
+            Some(Instant::now() - std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS + 1));
+        sb.tick();
+        assert_eq!(sb.ssh_state, SshBrowserState::Idle);
+        assert_eq!(sb.core.status_color, Color::Red);
+        assert!(sb.core.status_msg.contains("timed out"));
+        assert!(sb.core.cmd_start.is_none());
+    }
+
+    #[test]
+    fn waiting_pwd_times_out_to_idle() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::WaitingPwd;
+        sb.core.cmd_start =
+            Some(Instant::now() - std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS + 1));
+        sb.tick();
+        assert_eq!(sb.ssh_state, SshBrowserState::Idle);
+        assert_eq!(sb.core.status_color, Color::Red);
+    }
+
+    #[test]
+    fn waiting_delete_times_out_to_idle() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::WaitingDelete;
+        sb.core.cmd_start =
+            Some(Instant::now() - std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS + 1));
+        sb.tick();
+        assert_eq!(sb.ssh_state, SshBrowserState::Idle);
+    }
+
+    #[test]
+    fn no_timeout_without_cmd_start() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::WaitingLs;
+        sb.core.cmd_start = None;
+        sb.tick();
+        assert_eq!(sb.ssh_state, SshBrowserState::WaitingLs);
     }
 }

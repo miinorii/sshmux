@@ -11,6 +11,7 @@ use ratatui::{
 use crate::browser::common::Browser;
 use crate::browser::{FileBrowser, SshBrowser};
 use crate::connect::ConnectPane;
+use crate::keybindings::KeyBindings;
 use crate::ssh_config::SshHost;
 use crate::terminal::EmbeddedTerminal;
 
@@ -317,12 +318,14 @@ impl Pane {
                 let is_focus = ctx.my_idx == focus_idx;
                 ctx.my_idx += 1;
                 browser.render(area, buf, is_focus, leaf_count, &keybindings.browser);
+                render_browser_exit_overlay(browser, area, buf);
             }
 
             Pane::SshBrowser { browser } => {
                 let is_focus = ctx.my_idx == focus_idx;
                 ctx.my_idx += 1;
                 browser.render(area, buf, is_focus, leaf_count, &keybindings.browser);
+                render_browser_exit_overlay(browser, area, buf);
             }
 
             Pane::Split {
@@ -339,10 +342,12 @@ impl Pane {
                             // Use ┼ instead of ┬ when a vertical separator from a sibling
                             // above ends exactly at this row (TopBottom split above us).
                             if area.height > 0 {
-                                let top_sym =
-                                    if area.y > 0 { buf[(x, area.y - 1)].symbol() } else { "" };
-                                let top_connects =
-                                    matches!(top_sym, "│" | "┬" | "├" | "┤" | "┼");
+                                let top_sym = if area.y > 0 {
+                                    buf[(x, area.y - 1)].symbol()
+                                } else {
+                                    ""
+                                };
+                                let top_connects = matches!(top_sym, "│" | "┬" | "├" | "┤" | "┼");
                                 let junction = if top_connects { '┼' } else { '┬' };
                                 buf[(x, area.y)].set_char(junction).set_style(sep_style);
                             }
@@ -355,9 +360,7 @@ impl Pane {
                         }
                     }
                     Split::TopBottom => {
-                        for (i, (child, a)) in
-                            children.iter_mut().zip(areas.iter()).enumerate()
-                        {
+                        for (i, (child, a)) in children.iter_mut().zip(areas.iter()).enumerate() {
                             child.render(*a, buf, ctx);
                             if i > 0 {
                                 // Fix ├/┤/┼ junction characters where outer vertical
@@ -409,7 +412,7 @@ pub struct RenderCtx<'a> {
     pub leaf_count: usize,
     /// Running DFS leaf index — incremented by each leaf variant during render.
     pub my_idx: usize,
-    pub keybindings: &'a crate::keybindings::KeyBindings,
+    pub keybindings: &'a KeyBindings,
 }
 
 // ---------------------------------------------------------------------------
@@ -446,7 +449,8 @@ pub fn split_areas(area: Rect, kind: &Split, ratios: &[u16]) -> Vec<Rect> {
         Split::TopBottom => {
             // No spacing: each pane's own top-border title line acts as the visual
             // separator between stacked panes.
-            let constraints: Vec<Constraint> = ratios.iter().map(|&r| Constraint::Fill(r)).collect();
+            let constraints: Vec<Constraint> =
+                ratios.iter().map(|&r| Constraint::Fill(r)).collect();
             Layout::default()
                 .direction(direction)
                 .constraints(constraints)
@@ -523,6 +527,55 @@ pub fn render_pane_border(
     }
 }
 
+/// Render a "session ended / Reconnect / Close pane" overlay on top of a browser
+/// pane when its underlying PTY has exited.
+fn render_browser_exit_overlay(browser: &dyn Browser, area: Rect, buf: &mut Buffer) {
+    if !browser.process_exited() {
+        return;
+    }
+    let menu_w = 34u16.min(area.width.saturating_sub(2));
+    let menu_h = 3u16;
+    let cx = area.x + area.width.saturating_sub(menu_w) / 2;
+    let cy = area.y + area.height.saturating_sub(menu_h) / 2;
+    let menu_area = Rect {
+        x: cx,
+        y: cy,
+        width: menu_w,
+        height: menu_h,
+    };
+    let sel = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+    let items = ["Reconnect", "Close pane"];
+    let mut spans = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" / ").style(dim));
+        }
+        let style = if i as u8 == browser.core().exit_selection {
+            sel
+        } else {
+            dim
+        };
+        spans.push(Span::raw(*item).style(style));
+    }
+    for y in menu_area.y..menu_area.y + menu_area.height {
+        for x in menu_area.x..menu_area.x + menu_area.width {
+            buf[(x, y)].reset();
+        }
+    }
+    let paragraph = Paragraph::new(Line::from(spans))
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(" session ended "),
+        );
+    paragraph.render(menu_area, buf);
+}
+
 // ---------------------------------------------------------------------------
 // Separator hit-testing and resize support
 // ---------------------------------------------------------------------------
@@ -541,12 +594,7 @@ pub struct SeparatorHit {
 
 /// Walk the pane tree and check if `(col, row)` lands on a separator.
 /// Returns the innermost separator hit, or `None`.
-pub fn hit_test_separator(
-    pane: &Pane,
-    area: Rect,
-    col: u16,
-    row: u16,
-) -> Option<SeparatorHit> {
+pub fn hit_test_separator(pane: &Pane, area: Rect, col: u16, row: u16) -> Option<SeparatorHit> {
     match pane {
         Pane::Split {
             kind,
@@ -658,6 +706,7 @@ pub fn remove_leaf(pane: &mut Pane, n: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keybindings::KeyBindings;
     use ratatui::{buffer::Buffer, layout::Rect};
 
     fn r(w: u16, h: u16) -> Rect {
@@ -999,8 +1048,14 @@ mod tests {
     fn render_to_buf(p: &mut Pane, area: Rect) -> Buffer {
         let mut buf = Buffer::empty(area);
         let leaf_count = p.leaf_count();
-        let kb = crate::keybindings::KeyBindings::default();
-        let mut ctx = RenderCtx { hosts: &[], focus_idx: 0, leaf_count, my_idx: 0, keybindings: &kb };
+        let kb = KeyBindings::default();
+        let mut ctx = RenderCtx {
+            hosts: &[],
+            focus_idx: 0,
+            leaf_count,
+            my_idx: 0,
+            keybindings: &kb,
+        };
         p.render(area, &mut buf, &mut ctx);
         buf
     }
@@ -1012,22 +1067,40 @@ mod tests {
     #[test]
     fn junction_lr_separator_is_tee_down_at_top() {
         // LeftRight 2-pane: separator column starts with ┬ then │ below.
-        let area = Rect { x: 0, y: 0, width: 21, height: 5 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 21,
+            height: 5,
+        };
         let mut p = Pane::Split {
             kind: Split::LeftRight,
             children: vec![connect(), connect()],
             ratios: vec![100, 100],
         };
         let buf = render_to_buf(&mut p, area);
-        assert_eq!(buf[(10u16, 0u16)].symbol(), "┬", "top of separator should be ┬");
+        assert_eq!(
+            buf[(10u16, 0u16)].symbol(),
+            "┬",
+            "top of separator should be ┬"
+        );
         for y in 1..5u16 {
-            assert_eq!(buf[(10u16, y)].symbol(), "│", "separator body at y={y} should be │");
+            assert_eq!(
+                buf[(10u16, y)].symbol(),
+                "│",
+                "separator body at y={y} should be │"
+            );
         }
     }
 
     #[test]
     fn junction_title_bar_below_lr_separator_gets_tee_up() {
-        let area = Rect { x: 0, y: 0, width: 41, height: 10 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 41,
+            height: 10,
+        };
         let mut p = Pane::Split {
             kind: Split::TopBottom,
             children: vec![
@@ -1041,16 +1114,33 @@ mod tests {
             ratios: vec![100, 100],
         };
         let buf = render_to_buf(&mut p, area);
-        assert_eq!(buf[(20u16, 0u16)].symbol(), "┬", "separator top should be ┬");
+        assert_eq!(
+            buf[(20u16, 0u16)].symbol(),
+            "┬",
+            "separator top should be ┬"
+        );
         for y in 1..5u16 {
-            assert_eq!(buf[(20u16, y)].symbol(), "│", "separator body at y={y} should be │");
+            assert_eq!(
+                buf[(20u16, y)].symbol(),
+                "│",
+                "separator body at y={y} should be │"
+            );
         }
-        assert_eq!(buf[(20u16, 5u16)].symbol(), "┴", "title bar below separator should be ┴");
+        assert_eq!(
+            buf[(20u16, 5u16)].symbol(),
+            "┴",
+            "title bar below separator should be ┴"
+        );
     }
 
     #[test]
     fn junction_lr_separator_left_of_inner_tb_becomes_tee_right() {
-        let area = Rect { x: 0, y: 0, width: 21, height: 10 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 21,
+            height: 10,
+        };
         let mut p = Pane::Split {
             kind: Split::LeftRight,
             children: vec![
@@ -1069,7 +1159,12 @@ mod tests {
 
     #[test]
     fn junction_lr_separator_right_of_inner_tb_becomes_tee_left() {
-        let area = Rect { x: 0, y: 0, width: 21, height: 10 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 21,
+            height: 10,
+        };
         let mut p = Pane::Split {
             kind: Split::LeftRight,
             children: vec![
@@ -1088,7 +1183,12 @@ mod tests {
 
     #[test]
     fn junction_stacked_lr_separators_at_same_column_produce_cross() {
-        let area = Rect { x: 0, y: 0, width: 41, height: 10 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 41,
+            height: 10,
+        };
         let mut p = Pane::Split {
             kind: Split::TopBottom,
             children: vec![
@@ -1116,8 +1216,14 @@ mod tests {
         // ratio [200, 100] should give the left pane roughly double the right pane.
         let a = split_areas(r(90, 20), &Split::LeftRight, &[200, 100]);
         // Total pane space = 89 (1 separator). Left ~ 59, right ~ 30.
-        assert!(a[0].width > a[1].width, "left pane should be wider with ratio 200:100");
-        assert!(a[0].width > a[1].width * 3 / 2, "left pane should be at least 1.5x right");
+        assert!(
+            a[0].width > a[1].width,
+            "left pane should be wider with ratio 200:100"
+        );
+        assert!(
+            a[0].width > a[1].width * 3 / 2,
+            "left pane should be at least 1.5x right"
+        );
         assert_eq!(a[0].width + a[1].width, 89);
     }
 
@@ -1125,8 +1231,14 @@ mod tests {
     fn split_areas_tb_unequal_ratios_top_is_taller() {
         // ratio [300, 100] should give the top pane roughly 3x the bottom.
         let a = split_areas(r(80, 40), &Split::TopBottom, &[300, 100]);
-        assert!(a[0].height > a[1].height, "top pane should be taller with ratio 300:100");
-        assert!(a[0].height > a[1].height * 2, "top pane should be more than 2x bottom");
+        assert!(
+            a[0].height > a[1].height,
+            "top pane should be taller with ratio 300:100"
+        );
+        assert!(
+            a[0].height > a[1].height * 2,
+            "top pane should be more than 2x bottom"
+        );
         assert_eq!(a[0].height + a[1].height, 40);
     }
 
@@ -1262,7 +1374,13 @@ mod tests {
         let mut p = hsplit();
         let result = split_at_path_mut(&mut p, &[]);
         assert!(result.is_some());
-        assert!(matches!(result.unwrap(), Pane::Split { kind: Split::LeftRight, .. }));
+        assert!(matches!(
+            result.unwrap(),
+            Pane::Split {
+                kind: Split::LeftRight,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1275,7 +1393,13 @@ mod tests {
         };
         let result = split_at_path_mut(&mut p, &[0]);
         assert!(result.is_some());
-        assert!(matches!(result.unwrap(), Pane::Split { kind: Split::TopBottom, .. }));
+        assert!(matches!(
+            result.unwrap(),
+            Pane::Split {
+                kind: Split::TopBottom,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1287,7 +1411,13 @@ mod tests {
         };
         let result = split_at_path_mut(&mut p, &[1]);
         assert!(result.is_some());
-        assert!(matches!(result.unwrap(), Pane::Split { kind: Split::TopBottom, .. }));
+        assert!(matches!(
+            result.unwrap(),
+            Pane::Split {
+                kind: Split::TopBottom,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1315,7 +1445,13 @@ mod tests {
         };
         let result = split_at_path_mut(&mut p, &[1, 1]);
         assert!(result.is_some());
-        assert!(matches!(result.unwrap(), Pane::Split { kind: Split::LeftRight, .. }));
+        assert!(matches!(
+            result.unwrap(),
+            Pane::Split {
+                kind: Split::LeftRight,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1339,7 +1475,10 @@ mod tests {
             ratios[0] = 200;
         }
         if let Pane::Split { ratios, .. } = &p {
-            assert_eq!(ratios[0], 200, "mutation through split_at_path_mut should be visible");
+            assert_eq!(
+                ratios[0], 200,
+                "mutation through split_at_path_mut should be visible"
+            );
         }
     }
 }

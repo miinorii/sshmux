@@ -88,6 +88,9 @@ impl DeleteTarget {
 /// Bytes to scan from the end of raw PTY output for prompt detection.
 pub const PROMPT_TAIL_BYTES: usize = 64;
 
+/// Seconds before a waiting command (ls, pwd, delete) is considered timed out.
+pub const COMMAND_TIMEOUT_SECS: u64 = 30;
+
 /// Action returned by `handle_browser_key` for browser-specific operations.
 pub enum BrowserKeyAction {
     Handled,
@@ -127,6 +130,8 @@ pub trait Browser {
     fn is_connecting(&self) -> bool;
     /// Forward a key during the connecting phase.
     fn send_connect_key(&mut self, code: KeyCode);
+    /// True when the underlying PTY process has exited.
+    fn process_exited(&self) -> bool;
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +183,8 @@ pub struct BrowserCore {
     pub transfer_start: Option<Instant>,
     pub batch_total: usize,
     pub batch_done: usize,
+    // ---- exit overlay ----
+    pub exit_selection: u8, // 0 = Reconnect, 1 = Close pane
 }
 
 impl BrowserCore {
@@ -226,6 +233,7 @@ impl BrowserCore {
             transfer_start: None,
             batch_total: 0,
             batch_done: 0,
+            exit_selection: 0,
         }
     }
 

@@ -10,6 +10,8 @@ use std::{
 use anyhow::Result;
 use log::{debug, error, info};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+
+use crate::browser::parse::strip_ansi;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -363,7 +365,7 @@ impl EmbeddedTerminal {
         let Ok(rb) = self.raw_output.lock() else {
             return vec![];
         };
-        crate::browser::parse::strip_ansi(&rb)
+        strip_ansi(&rb)
             .lines()
             .map(|l| l.trim_end().to_string())
             .collect()
@@ -516,7 +518,7 @@ impl PtyChannel for MockPty {
         self.raw.borrow().len()
     }
     fn raw_lines(&self) -> Vec<String> {
-        crate::browser::parse::strip_ansi(&self.raw.borrow())
+        strip_ansi(&self.raw.borrow())
             .lines()
             .map(|l| l.trim_end().to_string())
             .collect()
