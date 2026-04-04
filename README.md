@@ -12,16 +12,19 @@ SSH session multiplexer that runs inside your local terminal. Tabs, split panes,
 ## Features
 
 - Tabs and split panes -- run multiple SSH sessions side by side in a single terminal window
+- Drag pane separators to resize splits
 - Two-panel file browsers with both SFTP and SCP backends for remote file management
 - Reads hosts from `~/.ssh/config` -- no separate configuration file needed
 - Uses system `ssh`, `sftp`, and `scp` binaries -- inherits your SSH agent, keys, jump hosts, and proxy settings
 - 1000-line scrollback in interactive sessions, with mouse scroll support
 - Mouse forwarding (SGR encoding) to remote applications that request it
+- Bracketed paste forwarding to SSH sessions
 - File transfers with progress indication (percentage for single files, file count for directories)
 - Batch operations: multi-select files with Shift+Up/Down, then transfer or delete in one action
 - Drag-and-drop upload: drop files from your OS file manager onto a browser pane
 - Recursive directory deletion via the SCP browser (`rm -rf`), which SFTP cannot do
 - SCP browser works on servers without the SFTP subsystem
+- Reconnect or close pane when a session ends
 - Right-click context menu for quick access to tab/split/quit actions
 - Drive picker on Windows for navigating between local volumes
 - Works on Windows (ConPTY) and Linux
@@ -73,6 +76,8 @@ Standard terminal input. Notable mappings:
 Mouse events forwarded as SGR sequences when the remote app enables mouse reporting.
 
 Scrollback: mouse scroll navigates 1000 lines of history when the remote app is not capturing mouse. In alternate screen apps (vim, htop, less), scroll sends arrow keys instead. Any keypress snaps back to live view.
+
+Paste: clipboard paste is forwarded as a bracketed paste sequence (`ESC[200~…ESC[201~`) so remote shells and editors receive it correctly.
 
 ### File browser pane (SFTP & SCP)
 

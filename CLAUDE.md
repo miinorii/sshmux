@@ -22,9 +22,12 @@ Integration tests are `#[ignore]`d so `cargo test` skips them. They require a Do
 cd tests/docker && docker compose up -d --build --wait   # start container
 cargo test -- --ignored                                    # run integration tests
 cd tests/docker && docker compose down                     # stop container
+# or: tests/run-integration.sh (starts container, runs tests, stops container)
 ```
 
-Debug logging: `sshmux --log=LEVEL` (trace/debug/info/warn/error).
+Integration tests cover SSH sessions, SFTP browser (navigate, download, upload, delete), and SCP browser (navigate, download, upload) against a real SSH daemon.
+
+Debug logging: `sshmux --log=LEVEL` (trace/debug/info/warn/error). Creates `sshmux-LEVEL-YYYYMMDD_HHMMSS.log` in the current directory.
 
 ## Architecture
 
@@ -40,7 +43,7 @@ SSH session multiplexer TUI. Uses system `ssh`, `sftp`, and `scp` binaries — n
 
 ### PTY layer
 
-`EmbeddedTerminal` (terminal.rs) wraps `portable_pty`. A background reader thread processes output through `vt100::Parser` (screen grid + 1000-line scrollback), accumulates `raw_output` (only when `capture_raw` is true — browsers only, not interactive sessions), and replies to DSR probes. The main thread writes via `send_str()`/`send_char()`.
+`EmbeddedTerminal` (terminal.rs) wraps `portable_pty`. A background reader thread processes output through `vt100::Parser` (screen grid + 1000-line scrollback), accumulates `raw_output` (only when `capture_raw` is true — browsers only, not interactive sessions), and replies to DSR probes. The main thread writes via `send_str()`/`send_char()`. The `PtyChannel` trait abstracts PTY I/O; `MockPty` implements it for unit tests.
 
 Terminal state (mouse mode, application cursor, cursor visibility, alternate screen) is queried directly from `vt100::Screen` via methods on `EmbeddedTerminal` (`mouse_active()`, `app_cursor()`, `alternate_screen()`). No manual escape sequence scanning.
 
