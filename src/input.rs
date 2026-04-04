@@ -4,11 +4,13 @@ use ratatui::{layout::Rect, style::Color, widgets::ListState};
 
 use crate::app::{App, PaneResizeDrag};
 use crate::browser::{BrowserKeyAction, DragAction, SshBrowserState, handle_browser_key};
+use crate::connect::{
+    ConnectOverlay, ConnectPane, KeyEditorState, editor_binding_index, editor_nav_down,
+    editor_nav_up,
+};
 use crate::keybindings::KeyBinding;
 use crate::pane::{
-    ConnectOverlay, KeyEditorState, Pane, Split, editor_binding_index, editor_nav_down,
-    editor_nav_up, hit_test_separator, pane_border_inner, pane_inner, split_areas,
-    split_at_path_mut,
+    Pane, Split, hit_test_separator, pane_border_inner, pane_inner, split_areas, split_at_path_mut,
 };
 
 // ---------------------------------------------------------------------------
@@ -45,10 +47,10 @@ pub fn handle_key(
     // Alt suppression so the captured key reaches the editor handler.
     let editor_capturing = matches!(
         app.tab().focused_pane(),
-        Some(Pane::Connect {
+        Some(Pane::Connect(ConnectPane {
             overlay: ConnectOverlay::KeyEditor(KeyEditorState { editing: true, .. }),
             ..
-        })
+        }))
     );
 
     if !editor_capturing {
@@ -63,10 +65,12 @@ pub fn handle_key(
             } else {
                 app.selected_tab = app.tabs.len() - 1;
             }
+            app.pane_resize_drag = None;
             return Action::Continue;
         }
         if g.next_tab.matches(code, ctrl, alt, shift) {
             app.selected_tab = (app.selected_tab + 1) % app.tabs.len();
+            app.pane_resize_drag = None;
             return Action::Continue;
         }
         if g.prev_pane.matches(code, ctrl, alt, shift) {
@@ -248,53 +252,45 @@ fn handle_connect_key(
     last_area: Rect,
 ) -> Option<Action> {
     let focus_idx = app.tabs[app.selected_tab].focus_idx;
-    if !matches!(
-        app.tabs[app.selected_tab].root.leaf(focus_idx),
-        Some(Pane::Connect { .. })
-    ) {
+    if !matches!(app.tabs[app.selected_tab].root.leaf(focus_idx), Some(Pane::Connect(_))) {
         return None;
+    }
+
+    // Helper: get &mut ConnectPane for the focused pane.
+    macro_rules! connect_mut {
+        () => {
+            match app.tab_mut().focused_pane_mut() {
+                Some(Pane::Connect(p)) => p,
+                _ => return Some(Action::Continue),
+            }
+        };
     }
 
     // Browser menu overlay
     if matches!(
         app.tab().focused_pane(),
-        Some(Pane::Connect {
-            overlay: ConnectOverlay::BrowserMenu(_),
-            ..
-        })
+        Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::BrowserMenu(_), .. }))
     ) {
         match code {
             KeyCode::Up => {
-                if let Some(Pane::Connect {
-                    overlay: ConnectOverlay::BrowserMenu(ms),
-                    ..
-                }) = app.tab_mut().focused_pane_mut()
-                {
+                if let ConnectOverlay::BrowserMenu(ms) = &mut connect_mut!().overlay {
                     ms.select_previous();
                 }
             }
             KeyCode::Down => {
-                if let Some(Pane::Connect {
-                    overlay: ConnectOverlay::BrowserMenu(ms),
-                    ..
-                }) = app.tab_mut().focused_pane_mut()
-                {
+                if let ConnectOverlay::BrowserMenu(ms) = &mut connect_mut!().overlay {
                     ms.select_next();
                 }
             }
             KeyCode::Enter => {
-                let (host_idx, menu_idx) = if let Some(Pane::Connect {
-                    list_state,
-                    overlay: ConnectOverlay::BrowserMenu(ms),
-                }) = app.tab().focused_pane()
+                let (host_idx, menu_idx) = if let Some(Pane::Connect(p)) = app.tab().focused_pane()
+                    && let ConnectOverlay::BrowserMenu(ms) = &p.overlay
                 {
-                    (list_state.selected(), ms.selected())
+                    (p.list_state.selected(), ms.selected())
                 } else {
                     (None, None)
                 };
-                if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
-                    *overlay = ConnectOverlay::None;
-                }
+                connect_mut!().overlay = ConnectOverlay::None;
                 if let (Some(idx), Some(mi)) = (host_idx, menu_idx) {
                     match mi {
                         0 => {
@@ -311,11 +307,7 @@ fn handle_connect_key(
                     }
                 }
             }
-            KeyCode::Esc => {
-                if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
-                    *overlay = ConnectOverlay::None;
-                }
-            }
+            KeyCode::Esc => connect_mut!().overlay = ConnectOverlay::None,
             _ => {}
         }
         return Some(Action::Continue);
@@ -324,42 +316,25 @@ fn handle_connect_key(
     // Connect input overlay
     if matches!(
         app.tab().focused_pane(),
-        Some(Pane::Connect {
-            overlay: ConnectOverlay::ConnectInput(_),
-            ..
-        })
+        Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::ConnectInput(_), .. }))
     ) {
         match code {
             KeyCode::Char(c) if !ctrl => {
-                if let Some(Pane::Connect {
-                    overlay: ConnectOverlay::ConnectInput(input),
-                    ..
-                }) = app.tab_mut().focused_pane_mut()
-                {
+                if let ConnectOverlay::ConnectInput(input) = &mut connect_mut!().overlay {
                     input.push(c);
                 }
             }
             KeyCode::Backspace => {
-                if let Some(Pane::Connect {
-                    overlay: ConnectOverlay::ConnectInput(input),
-                    ..
-                }) = app.tab_mut().focused_pane_mut()
-                {
+                if let ConnectOverlay::ConnectInput(input) = &mut connect_mut!().overlay {
                     input.pop();
                 }
             }
             KeyCode::Enter => {
-                let args = if let Some(Pane::Connect {
-                    overlay: ConnectOverlay::ConnectInput(input),
-                    ..
-                }) = app.tab().focused_pane()
+                let args = if let Some(Pane::Connect(p)) = app.tab().focused_pane()
+                    && let ConnectOverlay::ConnectInput(input) = &p.overlay
                 {
                     let trimmed = input.trim().to_string();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed)
-                    }
+                    if trimmed.is_empty() { None } else { Some(trimmed) }
                 } else {
                     None
                 };
@@ -368,99 +343,66 @@ fn handle_connect_key(
                         error!("open_session_raw: {}", e);
                     }
                     app.resize_all(last_area);
-                } else if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut()
-                {
-                    *overlay = ConnectOverlay::None;
+                } else {
+                    connect_mut!().overlay = ConnectOverlay::None;
                 }
             }
-            KeyCode::Esc => {
-                if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
-                    *overlay = ConnectOverlay::None;
-                }
-            }
+            KeyCode::Esc => connect_mut!().overlay = ConnectOverlay::None,
             _ => {}
         }
         return Some(Action::Continue);
     }
 
     // Key editor overlay
-    if let Some(Pane::Connect {
-        overlay: ConnectOverlay::KeyEditor(editor),
-        ..
-    }) = app.tab().focused_pane()
+    if let Some(Pane::Connect(p)) = app.tab().focused_pane()
+        && let ConnectOverlay::KeyEditor(editor) = &p.overlay
     {
         let is_editing = editor.editing;
         let display_idx = editor.list_state.selected().unwrap_or(0);
 
         if is_editing {
-            // Capture mode: Esc cancels, any other key sets the binding
             if code == KeyCode::Esc {
-                if let Some(Pane::Connect {
-                    overlay: ConnectOverlay::KeyEditor(editor),
-                    ..
-                }) = app.tab_mut().focused_pane_mut()
-                {
-                    editor.editing = false;
-                    editor.status = Some("Cancelled".into());
+                if let ConnectOverlay::KeyEditor(ed) = &mut connect_mut!().overlay {
+                    ed.editing = false;
+                    ed.status = Some("Cancelled".into());
                 }
             } else if let Some(entry_idx) = editor_binding_index(display_idx) {
                 let entries = app.keybindings.entries();
                 if let Some(entry) = entries.get(entry_idx) {
                     let new_kb = KeyBinding::new(code, ctrl, alt, shift);
-                    app.keybindings
-                        .set_binding(entry.group, entry.field, new_kb);
+                    app.keybindings.set_binding(entry.group, entry.field, new_kb);
                     #[cfg(not(test))]
                     match app.keybindings.save() {
                         Ok(()) => {}
                         Err(e) => error!("save keybindings: {e}"),
                     }
                 }
-                if let Some(Pane::Connect {
-                    overlay: ConnectOverlay::KeyEditor(editor),
-                    ..
-                }) = app.tab_mut().focused_pane_mut()
-                {
-                    editor.editing = false;
-                    editor.status = Some("Saved!".into());
+                if let ConnectOverlay::KeyEditor(ed) = &mut connect_mut!().overlay {
+                    ed.editing = false;
+                    ed.status = Some("Saved!".into());
                 }
             }
         } else {
-            // Navigation mode
             match code {
                 KeyCode::Up => {
-                    if let Some(Pane::Connect {
-                        overlay: ConnectOverlay::KeyEditor(editor),
-                        ..
-                    }) = app.tab_mut().focused_pane_mut()
-                    {
-                        editor_nav_up(&mut editor.list_state);
+                    if let ConnectOverlay::KeyEditor(ed) = &mut connect_mut!().overlay {
+                        editor_nav_up(&mut ed.list_state);
                     }
                 }
                 KeyCode::Down => {
-                    if let Some(Pane::Connect {
-                        overlay: ConnectOverlay::KeyEditor(editor),
-                        ..
-                    }) = app.tab_mut().focused_pane_mut()
-                    {
-                        editor_nav_down(&mut editor.list_state);
+                    if let ConnectOverlay::KeyEditor(ed) = &mut connect_mut!().overlay {
+                        editor_nav_down(&mut ed.list_state);
                     }
                 }
                 KeyCode::Enter => {
                     if editor_binding_index(display_idx).is_some()
-                        && let Some(Pane::Connect {
-                            overlay: ConnectOverlay::KeyEditor(editor),
-                            ..
-                        }) = app.tab_mut().focused_pane_mut()
+                        && let ConnectOverlay::KeyEditor(ed) = &mut connect_mut!().overlay
                     {
-                        editor.editing = true;
-                        editor.status = None;
+                        ed.editing = true;
+                        ed.status = None;
                     }
                 }
-                KeyCode::Esc => {
-                    if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
-                        *overlay = ConnectOverlay::None;
-                    }
-                }
+                KeyCode::Esc => connect_mut!().overlay = ConnectOverlay::None,
                 _ => {}
             }
         }
@@ -470,20 +412,11 @@ fn handle_connect_key(
     // Normal connect pane
     let cb = &app.keybindings.connect;
     if cb.select_prev.matches(code, ctrl, alt, shift) {
-        if let Some(Pane::Connect { list_state, .. }) = app.tab_mut().focused_pane_mut() {
-            list_state.select_previous();
-        }
+        connect_mut!().list_state.select_previous();
     } else if cb.select_next.matches(code, ctrl, alt, shift) {
-        if let Some(Pane::Connect { list_state, .. }) = app.tab_mut().focused_pane_mut() {
-            list_state.select_next();
-        }
+        connect_mut!().list_state.select_next();
     } else if cb.connect.matches(code, ctrl, alt, shift) {
-        let selected =
-            if let Some(Pane::Connect { list_state, .. }) = app.tab_mut().focused_pane_mut() {
-                list_state.selected()
-            } else {
-                None
-            };
+        let selected = connect_mut!().list_state.selected();
         if let Some(idx) = selected {
             if let Err(e) = app.open_session(idx, last_area) {
                 error!("open_session: {}", e);
@@ -491,27 +424,20 @@ fn handle_connect_key(
             app.resize_all(last_area);
         }
     } else if cb.browser_menu.matches(code, ctrl, alt, shift) {
-        if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
-            let mut ms = ListState::default();
-            ms.select(Some(0));
-            *overlay = ConnectOverlay::BrowserMenu(ms);
-        }
+        let mut ms = ListState::default();
+        ms.select(Some(0));
+        connect_mut!().overlay = ConnectOverlay::BrowserMenu(ms);
     } else if cb.manual_connect.matches(code, ctrl, alt, shift) {
-        if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
-            *overlay = ConnectOverlay::ConnectInput(String::new());
-        }
+        connect_mut!().overlay = ConnectOverlay::ConnectInput(String::new());
     } else if cb.help.matches(code, ctrl, alt, shift) {
-        if let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut() {
-            *overlay = if matches!(overlay, ConnectOverlay::KeyEditor(_)) {
-                ConnectOverlay::None
-            } else {
-                ConnectOverlay::KeyEditor(KeyEditorState::new())
-            };
-        }
-    } else if code == KeyCode::Esc
-        && let Some(Pane::Connect { overlay, .. }) = app.tab_mut().focused_pane_mut()
-    {
-        *overlay = ConnectOverlay::None;
+        let pane = connect_mut!();
+        pane.overlay = if matches!(pane.overlay, ConnectOverlay::KeyEditor(_)) {
+            ConnectOverlay::None
+        } else {
+            ConnectOverlay::KeyEditor(KeyEditorState::new())
+        };
+    } else if code == KeyCode::Esc {
+        connect_mut!().overlay = ConnectOverlay::None;
     }
     Some(Action::Continue)
 }
@@ -739,6 +665,22 @@ fn execute_context_menu_action(app: &mut App, idx: usize, last_area: Rect) -> Ac
 }
 
 // ---------------------------------------------------------------------------
+// Drag ratio computation
+// ---------------------------------------------------------------------------
+
+/// Given the two adjacent ratios at drag start, the combined pixel span, and
+/// the cursor delta, return the new pair of ratios. Enforces a 3-pixel minimum
+/// on each side. `span` must be > 0 (caller's responsibility).
+pub fn compute_drag_ratios(start_ratios: (u16, u16), span: u16, delta: i32) -> (u16, u16) {
+    let total = start_ratios.0 as u32 + start_ratios.1 as u32;
+    let orig_left_px = (start_ratios.0 as u32 * span as u32 / total) as i32;
+    let new_left_px = (orig_left_px + delta).max(3).min(span as i32 - 3);
+    let new_r0 = ((new_left_px as u32 * total) / span as u32).max(1) as u16;
+    let new_r1 = (total as u16).saturating_sub(new_r0).max(1);
+    (new_r0, new_r1)
+}
+
+// ---------------------------------------------------------------------------
 // Mouse handling
 // ---------------------------------------------------------------------------
 
@@ -760,14 +702,7 @@ pub fn handle_mouse(
             MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved => {
                 let pos = if drag.horizontal { column } else { row };
                 let delta = pos as i32 - drag.start_pos as i32;
-                let total = drag.start_ratios.0 + drag.start_ratios.1;
-                // Compute new left/top ratio from pixel delta.
-                let orig_left_px = (drag.start_ratios.0 as u32 * drag.span as u32
-                    / total as u32) as i32;
-                let new_left_px = (orig_left_px + delta).max(3).min(drag.span as i32 - 3);
-                let new_r0 =
-                    ((new_left_px as u32 * total as u32) / drag.span as u32).max(1) as u16;
-                let new_r1 = total.saturating_sub(new_r0).max(1);
+                let (new_r0, new_r1) = compute_drag_ratios(drag.start_ratios, drag.span, delta);
                 // Apply to the target Split node.
                 let path = drag.path.clone();
                 let sep_idx = drag.sep_idx;
@@ -817,6 +752,9 @@ pub fn handle_mouse(
                     } else {
                         a0.height + a1.height
                     };
+                    if span == 0 {
+                        return Action::Continue;
+                    }
                     ((r0, r1), span)
                 } else {
                     return Action::Continue;
@@ -1060,7 +998,8 @@ mod tests {
     use super::*;
     use crate::app::ContextMenu;
     use crate::keybindings::KeyBindings;
-    use crate::pane::{ConnectOverlay, Pane};
+    use crate::connect::{ConnectOverlay, ConnectPane};
+    use crate::pane::Pane;
     use crate::ssh_config::SshHost;
     use ratatui::layout::Rect;
 
@@ -1256,8 +1195,8 @@ mod tests {
         // Initial selection is 0 (select_first in new_connect)
         let action = key(&mut app, KeyCode::Down, false, false, false);
         assert_eq!(action, Action::Continue);
-        if let Some(Pane::Connect { list_state, .. }) = app.tab().focused_pane() {
-            assert_eq!(list_state.selected(), Some(1));
+        if let Some(Pane::Connect(p)) = app.tab().focused_pane() {
+            assert_eq!(p.list_state.selected(), Some(1));
         } else {
             panic!("expected Connect pane");
         }
@@ -1270,8 +1209,8 @@ mod tests {
         key(&mut app, KeyCode::Down, false, false, false);
         let action = key(&mut app, KeyCode::Up, false, false, false);
         assert_eq!(action, Action::Continue);
-        if let Some(Pane::Connect { list_state, .. }) = app.tab().focused_pane() {
-            assert_eq!(list_state.selected(), Some(0));
+        if let Some(Pane::Connect(p)) = app.tab().focused_pane() {
+            assert_eq!(p.list_state.selected(), Some(0));
         } else {
             panic!("expected Connect pane");
         }
@@ -1286,10 +1225,7 @@ mod tests {
         assert_eq!(action, Action::Continue);
         assert!(matches!(
             app.tab().focused_pane(),
-            Some(Pane::Connect {
-                overlay: ConnectOverlay::BrowserMenu(_),
-                ..
-            })
+            Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::BrowserMenu(_), .. }))
         ));
     }
 
@@ -1300,10 +1236,7 @@ mod tests {
         assert_eq!(action, Action::Continue);
         assert!(matches!(
             app.tab().focused_pane(),
-            Some(Pane::Connect {
-                overlay: ConnectOverlay::ConnectInput(_),
-                ..
-            })
+            Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::ConnectInput(_), .. }))
         ));
     }
 
@@ -1314,10 +1247,7 @@ mod tests {
         assert_eq!(action, Action::Continue);
         assert!(matches!(
             app.tab().focused_pane(),
-            Some(Pane::Connect {
-                overlay: ConnectOverlay::KeyEditor(_),
-                ..
-            })
+            Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::KeyEditor(_), .. }))
         ));
     }
 
@@ -1328,19 +1258,13 @@ mod tests {
         key(&mut app, KeyCode::Char('h'), false, false, false);
         assert!(matches!(
             app.tab().focused_pane(),
-            Some(Pane::Connect {
-                overlay: ConnectOverlay::KeyEditor(_),
-                ..
-            })
+            Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::KeyEditor(_), .. }))
         ));
         // 'h' inside the editor (nav mode) is unrecognized — overlay stays open
         key(&mut app, KeyCode::Char('h'), false, false, false);
         assert!(matches!(
             app.tab().focused_pane(),
-            Some(Pane::Connect {
-                overlay: ConnectOverlay::KeyEditor(_),
-                ..
-            })
+            Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::KeyEditor(_), .. }))
         ));
     }
 
@@ -1353,10 +1277,7 @@ mod tests {
         assert_eq!(action, Action::Continue);
         assert!(matches!(
             app.tab().focused_pane(),
-            Some(Pane::Connect {
-                overlay: ConnectOverlay::None,
-                ..
-            })
+            Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::None, .. }))
         ));
     }
 
@@ -1367,10 +1288,7 @@ mod tests {
         assert_eq!(action, Action::Continue);
         assert!(matches!(
             app.tab().focused_pane(),
-            Some(Pane::Connect {
-                overlay: ConnectOverlay::None,
-                ..
-            })
+            Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::None, .. }))
         ));
     }
 
@@ -1381,10 +1299,7 @@ mod tests {
         let mut app = make_app_with_hosts(1);
         key(&mut app, KeyCode::Char('b'), false, false, false);
         // Initial selection is 0
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::BrowserMenu(ms),
-            ..
-        }) = app.tab().focused_pane()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::BrowserMenu(ms), .. })) = app.tab().focused_pane()
         {
             assert_eq!(ms.selected(), Some(0));
         } else {
@@ -1392,10 +1307,7 @@ mod tests {
         }
         // Move down
         key(&mut app, KeyCode::Down, false, false, false);
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::BrowserMenu(ms),
-            ..
-        }) = app.tab().focused_pane()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::BrowserMenu(ms), .. })) = app.tab().focused_pane()
         {
             assert_eq!(ms.selected(), Some(1));
         } else {
@@ -1403,10 +1315,7 @@ mod tests {
         }
         // Move up
         key(&mut app, KeyCode::Up, false, false, false);
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::BrowserMenu(ms),
-            ..
-        }) = app.tab().focused_pane()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::BrowserMenu(ms), .. })) = app.tab().focused_pane()
         {
             assert_eq!(ms.selected(), Some(0));
         } else {
@@ -1421,10 +1330,7 @@ mod tests {
         key(&mut app, KeyCode::Esc, false, false, false);
         assert!(matches!(
             app.tab().focused_pane(),
-            Some(Pane::Connect {
-                overlay: ConnectOverlay::None,
-                ..
-            })
+            Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::None, .. }))
         ));
     }
 
@@ -1438,10 +1344,7 @@ mod tests {
         key(&mut app, KeyCode::Char('o'), false, false, false);
         key(&mut app, KeyCode::Char('s'), false, false, false);
         key(&mut app, KeyCode::Char('t'), false, false, false);
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::ConnectInput(input),
-            ..
-        }) = app.tab().focused_pane()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::ConnectInput(input), .. })) = app.tab().focused_pane()
         {
             assert_eq!(input, "host");
         } else {
@@ -1456,10 +1359,7 @@ mod tests {
         key(&mut app, KeyCode::Char('a'), false, false, false);
         key(&mut app, KeyCode::Char('b'), false, false, false);
         key(&mut app, KeyCode::Backspace, false, false, false);
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::ConnectInput(input),
-            ..
-        }) = app.tab().focused_pane()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::ConnectInput(input), .. })) = app.tab().focused_pane()
         {
             assert_eq!(input, "a");
         } else {
@@ -1474,10 +1374,7 @@ mod tests {
         key(&mut app, KeyCode::Esc, false, false, false);
         assert!(matches!(
             app.tab().focused_pane(),
-            Some(Pane::Connect {
-                overlay: ConnectOverlay::None,
-                ..
-            })
+            Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::None, .. }))
         ));
     }
 
@@ -1489,10 +1386,7 @@ mod tests {
         key(&mut app, KeyCode::Enter, false, false, false);
         assert!(matches!(
             app.tab().focused_pane(),
-            Some(Pane::Connect {
-                overlay: ConnectOverlay::None,
-                ..
-            })
+            Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::None, .. }))
         ));
     }
 
@@ -1502,10 +1396,7 @@ mod tests {
         key(&mut app, KeyCode::Char('c'), false, false, false);
         // Ctrl+char should not be appended
         key(&mut app, KeyCode::Char('a'), true, false, false);
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::ConnectInput(input),
-            ..
-        }) = app.tab().focused_pane()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::ConnectInput(input), .. })) = app.tab().focused_pane()
         {
             assert_eq!(input, "");
         } else {
@@ -1519,10 +1410,7 @@ mod tests {
     fn key_editor_initial_selection() {
         let mut app = make_app();
         key(&mut app, KeyCode::Char('h'), false, false, false);
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::KeyEditor(editor),
-            ..
-        }) = app.tab().focused_pane()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::KeyEditor(editor), .. })) = app.tab().focused_pane()
         {
             // Initial selection is 1 (first binding, index 0 is header)
             assert_eq!(editor.list_state.selected(), Some(1));
@@ -1537,18 +1425,12 @@ mod tests {
         let mut app = make_app();
         key(&mut app, KeyCode::Char('h'), false, false, false);
         // Navigate to index 9 (last global binding), next should skip header at 10
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::KeyEditor(editor),
-            ..
-        }) = app.tab_mut().focused_pane_mut()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::KeyEditor(editor), .. })) = app.tab_mut().focused_pane_mut()
         {
             editor.list_state.select(Some(9));
         }
         key(&mut app, KeyCode::Down, false, false, false);
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::KeyEditor(editor),
-            ..
-        }) = app.tab().focused_pane()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::KeyEditor(editor), .. })) = app.tab().focused_pane()
         {
             // Should skip header at 10, land on 11
             assert_eq!(editor.list_state.selected(), Some(11));
@@ -1562,18 +1444,12 @@ mod tests {
         let mut app = make_app();
         key(&mut app, KeyCode::Char('h'), false, false, false);
         // Position at index 11 (first connect binding), up should skip header at 10
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::KeyEditor(editor),
-            ..
-        }) = app.tab_mut().focused_pane_mut()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::KeyEditor(editor), .. })) = app.tab_mut().focused_pane_mut()
         {
             editor.list_state.select(Some(11));
         }
         key(&mut app, KeyCode::Up, false, false, false);
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::KeyEditor(editor),
-            ..
-        }) = app.tab().focused_pane()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::KeyEditor(editor), .. })) = app.tab().focused_pane()
         {
             // Should skip header at 10, land on 9
             assert_eq!(editor.list_state.selected(), Some(9));
@@ -1588,10 +1464,7 @@ mod tests {
         key(&mut app, KeyCode::Char('h'), false, false, false);
         // Selection starts at 1 (a binding row, not a header)
         key(&mut app, KeyCode::Enter, false, false, false);
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::KeyEditor(editor),
-            ..
-        }) = app.tab().focused_pane()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::KeyEditor(editor), .. })) = app.tab().focused_pane()
         {
             assert!(editor.editing);
             assert!(editor.status.is_none());
@@ -1605,18 +1478,12 @@ mod tests {
         let mut app = make_app();
         key(&mut app, KeyCode::Char('h'), false, false, false);
         // Force selection to header index 0
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::KeyEditor(editor),
-            ..
-        }) = app.tab_mut().focused_pane_mut()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::KeyEditor(editor), .. })) = app.tab_mut().focused_pane_mut()
         {
             editor.list_state.select(Some(0));
         }
         key(&mut app, KeyCode::Enter, false, false, false);
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::KeyEditor(editor),
-            ..
-        }) = app.tab().focused_pane()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::KeyEditor(editor), .. })) = app.tab().focused_pane()
         {
             assert!(!editor.editing);
         } else {
@@ -1631,10 +1498,7 @@ mod tests {
         key(&mut app, KeyCode::Enter, false, false, false); // start editing
         let action = key(&mut app, KeyCode::Esc, false, false, false);
         assert_eq!(action, Action::Continue);
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::KeyEditor(editor),
-            ..
-        }) = app.tab().focused_pane()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::KeyEditor(editor), .. })) = app.tab().focused_pane()
         {
             assert!(!editor.editing);
             assert_eq!(editor.status.as_deref(), Some("Cancelled"));
@@ -1650,10 +1514,7 @@ mod tests {
         key(&mut app, KeyCode::Esc, false, false, false);
         assert!(matches!(
             app.tab().focused_pane(),
-            Some(Pane::Connect {
-                overlay: ConnectOverlay::None,
-                ..
-            })
+            Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::None, .. }))
         ));
     }
 
@@ -1666,10 +1527,7 @@ mod tests {
         // Capture F5 as new binding
         key(&mut app, KeyCode::F(5), false, false, false);
         // Should no longer be editing, status = "Saved!"
-        if let Some(Pane::Connect {
-            overlay: ConnectOverlay::KeyEditor(editor),
-            ..
-        }) = app.tab().focused_pane()
+        if let Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::KeyEditor(editor), .. })) = app.tab().focused_pane()
         {
             assert!(!editor.editing);
             assert_eq!(editor.status.as_deref(), Some("Saved!"));
@@ -1771,10 +1629,7 @@ mod tests {
         key(&mut app, KeyCode::Char('x'), false, false, false);
         assert!(matches!(
             app.tab().focused_pane(),
-            Some(Pane::Connect {
-                overlay: ConnectOverlay::BrowserMenu(_),
-                ..
-            })
+            Some(Pane::Connect(ConnectPane { overlay: ConnectOverlay::BrowserMenu(_), .. }))
         ));
     }
 
@@ -1805,5 +1660,63 @@ mod tests {
         let mut app = make_app();
         // Should not panic — paste on non-session pane is a no-op
         handle_paste(&mut app, "hello world");
+    }
+
+    // ---- compute_drag_ratios ------------------------------------------------
+
+    #[test]
+    fn drag_ratios_zero_delta_unchanged() {
+        let (r0, r1) = compute_drag_ratios((100, 100), 100, 0);
+        assert_eq!(r0, 100);
+        assert_eq!(r1, 100);
+    }
+
+    #[test]
+    fn drag_ratios_positive_delta_grows_left() {
+        // span=100, equal ratios, push right by 10px → left gets ~60%
+        let (r0, r1) = compute_drag_ratios((100, 100), 100, 10);
+        assert!(r0 > 100, "left ratio should grow with positive delta");
+        assert_eq!(r0 + r1, 200, "total ratio must be preserved");
+    }
+
+    #[test]
+    fn drag_ratios_negative_delta_shrinks_left() {
+        let (r0, r1) = compute_drag_ratios((100, 100), 100, -20);
+        assert!(r0 < 100, "left ratio should shrink with negative delta");
+        assert_eq!(r0 + r1, 200);
+    }
+
+    #[test]
+    fn drag_ratios_clamps_minimum_left() {
+        // Pushing far left: left pane must keep at least 3px worth of ratio.
+        let (r0, r1) = compute_drag_ratios((100, 100), 100, -200);
+        // At 3px minimum: r0 = 3/100 * 200 = 6 (at least 1 after max())
+        assert!(r0 >= 1, "left ratio must be at least 1");
+        assert!(r1 >= 1, "right ratio must be at least 1");
+        assert_eq!(r0 + r1, 200);
+    }
+
+    #[test]
+    fn drag_ratios_clamps_minimum_right() {
+        let (r0, r1) = compute_drag_ratios((100, 100), 100, 200);
+        assert!(r0 >= 1);
+        assert!(r1 >= 1);
+        assert_eq!(r0 + r1, 200);
+    }
+
+    #[test]
+    fn drag_ratios_asymmetric_start() {
+        // Start at 200:100 ratio, zero delta → should return the same proportions.
+        let (r0, r1) = compute_drag_ratios((200, 100), 90, 0);
+        assert_eq!(r0 + r1, 300);
+        assert!(r0 > r1, "left should still be larger than right");
+    }
+
+    #[test]
+    fn drag_ratios_total_always_preserved() {
+        for delta in [-50i32, -10, 0, 10, 50] {
+            let (r0, r1) = compute_drag_ratios((150, 50), 80, delta);
+            assert_eq!(r0 + r1, 200, "total must be preserved for delta={delta}");
+        }
     }
 }

@@ -34,7 +34,7 @@ impl Tab {
     }
 
     pub fn display_name(&self) -> &str {
-        if self.leaf_count() == 1 && matches!(self.root, Pane::Connect { .. }) {
+        if self.leaf_count() == 1 && matches!(self.root, Pane::Connect(_)) {
             "<connect>"
         } else {
             &self.name
@@ -117,7 +117,7 @@ mod tests {
         let t = Tab::new("1");
         assert_eq!(t.leaf_count(), 1);
         assert_eq!(t.focus_idx, 0);
-        assert!(matches!(t.root, Pane::Connect { .. }));
+        assert!(matches!(t.root, Pane::Connect(_)));
         assert_eq!(t.display_name(), "<connect>");
     }
 

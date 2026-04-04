@@ -7,15 +7,13 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
 use super::common::{
     Browser, BrowserCore, BrowserFocus, DeleteLocation, TransferDirection, TransferStatus,
+    PROMPT_TAIL_BYTES,
 };
 use super::parse::{
     parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote, strip_ansi,
 };
 use crate::keybindings::BrowserBindings;
 use crate::terminal::{EmbeddedTerminal, PtyChannel};
-
-/// Bytes to scan from the end of raw PTY output for prompt detection.
-const PROMPT_TAIL_BYTES: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Types

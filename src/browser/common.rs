@@ -85,6 +85,9 @@ impl DeleteTarget {
     }
 }
 
+/// Bytes to scan from the end of raw PTY output for prompt detection.
+pub const PROMPT_TAIL_BYTES: usize = 64;
+
 /// Action returned by `handle_browser_key` for browser-specific operations.
 pub enum BrowserKeyAction {
     Handled,

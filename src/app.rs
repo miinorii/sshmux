@@ -262,19 +262,14 @@ impl App {
         }
         buf.set_line(full.x, tab_y, &Line::from(spans), full.width);
 
-        let focus_idx = self.tabs[self.selected_tab].focus_idx;
-        let hosts = &self.hosts;
-        let mut idx = 0;
-        let leaf_count = self.tabs[self.selected_tab].root.leaf_count();
-        self.tabs[self.selected_tab].root.render(
-            content,
-            buf,
-            hosts,
-            focus_idx,
-            leaf_count,
-            &mut idx,
-            &self.keybindings,
-        );
+        let mut ctx = crate::pane::RenderCtx {
+            hosts: &self.hosts,
+            focus_idx: self.tabs[self.selected_tab].focus_idx,
+            leaf_count: self.tabs[self.selected_tab].root.leaf_count(),
+            my_idx: 0,
+            keybindings: &self.keybindings,
+        };
+        self.tabs[self.selected_tab].root.render(content, buf, &mut ctx);
 
         // Active resize drag: highlight the separator being dragged in Yellow.
         if let Some(ref drag) = self.pane_resize_drag {
@@ -466,7 +461,7 @@ mod tests {
         let app = make_app();
         assert!(matches!(
             app.tab().focused_pane(),
-            Some(Pane::Connect { .. })
+            Some(Pane::Connect(_))
         ));
     }
 

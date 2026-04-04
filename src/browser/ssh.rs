@@ -13,6 +13,7 @@ use ratatui::{
 
 use super::common::{
     Browser, BrowserCore, BrowserFocus, DeleteLocation, TransferDirection, TransferStatus,
+    PROMPT_TAIL_BYTES,
 };
 use super::parse::{
     parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote, strip_ansi,
@@ -35,8 +36,6 @@ pub enum SshBrowserState {
     Idle,
 }
 
-/// Bytes to scan from the end of raw PTY output for prompt detection.
-const PROMPT_TAIL_BYTES: usize = 64;
 /// Larger tail for shell prompt detection (PS1 can be longer than sftp>).
 const PROMPT_TAIL_BYTES_LONG: usize = 128;
 
