@@ -79,21 +79,26 @@ pub fn handle_key(
         }
         if g.focus_left.matches(code, ctrl, alt, shift) {
             app.tab_mut().focus_dir(FocusDir::Left, pane_inner(last_area));
+            if app.tab().zoom { app.resize_all(last_area); }
             return Action::Continue;
         }
         if g.focus_right.matches(code, ctrl, alt, shift) {
             app.tab_mut().focus_dir(FocusDir::Right, pane_inner(last_area));
+            if app.tab().zoom { app.resize_all(last_area); }
             return Action::Continue;
         }
         if g.focus_up.matches(code, ctrl, alt, shift) {
             app.tab_mut().focus_dir(FocusDir::Up, pane_inner(last_area));
+            if app.tab().zoom { app.resize_all(last_area); }
             return Action::Continue;
         }
         if g.focus_down.matches(code, ctrl, alt, shift) {
             app.tab_mut().focus_dir(FocusDir::Down, pane_inner(last_area));
+            if app.tab().zoom { app.resize_all(last_area); }
             return Action::Continue;
         }
         if g.close.matches(code, ctrl, alt, shift) {
+            app.tab_mut().zoom = false;
             let was_last_pane = app.tab().leaf_count() == 1;
             if was_last_pane {
                 app.close_tab();
@@ -108,11 +113,29 @@ pub fn handle_key(
             return Action::Continue;
         }
         if g.split_horizontal.matches(code, ctrl, alt, shift) {
+            app.tab_mut().zoom = false;
             app.tab_mut().split(Split::TopBottom, pane_inner(last_area));
             return Action::Continue;
         }
         if g.split_vertical.matches(code, ctrl, alt, shift) {
+            app.tab_mut().zoom = false;
             app.tab_mut().split(Split::LeftRight, pane_inner(last_area));
+            return Action::Continue;
+        }
+        if g.zoom.matches(code, ctrl, alt, shift) {
+            if app.tab().leaf_count() > 1 {
+                app.tab_mut().zoom = !app.tab().zoom;
+                app.pane_resize_drag = None;
+                let content = pane_inner(last_area);
+                if app.tab().zoom {
+                    let focus_idx = app.tab().focus_idx;
+                    if let Some(pane) = app.tab_mut().root.leaf_mut(focus_idx) {
+                        pane.resize_all(content, false);
+                    }
+                } else {
+                    app.resize_all(last_area);
+                }
+            }
             return Action::Continue;
         }
     }
@@ -605,6 +628,7 @@ fn handle_session_exit_key(app: &mut App, code: KeyCode, last_area: Rect) -> boo
                 }
                 Some(1) => {
                     // Close pane
+                    app.tab_mut().zoom = false;
                     let was_last_pane = app.tab().leaf_count() == 1;
                     if was_last_pane {
                         app.close_tab();
@@ -673,6 +697,7 @@ fn handle_browser_exit_key(app: &mut App, code: KeyCode, last_area: Rect) -> boo
                 }
                 1 => {
                     // Close pane
+                    app.tab_mut().zoom = false;
                     let was_last = app.tab().leaf_count() == 1;
                     if was_last {
                         app.close_tab();
@@ -742,6 +767,7 @@ fn execute_context_menu_action(app: &mut App, idx: usize, last_area: Rect) -> Ac
     match idx {
         0 => app.new_tab(),
         1 => {
+            app.tab_mut().zoom = false;
             let was_last = app.tab().leaf_count() == 1;
             if was_last {
                 app.close_tab();
@@ -750,8 +776,14 @@ fn execute_context_menu_action(app: &mut App, idx: usize, last_area: Rect) -> Ac
                 app.resize_all(last_area);
             }
         }
-        2 => app.tab_mut().split(Split::LeftRight, pane_inner(last_area)),
-        3 => app.tab_mut().split(Split::TopBottom, pane_inner(last_area)),
+        2 => {
+            app.tab_mut().zoom = false;
+            app.tab_mut().split(Split::LeftRight, pane_inner(last_area));
+        }
+        3 => {
+            app.tab_mut().zoom = false;
+            app.tab_mut().split(Split::TopBottom, pane_inner(last_area));
+        }
         4 => return Action::Quit,
         _ => {}
     }
@@ -820,8 +852,8 @@ pub fn handle_mouse(
         }
     }
 
-    // ---- Separator drag start ----
-    if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+    // ---- Separator drag start (disabled in zoom mode — no visible separators) ----
+    if !app.tab().zoom && matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
         let content = pane_inner(last_area);
         if let Some(hit) =
             hit_test_separator(&app.tabs[app.selected_tab].root, content, column, row)
@@ -863,21 +895,28 @@ pub fn handle_mouse(
     }
 
     let content = pane_inner(last_area);
-    let areas = app.tabs[app.selected_tab].root.leaf_areas(content);
+    let zoom_active = app.tab().zoom && app.tabs[app.selected_tab].root.leaf_count() > 1;
 
-    let clicked_pane = areas
-        .iter()
-        .enumerate()
-        .find(|(_, area)| {
-            column >= area.x
-                && column < area.x + area.width
-                && row >= area.y
-                && row < area.y + area.height
-        })
-        .map(|(i, area)| (i, *area));
-
-    let Some((pane_idx, pane_area)) = clicked_pane else {
-        return Action::Continue;
+    // In zoom mode the focused pane fills the entire content area; otherwise find
+    // which pane the pointer is over using the real layout.
+    let (pane_idx, pane_area) = if zoom_active {
+        (app.tabs[app.selected_tab].focus_idx, content)
+    } else {
+        let areas = app.tabs[app.selected_tab].root.leaf_areas(content);
+        match areas
+            .iter()
+            .enumerate()
+            .find(|(_, area)| {
+                column >= area.x
+                    && column < area.x + area.width
+                    && row >= area.y
+                    && row < area.y + area.height
+            })
+            .map(|(i, area)| (i, *area))
+        {
+            Some(v) => v,
+            None => return Action::Continue,
+        }
     };
 
     let prev_focus = app.tabs[app.selected_tab].focus_idx;
@@ -903,7 +942,8 @@ pub fn handle_mouse(
         .is_some_and(|p| p.is_browser());
 
     if is_browser {
-        handle_browser_mouse(app, kind, column, row, pane_area);
+        let effective_leaf_count = if zoom_active { 1 } else { app.tabs[app.selected_tab].root.leaf_count() };
+        handle_browser_mouse(app, kind, column, row, pane_area, effective_leaf_count);
         return Action::Continue;
     }
 
@@ -962,8 +1002,7 @@ pub fn handle_mouse(
     }
 
     if same_pane && pane_wants_mouse {
-        let leaf_count = app.tabs[app.selected_tab].root.leaf_count();
-        let inner = if leaf_count > 1 {
+        let inner = if !zoom_active && app.tabs[app.selected_tab].root.leaf_count() > 1 {
             pane_border_inner(pane_area)
         } else {
             pane_area
@@ -1033,8 +1072,8 @@ fn handle_browser_mouse(
     column: u16,
     row: u16,
     pane_area: Rect,
+    leaf_count: usize,
 ) {
-    let leaf_count = app.tabs[app.selected_tab].root.leaf_count();
 
     let Some(browser) = app
         .tab_mut()
@@ -1253,6 +1292,113 @@ mod tests {
         let action = key(&mut app, KeyCode::Char('+'), false, true, false);
         assert_eq!(action, Action::Continue);
         assert_eq!(app.tab().leaf_count(), 2);
+    }
+
+    // ---- Zoom ----
+
+    #[test]
+    fn zoom_toggle_on_single_pane_is_noop() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('z'), false, true, false);
+        assert!(!app.tab().zoom);
+    }
+
+    #[test]
+    fn zoom_toggles_on_split() {
+        let mut app = make_app();
+        app.tab_mut().split(Split::LeftRight, area());
+        key(&mut app, KeyCode::Char('z'), false, true, false);
+        assert!(app.tab().zoom);
+        key(&mut app, KeyCode::Char('z'), false, true, false);
+        assert!(!app.tab().zoom);
+    }
+
+    #[test]
+    fn zoom_cleared_on_split_horizontal() {
+        let mut app = make_app();
+        app.tab_mut().split(Split::LeftRight, area());
+        app.tab_mut().zoom = true;
+        key(&mut app, KeyCode::Char('-'), false, true, false);
+        assert!(!app.tab().zoom);
+    }
+
+    #[test]
+    fn zoom_cleared_on_split_vertical() {
+        let mut app = make_app();
+        app.tab_mut().split(Split::LeftRight, area());
+        app.tab_mut().zoom = true;
+        key(&mut app, KeyCode::Char('+'), false, true, false);
+        assert!(!app.tab().zoom);
+    }
+
+    #[test]
+    fn zoom_cleared_on_close_pane() {
+        let mut app = make_app();
+        app.tab_mut().split(Split::LeftRight, area());
+        app.tab_mut().zoom = true;
+        key(&mut app, KeyCode::Char('w'), false, true, false);
+        assert!(!app.tab().zoom);
+    }
+
+    #[test]
+    fn zoom_is_per_tab() {
+        let mut app = make_app();
+        app.tab_mut().split(Split::LeftRight, area());
+        key(&mut app, KeyCode::Char('z'), false, true, false);
+        assert!(app.tabs[0].zoom);
+        app.new_tab();
+        app.tabs[1].split(Split::LeftRight, area());
+        assert!(!app.tabs[1].zoom); // new tab starts unzoomed
+        app.selected_tab = 0;
+        assert!(app.tabs[0].zoom); // original tab still zoomed
+    }
+
+    #[test]
+    fn zoom_toggling_one_tab_does_not_affect_other() {
+        let mut app = make_app();
+        app.tab_mut().split(Split::LeftRight, area());
+        app.new_tab();
+        app.tabs[1].split(Split::LeftRight, area());
+        app.tabs[1].zoom = true;
+        app.selected_tab = 0;
+        key(&mut app, KeyCode::Char('z'), false, true, false); // zoom tab 0
+        assert!(app.tabs[0].zoom);
+        assert!(app.tabs[1].zoom); // tab 1 unaffected
+    }
+
+    #[test]
+    fn zoom_focus_dir_changes_focus() {
+        let mut app = make_app();
+        app.tab_mut().split(Split::LeftRight, area());
+        app.tab_mut().focus_idx = 0;
+        app.tab_mut().zoom = true;
+        key(&mut app, KeyCode::Right, false, true, false); // focus_right
+        assert_eq!(app.tab().focus_idx, 1);
+        assert!(app.tab().zoom); // zoom stays on
+    }
+
+    #[test]
+    fn zoom_focus_dir_noop_when_no_neighbor() {
+        let mut app = make_app();
+        app.tab_mut().split(Split::LeftRight, area());
+        app.tab_mut().focus_idx = 1;
+        app.tab_mut().zoom = true;
+        key(&mut app, KeyCode::Right, false, true, false); // no right neighbor
+        assert_eq!(app.tab().focus_idx, 1); // unchanged
+        assert!(app.tab().zoom);
+    }
+
+    #[test]
+    fn zoom_mouse_click_maps_to_focused_pane() {
+        let mut app = make_app();
+        app.tab_mut().split(Split::LeftRight, area());
+        app.tab_mut().focus_idx = 0;
+        app.tab_mut().zoom = true;
+        // Click on the right half — in normal mode this would focus pane 1,
+        // in zoom mode it should stay on pane 0 (the zoomed pane fills the whole area).
+        let full = Rect { x: 0, y: 0, width: 200, height: 51 };
+        handle_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 150, 20, full);
+        assert_eq!(app.tab().focus_idx, 0);
     }
 
     // ---- Connect pane: host selection ----
@@ -1549,8 +1695,8 @@ mod tests {
             ..
         })) = app.tab_mut().focused_pane_mut()
         {
-            // Last global binding before HEADER_CONNECT (now at 12)
-            editor.list_state.select(Some(11));
+            // Last global binding before HEADER_CONNECT (now at 13)
+            editor.list_state.select(Some(12));
         }
         key(&mut app, KeyCode::Down, false, false, false);
         if let Some(Pane::Connect(ConnectPane {
@@ -1558,8 +1704,8 @@ mod tests {
             ..
         })) = app.tab().focused_pane()
         {
-            // Should skip header at 12, land on 13
-            assert_eq!(editor.list_state.selected(), Some(13));
+            // Should skip header at 13, land on 14
+            assert_eq!(editor.list_state.selected(), Some(14));
         } else {
             panic!("expected KeyEditor");
         }
@@ -1569,13 +1715,13 @@ mod tests {
     fn key_editor_nav_up_skips_header() {
         let mut app = make_app();
         key(&mut app, KeyCode::Char('h'), false, false, false);
-        // Position at index 13 (first connect binding after HEADER_CONNECT at 12)
+        // Position at index 14 (first connect binding after HEADER_CONNECT at 13)
         if let Some(Pane::Connect(ConnectPane {
             overlay: ConnectOverlay::KeyEditor(editor),
             ..
         })) = app.tab_mut().focused_pane_mut()
         {
-            editor.list_state.select(Some(13));
+            editor.list_state.select(Some(14));
         }
         key(&mut app, KeyCode::Up, false, false, false);
         if let Some(Pane::Connect(ConnectPane {
@@ -1583,8 +1729,8 @@ mod tests {
             ..
         })) = app.tab().focused_pane()
         {
-            // Should skip header at 12, land on 11
-            assert_eq!(editor.list_state.selected(), Some(11));
+            // Should skip header at 13, land on 12
+            assert_eq!(editor.list_state.selected(), Some(12));
         } else {
             panic!("expected KeyEditor");
         }

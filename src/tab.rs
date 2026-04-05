@@ -6,6 +6,7 @@ pub struct Tab {
     pub name: String,
     pub root: Pane,
     pub focus_idx: usize,
+    pub zoom: bool,
 }
 
 impl Tab {
@@ -14,6 +15,7 @@ impl Tab {
             name: name.to_string(),
             root: Pane::new_connect(),
             focus_idx: 0,
+            zoom: false,
         }
     }
 
@@ -83,13 +85,16 @@ impl Tab {
     }
 
     pub fn focused_cursor(&self, content: Rect) -> Option<(u16, u16)> {
-        let areas = self.root.leaf_areas(content);
-        let pane_area = areas.get(self.focus_idx)?;
-        let leaf_count = self.leaf_count();
-        let inner = if leaf_count > 1 {
-            pane_border_inner(*pane_area)
+        let inner = if self.zoom && self.leaf_count() > 1 {
+            content
         } else {
-            *pane_area
+            let areas = self.root.leaf_areas(content);
+            let pane_area = *areas.get(self.focus_idx)?;
+            if self.leaf_count() > 1 {
+                pane_border_inner(pane_area)
+            } else {
+                pane_area
+            }
         };
         if let Some(Pane::Session { terminal, .. }) = self.root.leaf(self.focus_idx)
             && let Some((cx, cy)) = terminal.cursor_pos()

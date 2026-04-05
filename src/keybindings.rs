@@ -219,6 +219,7 @@ pub struct GlobalBindings {
     pub focus_right: KeyBinding,
     pub focus_up: KeyBinding,
     pub focus_down: KeyBinding,
+    pub zoom: KeyBinding,
 }
 
 impl Default for GlobalBindings {
@@ -235,6 +236,7 @@ impl Default for GlobalBindings {
             focus_right: KeyBinding::new(KeyCode::Right, false, true, false),
             focus_up: KeyBinding::new(KeyCode::Up, false, true, false),
             focus_down: KeyBinding::new(KeyCode::Down, false, true, false),
+            zoom: KeyBinding::new(KeyCode::Char('z'), false, true, false),
         }
     }
 }
@@ -326,6 +328,7 @@ struct RawGlobal {
     focus_right: Option<String>,
     focus_up: Option<String>,
     focus_down: Option<String>,
+    zoom: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -474,6 +477,7 @@ impl KeyBindings {
                 ),
                 focus_up: parse_or_default("global.focus_up", &rg.focus_up, &dg.focus_up),
                 focus_down: parse_or_default("global.focus_down", &rg.focus_down, &dg.focus_down),
+                zoom: parse_or_default("global.zoom", &rg.zoom, &dg.zoom),
             },
             connect: ConnectBindings {
                 select_prev: parse_or_default(
@@ -568,7 +572,7 @@ pub struct BindingEntry {
 }
 
 impl KeyBindings {
-    /// Returns all 29 bindings in display order, grouped by section.
+    /// Returns all 30 bindings in display order, grouped by section.
     pub fn entries(&self) -> Vec<BindingEntry> {
         let g = &self.global;
         let c = &self.connect;
@@ -628,6 +632,12 @@ impl KeyBindings {
                 field: "focus_down",
                 description: "focus pane below",
                 binding: g.focus_down.clone(),
+            },
+            BindingEntry {
+                group: "global",
+                field: "zoom",
+                description: "zoom focused pane",
+                binding: g.zoom.clone(),
             },
             BindingEntry {
                 group: "global",
@@ -750,6 +760,7 @@ impl KeyBindings {
             ("global", "focus_right") => self.global.focus_right = kb,
             ("global", "focus_up") => self.global.focus_up = kb,
             ("global", "focus_down") => self.global.focus_down = kb,
+            ("global", "zoom") => self.global.zoom = kb,
             ("connect", "select_prev") => self.connect.select_prev = kb,
             ("connect", "select_next") => self.connect.select_next = kb,
             ("connect", "connect") => self.connect.connect = kb,

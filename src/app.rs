@@ -206,9 +206,19 @@ impl App {
 
     pub fn resize_all(&mut self, full: Rect) {
         let content = pane_inner(full);
-        for tab in &mut self.tabs {
-            let multi = tab.leaf_count() > 1;
-            tab.root.resize_all(content, multi);
+        for tab in self.tabs.iter_mut() {
+            if tab.zoom && tab.leaf_count() > 1 {
+                // Only resize the focused pane to full content. Doing the normal tree
+                // traversal first would resize it to its smaller sub-pane size, then
+                // back to full — sending two SIGWINCHes per dirty frame and causing flicker.
+                let focus_idx = tab.focus_idx;
+                if let Some(pane) = tab.root.leaf_mut(focus_idx) {
+                    pane.resize_all(content, false);
+                }
+            } else {
+                let multi = tab.leaf_count() > 1;
+                tab.root.resize_all(content, multi);
+            }
         }
     }
 
@@ -267,16 +277,44 @@ impl App {
         }
         buf.set_line(full.x, tab_y, &Line::from(spans), full.width);
 
-        let mut ctx = RenderCtx {
-            hosts: &self.hosts,
-            focus_idx: self.tabs[self.selected_tab].focus_idx,
-            leaf_count: self.tabs[self.selected_tab].root.leaf_count(),
-            my_idx: 0,
-            keybindings: &self.keybindings,
-        };
-        self.tabs[self.selected_tab]
-            .root
-            .render(content, buf, &mut ctx);
+        let focus_idx = self.tabs[self.selected_tab].focus_idx;
+        let leaf_count = self.tabs[self.selected_tab].root.leaf_count();
+
+        if self.tabs[self.selected_tab].zoom && leaf_count > 1 {
+            if let Some(pane) = self.tabs[self.selected_tab].root.leaf_mut(focus_idx) {
+                let mut ctx = RenderCtx {
+                    hosts: &self.hosts,
+                    focus_idx: 0,
+                    leaf_count: 1,
+                    my_idx: 0,
+                    keybindings: &self.keybindings,
+                };
+                pane.render(content, buf, &mut ctx);
+            }
+            // [ZOOM] indicator in the top-right corner
+            let indicator = format!(" [ZOOM] {}/{} ", focus_idx + 1, leaf_count);
+            let x = content.x + content.width.saturating_sub(indicator.len() as u16);
+            buf.set_string(
+                x,
+                content.y,
+                &indicator,
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
+        } else {
+            let mut ctx = RenderCtx {
+                hosts: &self.hosts,
+                focus_idx,
+                leaf_count,
+                my_idx: 0,
+                keybindings: &self.keybindings,
+            };
+            self.tabs[self.selected_tab]
+                .root
+                .render(content, buf, &mut ctx);
+        }
 
         // Active resize drag: highlight the separator being dragged in Yellow.
         if let Some(ref drag) = self.pane_resize_drag {
