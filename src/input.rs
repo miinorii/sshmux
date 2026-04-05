@@ -13,7 +13,8 @@ use crate::connect::{
 };
 use crate::keybindings::KeyBinding;
 use crate::pane::{
-    Pane, Split, hit_test_separator, pane_border_inner, pane_inner, split_areas, split_at_path_mut,
+    FocusDir, Pane, Split, hit_test_separator, pane_border_inner, pane_inner, split_areas,
+    split_at_path_mut,
 };
 
 // ---------------------------------------------------------------------------
@@ -76,12 +77,20 @@ pub fn handle_key(
             app.pane_resize_drag = None;
             return Action::Continue;
         }
-        if g.prev_pane.matches(code, ctrl, alt, shift) {
-            app.tab_mut().focus_prev();
+        if g.focus_left.matches(code, ctrl, alt, shift) {
+            app.tab_mut().focus_dir(FocusDir::Left, pane_inner(last_area));
             return Action::Continue;
         }
-        if g.next_pane.matches(code, ctrl, alt, shift) {
-            app.tab_mut().focus_next();
+        if g.focus_right.matches(code, ctrl, alt, shift) {
+            app.tab_mut().focus_dir(FocusDir::Right, pane_inner(last_area));
+            return Action::Continue;
+        }
+        if g.focus_up.matches(code, ctrl, alt, shift) {
+            app.tab_mut().focus_dir(FocusDir::Up, pane_inner(last_area));
+            return Action::Continue;
+        }
+        if g.focus_down.matches(code, ctrl, alt, shift) {
+            app.tab_mut().focus_dir(FocusDir::Down, pane_inner(last_area));
             return Action::Continue;
         }
         if g.close.matches(code, ctrl, alt, shift) {
@@ -1193,7 +1202,7 @@ mod tests {
         let mut app = make_app();
         app.new_tab();
         app.selected_tab = 0;
-        let action = key(&mut app, KeyCode::Right, false, true, false);
+        let action = key(&mut app, KeyCode::Char('k'), false, true, false);
         assert_eq!(action, Action::Continue);
         assert_eq!(app.selected_tab, 1);
     }
@@ -1203,7 +1212,7 @@ mod tests {
         let mut app = make_app();
         app.new_tab();
         app.selected_tab = 1;
-        let action = key(&mut app, KeyCode::Right, false, true, false);
+        let action = key(&mut app, KeyCode::Char('k'), false, true, false);
         assert_eq!(action, Action::Continue);
         assert_eq!(app.selected_tab, 0);
     }
@@ -1213,7 +1222,7 @@ mod tests {
         let mut app = make_app();
         app.new_tab();
         app.selected_tab = 1;
-        let action = key(&mut app, KeyCode::Left, false, true, false);
+        let action = key(&mut app, KeyCode::Char('j'), false, true, false);
         assert_eq!(action, Action::Continue);
         assert_eq!(app.selected_tab, 0);
     }
@@ -1223,29 +1232,9 @@ mod tests {
         let mut app = make_app();
         app.new_tab();
         app.selected_tab = 0;
-        let action = key(&mut app, KeyCode::Left, false, true, false);
+        let action = key(&mut app, KeyCode::Char('j'), false, true, false);
         assert_eq!(action, Action::Continue);
         assert_eq!(app.selected_tab, 1);
-    }
-
-    #[test]
-    fn global_next_pane() {
-        let mut app = make_app();
-        app.tab_mut().split(Split::LeftRight, area());
-        app.tab_mut().focus_idx = 0;
-        let action = key(&mut app, KeyCode::Down, false, true, false);
-        assert_eq!(action, Action::Continue);
-        assert_eq!(app.tab().focus_idx, 1);
-    }
-
-    #[test]
-    fn global_prev_pane() {
-        let mut app = make_app();
-        app.tab_mut().split(Split::LeftRight, area());
-        app.tab_mut().focus_idx = 1;
-        let action = key(&mut app, KeyCode::Up, false, true, false);
-        assert_eq!(action, Action::Continue);
-        assert_eq!(app.tab().focus_idx, 0);
     }
 
     #[test]
@@ -1560,7 +1549,8 @@ mod tests {
             ..
         })) = app.tab_mut().focused_pane_mut()
         {
-            editor.list_state.select(Some(9));
+            // Last global binding before HEADER_CONNECT (now at 12)
+            editor.list_state.select(Some(11));
         }
         key(&mut app, KeyCode::Down, false, false, false);
         if let Some(Pane::Connect(ConnectPane {
@@ -1568,8 +1558,8 @@ mod tests {
             ..
         })) = app.tab().focused_pane()
         {
-            // Should skip header at 10, land on 11
-            assert_eq!(editor.list_state.selected(), Some(11));
+            // Should skip header at 12, land on 13
+            assert_eq!(editor.list_state.selected(), Some(13));
         } else {
             panic!("expected KeyEditor");
         }
@@ -1579,13 +1569,13 @@ mod tests {
     fn key_editor_nav_up_skips_header() {
         let mut app = make_app();
         key(&mut app, KeyCode::Char('h'), false, false, false);
-        // Position at index 11 (first connect binding), up should skip header at 10
+        // Position at index 13 (first connect binding after HEADER_CONNECT at 12)
         if let Some(Pane::Connect(ConnectPane {
             overlay: ConnectOverlay::KeyEditor(editor),
             ..
         })) = app.tab_mut().focused_pane_mut()
         {
-            editor.list_state.select(Some(11));
+            editor.list_state.select(Some(13));
         }
         key(&mut app, KeyCode::Up, false, false, false);
         if let Some(Pane::Connect(ConnectPane {
@@ -1593,8 +1583,8 @@ mod tests {
             ..
         })) = app.tab().focused_pane()
         {
-            // Should skip header at 10, land on 9
-            assert_eq!(editor.list_state.selected(), Some(9));
+            // Should skip header at 12, land on 11
+            assert_eq!(editor.list_state.selected(), Some(11));
         } else {
             panic!("expected KeyEditor");
         }
@@ -1733,7 +1723,7 @@ mod tests {
     #[test]
     fn prev_tab_single_tab_stays() {
         let mut app = make_app();
-        let action = key(&mut app, KeyCode::Left, false, true, false);
+        let action = key(&mut app, KeyCode::Char('j'), false, true, false);
         assert_eq!(action, Action::Continue);
         assert_eq!(app.selected_tab, 0);
     }
@@ -1741,31 +1731,9 @@ mod tests {
     #[test]
     fn next_tab_single_tab_stays() {
         let mut app = make_app();
-        let action = key(&mut app, KeyCode::Right, false, true, false);
+        let action = key(&mut app, KeyCode::Char('k'), false, true, false);
         assert_eq!(action, Action::Continue);
         assert_eq!(app.selected_tab, 0);
-    }
-
-    // ---- Focus cycling ----
-
-    #[test]
-    fn focus_next_wraps_around() {
-        let mut app = make_app();
-        app.tab_mut().split(Split::LeftRight, area());
-        app.tab_mut().focus_idx = 1;
-        let action = key(&mut app, KeyCode::Down, false, true, false);
-        assert_eq!(action, Action::Continue);
-        assert_eq!(app.tab().focus_idx, 0);
-    }
-
-    #[test]
-    fn focus_prev_wraps_around() {
-        let mut app = make_app();
-        app.tab_mut().split(Split::LeftRight, area());
-        app.tab_mut().focus_idx = 0;
-        let action = key(&mut app, KeyCode::Up, false, true, false);
-        assert_eq!(action, Action::Continue);
-        assert_eq!(app.tab().focus_idx, 1);
     }
 
     // ---- Alt suppression on Connect pane ----
@@ -1803,7 +1771,7 @@ mod tests {
         let mut app = make_app();
         key(&mut app, KeyCode::Char('t'), false, true, false); // new tab
         assert_eq!(app.selected_tab, 1);
-        key(&mut app, KeyCode::Left, false, true, false); // prev tab
+        key(&mut app, KeyCode::Char('j'), false, true, false); // prev tab
         assert_eq!(app.selected_tab, 0);
     }
 

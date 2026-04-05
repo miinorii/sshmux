@@ -15,16 +15,16 @@ use crate::ssh_config::SshHost;
 // ---------------------------------------------------------------------------
 
 /// Number of bindings per group (for header index calculation).
-const GLOBAL_COUNT: usize = 9;
+const GLOBAL_COUNT: usize = 11;
 const CONNECT_COUNT: usize = 6;
 
 /// Header indices in the flat display list.
 pub const HEADER_GLOBAL: usize = 0;
-pub const HEADER_CONNECT: usize = GLOBAL_COUNT + 1; // 10
-pub const HEADER_BROWSER: usize = GLOBAL_COUNT + 1 + CONNECT_COUNT + 1; // 17
+pub const HEADER_CONNECT: usize = GLOBAL_COUNT + 1; // 12
+pub const HEADER_BROWSER: usize = GLOBAL_COUNT + 1 + CONNECT_COUNT + 1; // 19
 
-/// Total rows in the editor list (3 headers + 24 bindings).
-pub const EDITOR_ROW_COUNT: usize = 27;
+/// Total rows in the editor list (3 headers + 26 bindings).
+pub const EDITOR_ROW_COUNT: usize = 29;
 
 /// Returns true if the given index is a section header row.
 pub fn is_editor_header(idx: usize) -> bool {

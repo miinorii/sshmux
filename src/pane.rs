@@ -25,6 +25,18 @@ pub enum Split {
 }
 
 // ---------------------------------------------------------------------------
+// Focus direction
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusDir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+// ---------------------------------------------------------------------------
 // Pane
 // ---------------------------------------------------------------------------
 
@@ -701,6 +713,66 @@ pub fn remove_leaf(pane: &mut Pane, n: usize) {
     {
         *pane = children.remove(0);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Directional neighbor lookup
+// ---------------------------------------------------------------------------
+
+fn h_overlap(a: Rect, b: Rect) -> u16 {
+    let start = a.x.max(b.x);
+    let end = (a.x + a.width).min(b.x + b.width);
+    end.saturating_sub(start)
+}
+
+fn v_overlap(a: Rect, b: Rect) -> u16 {
+    let start = a.y.max(b.y);
+    let end = (a.y + a.height).min(b.y + b.height);
+    end.saturating_sub(start)
+}
+
+/// Given all leaf rects (from `Pane::leaf_areas`), the index of the focused leaf,
+/// and a direction, return the index of the best spatial neighbor, or `None`.
+///
+/// "Best" means: smallest gap along the primary axis, with largest perpendicular
+/// overlap as a tie-breaker. Returns `None` if no candidate exists in that direction.
+pub fn find_directional_neighbor(areas: &[Rect], focused_idx: usize, dir: FocusDir) -> Option<usize> {
+    let src = areas.get(focused_idx)?;
+    let mut best: Option<(i32, i32, usize)> = None; // (primary_gap, neg_overlap, idx)
+
+    for (idx, cand) in areas.iter().enumerate() {
+        if idx == focused_idx {
+            continue;
+        }
+        let (primary_gap, perp_overlap) = match dir {
+            FocusDir::Left => (
+                src.x as i32 - (cand.x + cand.width) as i32,
+                v_overlap(*src, *cand) as i32,
+            ),
+            FocusDir::Right => (
+                cand.x as i32 - (src.x + src.width) as i32,
+                v_overlap(*src, *cand) as i32,
+            ),
+            FocusDir::Up => (
+                src.y as i32 - (cand.y + cand.height) as i32,
+                h_overlap(*src, *cand) as i32,
+            ),
+            FocusDir::Down => (
+                cand.y as i32 - (src.y + src.height) as i32,
+                h_overlap(*src, *cand) as i32,
+            ),
+        };
+        if primary_gap < 0 || perp_overlap <= 0 {
+            continue;
+        }
+        let score = (primary_gap, -perp_overlap);
+        match best {
+            None => best = Some((score.0, score.1, idx)),
+            Some((bg, bo, _)) if score < (bg, bo) => best = Some((score.0, score.1, idx)),
+            _ => {}
+        }
+    }
+    best.map(|(_, _, idx)| idx)
 }
 
 #[cfg(test)]
@@ -1480,5 +1552,83 @@ mod tests {
                 "mutation through split_at_path_mut should be visible"
             );
         }
+    }
+
+    // ---- find_directional_neighbor -----------------------------------------
+
+    fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
+        Rect { x, y, width: w, height: h }
+    }
+
+    #[test]
+    fn directional_nav_lr_right() {
+        // Two side-by-side panes.
+        let areas = vec![rect(0, 0, 49, 20), rect(50, 0, 50, 20)];
+        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Right), Some(1));
+        assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Right), None);
+    }
+
+    #[test]
+    fn directional_nav_lr_left() {
+        let areas = vec![rect(0, 0, 49, 20), rect(50, 0, 50, 20)];
+        assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Left), Some(0));
+        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Left), None);
+    }
+
+    #[test]
+    fn directional_nav_tb_down() {
+        // Two stacked panes.
+        let areas = vec![rect(0, 0, 100, 10), rect(0, 10, 100, 10)];
+        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Down), Some(1));
+        assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Down), None);
+    }
+
+    #[test]
+    fn directional_nav_tb_up() {
+        let areas = vec![rect(0, 0, 100, 10), rect(0, 10, 100, 10)];
+        assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Up), Some(0));
+        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Up), None);
+    }
+
+    #[test]
+    fn directional_nav_single_pane_returns_none() {
+        let areas = vec![rect(0, 0, 100, 40)];
+        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Left), None);
+        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Right), None);
+        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Up), None);
+        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Down), None);
+    }
+
+    #[test]
+    fn directional_nav_l_shape_from_top_right_down() {
+        // Pane 0: left half. Pane 1: top-right. Pane 2: bottom-right.
+        let areas = vec![
+            rect(0, 0, 49, 40),   // 0: left half (full height)
+            rect(50, 0, 50, 20),  // 1: top-right
+            rect(50, 20, 50, 20), // 2: bottom-right
+        ];
+        assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Down), Some(2));
+        assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Left), Some(0));
+        assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Up), None);
+    }
+
+    #[test]
+    fn directional_nav_diagonal_no_overlap_not_reachable() {
+        // Pane 0 is top-left, pane 1 is bottom-right — no overlap on either axis.
+        let areas = vec![rect(0, 0, 50, 20), rect(51, 21, 50, 20)];
+        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Right), None);
+        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Down), None);
+    }
+
+    #[test]
+    fn directional_nav_picks_closest_of_two_candidates() {
+        // Pane 0 is on the left. Panes 1 and 2 are both to the right but at
+        // different distances. The closer one (pane 1, gap=1) should win over pane 2 (gap=10).
+        let areas = vec![
+            rect(0, 0, 49, 20),  // 0: source
+            rect(50, 0, 20, 20), // 1: close right (gap=1)
+            rect(60, 0, 20, 20), // 2: further right (gap=11)
+        ];
+        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Right), Some(1));
     }
 }

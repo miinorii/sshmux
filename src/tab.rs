@@ -1,6 +1,6 @@
 use ratatui::layout::Rect;
 
-use crate::pane::{Pane, Split, pane_border_inner, remove_leaf};
+use crate::pane::{FocusDir, Pane, Split, find_directional_neighbor, pane_border_inner, remove_leaf};
 
 pub struct Tab {
     pub name: String,
@@ -30,6 +30,13 @@ impl Tab {
             self.focus_idx = self.leaf_count().saturating_sub(1);
         } else {
             self.focus_idx -= 1;
+        }
+    }
+
+    pub fn focus_dir(&mut self, dir: FocusDir, content: Rect) {
+        let areas = self.root.leaf_areas(content);
+        if let Some(new_idx) = find_directional_neighbor(&areas, self.focus_idx, dir) {
+            self.focus_idx = new_idx;
         }
     }
 
@@ -100,7 +107,7 @@ impl Tab {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pane::{Pane, Split};
+    use crate::pane::{FocusDir, Pane, Split};
     use ratatui::layout::Rect;
 
     fn r(w: u16, h: u16) -> Rect {
@@ -197,6 +204,32 @@ mod tests {
         t.split(Split::LeftRight, r(200, 50));
         t.focus_idx = 1;
         t.close_focused();
+        assert_eq!(t.focus_idx, 0);
+    }
+
+    #[test]
+    fn tab_focus_dir_right_moves_to_right_pane() {
+        let mut t = Tab::new("1");
+        t.split(Split::LeftRight, r(200, 50));
+        t.focus_idx = 0;
+        t.focus_dir(FocusDir::Right, r(200, 50));
+        assert_eq!(t.focus_idx, 1);
+    }
+
+    #[test]
+    fn tab_focus_dir_no_wraparound() {
+        let mut t = Tab::new("1");
+        t.split(Split::LeftRight, r(200, 50));
+        t.focus_idx = 1;
+        t.focus_dir(FocusDir::Right, r(200, 50));
+        // Nothing to the right — stays at 1
+        assert_eq!(t.focus_idx, 1);
+    }
+
+    #[test]
+    fn tab_focus_dir_single_pane_noop() {
+        let mut t = Tab::new("1");
+        t.focus_dir(FocusDir::Left, r(200, 50));
         assert_eq!(t.focus_idx, 0);
     }
 }

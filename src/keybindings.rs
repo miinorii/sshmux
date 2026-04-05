@@ -211,26 +211,30 @@ pub struct GlobalBindings {
     pub quit: KeyBinding,
     pub prev_tab: KeyBinding,
     pub next_tab: KeyBinding,
-    pub prev_pane: KeyBinding,
-    pub next_pane: KeyBinding,
     pub close: KeyBinding,
     pub new_tab: KeyBinding,
     pub split_horizontal: KeyBinding,
     pub split_vertical: KeyBinding,
+    pub focus_left: KeyBinding,
+    pub focus_right: KeyBinding,
+    pub focus_up: KeyBinding,
+    pub focus_down: KeyBinding,
 }
 
 impl Default for GlobalBindings {
     fn default() -> Self {
         Self {
             quit: KeyBinding::new(KeyCode::Char('q'), false, true, false),
-            prev_tab: KeyBinding::new(KeyCode::Left, false, true, false),
-            next_tab: KeyBinding::new(KeyCode::Right, false, true, false),
-            prev_pane: KeyBinding::new(KeyCode::Up, false, true, false),
-            next_pane: KeyBinding::new(KeyCode::Down, false, true, false),
+            prev_tab: KeyBinding::new(KeyCode::Char('j'), false, true, false),
+            next_tab: KeyBinding::new(KeyCode::Char('k'), false, true, false),
             close: KeyBinding::new(KeyCode::Char('w'), false, true, false),
             new_tab: KeyBinding::new(KeyCode::Char('t'), false, true, false),
             split_horizontal: KeyBinding::new(KeyCode::Char('-'), false, true, false),
             split_vertical: KeyBinding::new(KeyCode::Char('+'), false, true, false),
+            focus_left: KeyBinding::new(KeyCode::Left, false, true, false),
+            focus_right: KeyBinding::new(KeyCode::Right, false, true, false),
+            focus_up: KeyBinding::new(KeyCode::Up, false, true, false),
+            focus_down: KeyBinding::new(KeyCode::Down, false, true, false),
         }
     }
 }
@@ -314,12 +318,14 @@ struct RawGlobal {
     quit: Option<String>,
     prev_tab: Option<String>,
     next_tab: Option<String>,
-    prev_pane: Option<String>,
-    next_pane: Option<String>,
     close: Option<String>,
     new_tab: Option<String>,
     split_horizontal: Option<String>,
     split_vertical: Option<String>,
+    focus_left: Option<String>,
+    focus_right: Option<String>,
+    focus_up: Option<String>,
+    focus_down: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -354,7 +360,7 @@ fn log_bindings(kb: &KeyBindings) {
     let c = &kb.connect;
     let b = &kb.browser;
     info!(
-        "config: global: quit={}, new_tab={}, close={}, split_h={}, split_v={}, prev_tab={}, next_tab={}, prev_pane={}, next_pane={}",
+        "config: global: quit={}, new_tab={}, close={}, split_h={}, split_v={}, prev_tab={}, next_tab={}, focus_left={}, focus_right={}, focus_up={}, focus_down={}",
         g.quit,
         g.new_tab,
         g.close,
@@ -362,8 +368,10 @@ fn log_bindings(kb: &KeyBindings) {
         g.split_vertical,
         g.prev_tab,
         g.next_tab,
-        g.prev_pane,
-        g.next_pane
+        g.focus_left,
+        g.focus_right,
+        g.focus_up,
+        g.focus_down,
     );
     info!(
         "config: connect: prev={}, next={}, connect={}, browser={}, manual={}, help={}",
@@ -446,8 +454,6 @@ impl KeyBindings {
                 quit: parse_or_default("global.quit", &rg.quit, &dg.quit),
                 prev_tab: parse_or_default("global.prev_tab", &rg.prev_tab, &dg.prev_tab),
                 next_tab: parse_or_default("global.next_tab", &rg.next_tab, &dg.next_tab),
-                prev_pane: parse_or_default("global.prev_pane", &rg.prev_pane, &dg.prev_pane),
-                next_pane: parse_or_default("global.next_pane", &rg.next_pane, &dg.next_pane),
                 close: parse_or_default("global.close", &rg.close, &dg.close),
                 new_tab: parse_or_default("global.new_tab", &rg.new_tab, &dg.new_tab),
                 split_horizontal: parse_or_default(
@@ -460,6 +466,14 @@ impl KeyBindings {
                     &rg.split_vertical,
                     &dg.split_vertical,
                 ),
+                focus_left: parse_or_default("global.focus_left", &rg.focus_left, &dg.focus_left),
+                focus_right: parse_or_default(
+                    "global.focus_right",
+                    &rg.focus_right,
+                    &dg.focus_right,
+                ),
+                focus_up: parse_or_default("global.focus_up", &rg.focus_up, &dg.focus_up),
+                focus_down: parse_or_default("global.focus_down", &rg.focus_down, &dg.focus_down),
             },
             connect: ConnectBindings {
                 select_prev: parse_or_default(
@@ -554,7 +568,7 @@ pub struct BindingEntry {
 }
 
 impl KeyBindings {
-    /// Returns all 27 bindings in display order, grouped by section.
+    /// Returns all 29 bindings in display order, grouped by section.
     pub fn entries(&self) -> Vec<BindingEntry> {
         let g = &self.global;
         let c = &self.connect;
@@ -593,15 +607,27 @@ impl KeyBindings {
             },
             BindingEntry {
                 group: "global",
-                field: "prev_pane",
-                description: "previous pane",
-                binding: g.prev_pane.clone(),
+                field: "focus_left",
+                description: "focus pane left",
+                binding: g.focus_left.clone(),
             },
             BindingEntry {
                 group: "global",
-                field: "next_pane",
-                description: "next pane",
-                binding: g.next_pane.clone(),
+                field: "focus_right",
+                description: "focus pane right",
+                binding: g.focus_right.clone(),
+            },
+            BindingEntry {
+                group: "global",
+                field: "focus_up",
+                description: "focus pane above",
+                binding: g.focus_up.clone(),
+            },
+            BindingEntry {
+                group: "global",
+                field: "focus_down",
+                description: "focus pane below",
+                binding: g.focus_down.clone(),
             },
             BindingEntry {
                 group: "global",
@@ -718,10 +744,12 @@ impl KeyBindings {
             ("global", "close") => self.global.close = kb,
             ("global", "split_horizontal") => self.global.split_horizontal = kb,
             ("global", "split_vertical") => self.global.split_vertical = kb,
-            ("global", "prev_pane") => self.global.prev_pane = kb,
-            ("global", "next_pane") => self.global.next_pane = kb,
             ("global", "prev_tab") => self.global.prev_tab = kb,
             ("global", "next_tab") => self.global.next_tab = kb,
+            ("global", "focus_left") => self.global.focus_left = kb,
+            ("global", "focus_right") => self.global.focus_right = kb,
+            ("global", "focus_up") => self.global.focus_up = kb,
+            ("global", "focus_down") => self.global.focus_down = kb,
             ("connect", "select_prev") => self.connect.select_prev = kb,
             ("connect", "select_next") => self.connect.select_next = kb,
             ("connect", "connect") => self.connect.connect = kb,
