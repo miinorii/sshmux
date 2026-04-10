@@ -1,15 +1,30 @@
 //! A ratatui [`Backend`] wrapper that gives us control over how ANSI colour
 //! escapes are serialised to the terminal.
 //!
-//! # Why
+//! # The problem
 //!
-//! Windows Terminal (tested on 1.23.20211.0) applies bold-brightening only
-//! to basic ANSI colour escapes (`\x1b[30..37m` / `\x1b[90..97m`), not to
-//! the 256-colour form (`\x1b[38;5;Nm`). When a remote program emits
-//! `\x1b[01;34m` (bold blue), `ssh.exe` passes it through unchanged and
-//! Windows Terminal brightens it. The default crossterm backend re-emits
-//! the colour in 256-colour form (`\x1b[1m` + `\x1b[38;5;4m`), so
-//! bold-brightening is lost and the rendered blue doesn't match a direct
+//! Terminal emulators only apply bold-brightening to basic ANSI colour
+//! escapes (`\x1b[30..37m` / `\x1b[90..97m`), not to the 256-colour form
+//! (`\x1b[38;5;Nm`). This is standard behaviour across XTerm, VTE, and
+//! Windows Terminal (tested on 1.23.20211.0).
+//! See <https://github.com/microsoft/terminal/issues/5384>.
+//!
+//! When a remote program emits `\x1b[01;34m` (bold blue), `ssh.exe` passes
+//! it through unchanged and the terminal brightens it. In sshmux the bytes
+//! go through three layers before reaching the terminal, and none of them
+//! preserve the original escape form:
+//!
+//! 1. **vt100** parses both `\x1b[34m` (basic) and `\x1b[38;5;4m` (256-colour)
+//!    into the same `Color::Idx(4)` — the original form is lost.
+//! 2. **ratatui** has no colour variant that distinguishes "basic ANSI" from
+//!    "256-colour indexed" — only `Color::Indexed(u8)`.
+//! 3. **crossterm 0.29** serialises every colour in 256-colour form (`38;5;N`),
+//!    including named colours like `Color::DarkBlue`. There is no variant or
+//!    setting that emits basic ANSI (`34`).
+//!    See <https://github.com/crossterm-rs/crossterm/issues/844>.
+//!
+//! The result: `\x1b[01;34m` goes in, `\x1b[1m` + `\x1b[38;5;4m` comes out,
+//! bold-brightening is lost, and the rendered blue doesn't match a direct
 //! `ssh.exe` connection. To reproduce:
 //!
 //! ```text
@@ -17,13 +32,15 @@
 //! printf '\x1b[1;34m BOLD-BASIC \x1b[0m \x1b[1m\x1b[38;5;4m BOLD-256 \x1b[0m\n'
 //! ```
 //!
-//! This backend re-implements the `draw` loop so that `Color::Indexed(0..=15)`
-//! — the values produced by [`vc()`](crate::terminal::vc) for SSH session
-//! output — are emitted as basic ANSI escapes, preserving bold-brightening
-//! behaviour. Named ratatui colours used by sshmux's own UI chrome
-//! (`Color::Black`, `Color::DarkGray`, etc.) remain in 256-colour form so
-//! the interface looks consistent across terminals.
-//! `Color::Indexed(16..=255)` and `Color::Rgb` are unchanged.
+//! # The fix
+//!
+//! This backend re-implements the `draw` loop to bypass crossterm's colour
+//! serialisation. `Color::Indexed(0..=15)` — the values produced by
+//! [`vc()`](crate::terminal::vc) for SSH session output — are emitted as
+//! basic ANSI escapes, preserving bold-brightening behaviour. Named ratatui
+//! colours used by sshmux's own UI chrome (`Color::Black`, `Color::DarkGray`,
+//! etc.) remain in 256-colour form so the interface looks consistent across
+//! terminals. `Color::Indexed(16..=255)` and `Color::Rgb` are unchanged.
 
 use std::io::{self, Write};
 
