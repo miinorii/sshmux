@@ -10,7 +10,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use log::{debug, trace};
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+use ratatui::{Terminal, layout::Rect};
 use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
 use time::OffsetDateTime;
 
@@ -18,6 +18,7 @@ use sshmux::app::App;
 use sshmux::input::{self, Action};
 use sshmux::keybindings::KeyBindings;
 use sshmux::pane::pane_inner;
+use sshmux::color_backend::ColorBackend;
 
 // ---------------------------------------------------------------------------
 // main
@@ -81,7 +82,7 @@ fn main() -> Result<()> {
         EnableBracketedPaste
     )?;
 
-    let backend = CrosstermBackend::new(stdout);
+    let backend = ColorBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();

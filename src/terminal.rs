@@ -57,6 +57,15 @@ pub trait PtyChannel {
     fn take_dirty(&mut self) -> bool;
 }
 
+/// Map a `vt100::Color` to a ratatui `Color`.
+pub(crate) fn vc(c: vt100::Color) -> Color {
+    match c {
+        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+        vt100::Color::Idx(i) => Color::Indexed(i),
+        _ => Color::Reset,
+    }
+}
+
 /// A single pseudo-terminal session driven by an arbitrary command.
 pub struct EmbeddedTerminal {
     pub parser: Arc<Mutex<Parser>>,
@@ -293,14 +302,6 @@ impl EmbeddedTerminal {
             return;
         };
         let screen = parser.screen();
-
-        fn vc(c: vt100::Color) -> Color {
-            match c {
-                vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
-                vt100::Color::Idx(i) => Color::Indexed(i),
-                _ => Color::Reset,
-            }
-        }
 
         for y in 0..area.height {
             for x in 0..area.width {
@@ -593,5 +594,31 @@ mod tests {
     fn dsr_wrong_final_byte() {
         // ESC [ 6 m is NOT a DSR
         assert_eq!(count_dsr(b"\x1b[6m"), 0);
+    }
+
+    #[test]
+    fn vc_all_indexed_stay_indexed() {
+        // vc() always returns Color::Indexed for Idx — the SmartBackend
+        // handles the basic-ANSI vs 256-colour distinction at draw time.
+        assert_eq!(vc(vt100::Color::Idx(0)), Color::Indexed(0));
+        assert_eq!(vc(vt100::Color::Idx(4)), Color::Indexed(4));
+        assert_eq!(vc(vt100::Color::Idx(15)), Color::Indexed(15));
+        assert_eq!(vc(vt100::Color::Idx(16)), Color::Indexed(16));
+        assert_eq!(vc(vt100::Color::Idx(231)), Color::Indexed(231));
+        assert_eq!(vc(vt100::Color::Idx(255)), Color::Indexed(255));
+    }
+
+    #[test]
+    fn vc_rgb_passthrough() {
+        assert_eq!(vc(vt100::Color::Rgb(1, 2, 3)), Color::Rgb(1, 2, 3));
+        assert_eq!(
+            vc(vt100::Color::Rgb(255, 255, 255)),
+            Color::Rgb(255, 255, 255)
+        );
+    }
+
+    #[test]
+    fn vc_default_is_reset() {
+        assert_eq!(vc(vt100::Color::Default), Color::Reset);
     }
 }
