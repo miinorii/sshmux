@@ -15,10 +15,10 @@ use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
 use time::OffsetDateTime;
 
 use sshmux::app::App;
+use sshmux::color_backend::ColorBackend;
 use sshmux::input::{self, Action};
 use sshmux::keybindings::KeyBindings;
 use sshmux::pane::pane_inner;
-use sshmux::color_backend::ColorBackend;
 
 // ---------------------------------------------------------------------------
 // main

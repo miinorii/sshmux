@@ -83,15 +83,15 @@ impl<W: Write> Write for ColorBackend<W> {
 /// Basic foreground SGR codes for ANSI indices 0..=15, indexed by colour
 /// number. Indices 0..=7 map to 30..=37; indices 8..=15 map to 90..=97.
 const FG_BASIC: [&[u8]; 16] = [
-    b"30", b"31", b"32", b"33", b"34", b"35", b"36", b"37",
-    b"90", b"91", b"92", b"93", b"94", b"95", b"96", b"97",
+    b"30", b"31", b"32", b"33", b"34", b"35", b"36", b"37", b"90", b"91", b"92", b"93", b"94",
+    b"95", b"96", b"97",
 ];
 
 /// Basic background SGR codes for ANSI indices 0..=15. 0..=7 → 40..=47;
 /// 8..=15 → 100..=107.
 const BG_BASIC: [&[u8]; 16] = [
-    b"40", b"41", b"42", b"43", b"44", b"45", b"46", b"47",
-    b"100", b"101", b"102", b"103", b"104", b"105", b"106", b"107",
+    b"40", b"41", b"42", b"43", b"44", b"45", b"46", b"47", b"100", b"101", b"102", b"103", b"104",
+    b"105", b"106", b"107",
 ];
 
 /// Write the foreground SGR parameter for `c` (without leading `\x1b[` or
@@ -166,11 +166,7 @@ fn write_color_sgr<W: Write>(w: &mut W, fg: Color, bg: Color) -> io::Result<()> 
 
 /// Diff `from` -> `to` and emit the necessary SetAttribute commands. Mirrors
 /// ratatui-crossterm's private `ModifierDiff::queue`.
-fn write_modifier_diff<W: Write>(
-    w: &mut W,
-    from: Modifier,
-    to: Modifier,
-) -> io::Result<()> {
+fn write_modifier_diff<W: Write>(w: &mut W, from: Modifier, to: Modifier) -> io::Result<()> {
     let removed = from - to;
     if removed.contains(Modifier::REVERSED) {
         queue!(w, SetAttribute(CtAttribute::NoReverse))?;
@@ -334,8 +330,8 @@ mod tests {
 
     #[test]
     fn indexed_8_to_15_use_bright_fg() {
-        assert_eq!(sgr(Color::Indexed(8), Color::Reset),  b"\x1b[90;49m");
-        assert_eq!(sgr(Color::Indexed(9), Color::Reset),  b"\x1b[91;49m");
+        assert_eq!(sgr(Color::Indexed(8), Color::Reset), b"\x1b[90;49m");
+        assert_eq!(sgr(Color::Indexed(9), Color::Reset), b"\x1b[91;49m");
         assert_eq!(sgr(Color::Indexed(10), Color::Reset), b"\x1b[92;49m");
         assert_eq!(sgr(Color::Indexed(11), Color::Reset), b"\x1b[93;49m");
         assert_eq!(sgr(Color::Indexed(12), Color::Reset), b"\x1b[94;49m");
@@ -353,7 +349,7 @@ mod tests {
 
     #[test]
     fn indexed_8_to_15_use_bright_bg() {
-        assert_eq!(sgr(Color::Reset, Color::Indexed(8)),  b"\x1b[39;100m");
+        assert_eq!(sgr(Color::Reset, Color::Indexed(8)), b"\x1b[39;100m");
         assert_eq!(sgr(Color::Reset, Color::Indexed(12)), b"\x1b[39;104m");
         assert_eq!(sgr(Color::Reset, Color::Indexed(15)), b"\x1b[39;107m");
     }
@@ -362,9 +358,9 @@ mod tests {
 
     #[test]
     fn indexed_high_uses_256_color_form() {
-        assert_eq!(sgr(Color::Indexed(16), Color::Reset),  b"\x1b[38;5;16;49m");
+        assert_eq!(sgr(Color::Indexed(16), Color::Reset), b"\x1b[38;5;16;49m");
         assert_eq!(sgr(Color::Indexed(231), Color::Reset), b"\x1b[38;5;231;49m");
-        assert_eq!(sgr(Color::Reset, Color::Indexed(16)),  b"\x1b[39;48;5;16m");
+        assert_eq!(sgr(Color::Reset, Color::Indexed(16)), b"\x1b[39;48;5;16m");
     }
 
     // ── Named ratatui colours → 256-colour (UI chrome, matches crossterm) ──
@@ -393,7 +389,7 @@ mod tests {
 
     #[test]
     fn named_bg_uses_256_color() {
-        assert_eq!(sgr(Color::Reset, Color::Black),    b"\x1b[39;48;5;0m");
+        assert_eq!(sgr(Color::Reset, Color::Black), b"\x1b[39;48;5;0m");
         assert_eq!(sgr(Color::Reset, Color::DarkGray), b"\x1b[39;48;5;8m");
     }
 
@@ -415,10 +411,7 @@ mod tests {
 
     #[test]
     fn indexed_fg_and_bg_combined() {
-        assert_eq!(
-            sgr(Color::Indexed(4), Color::Indexed(3)),
-            b"\x1b[34;43m"
-        );
+        assert_eq!(sgr(Color::Indexed(4), Color::Indexed(3)), b"\x1b[34;43m");
     }
 
     #[test]

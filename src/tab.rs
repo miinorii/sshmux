@@ -1,6 +1,8 @@
 use ratatui::layout::Rect;
 
-use crate::pane::{FocusDir, Pane, Split, find_directional_neighbor, pane_border_inner, remove_leaf};
+use crate::pane::{
+    FocusDir, Pane, Split, find_directional_neighbor, pane_border_inner, remove_leaf,
+};
 
 pub struct Tab {
     pub name: String,

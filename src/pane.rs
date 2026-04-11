@@ -736,7 +736,11 @@ fn v_overlap(a: Rect, b: Rect) -> u16 {
 ///
 /// "Best" means: smallest gap along the primary axis, with largest perpendicular
 /// overlap as a tie-breaker. Returns `None` if no candidate exists in that direction.
-pub fn find_directional_neighbor(areas: &[Rect], focused_idx: usize, dir: FocusDir) -> Option<usize> {
+pub fn find_directional_neighbor(
+    areas: &[Rect],
+    focused_idx: usize,
+    dir: FocusDir,
+) -> Option<usize> {
     let src = areas.get(focused_idx)?;
     let mut best: Option<(i32, i32, usize)> = None; // (primary_gap, neg_overlap, idx)
 
@@ -1557,21 +1561,32 @@ mod tests {
     // ---- find_directional_neighbor -----------------------------------------
 
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
-        Rect { x, y, width: w, height: h }
+        Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
     }
 
     #[test]
     fn directional_nav_lr_right() {
         // Two side-by-side panes.
         let areas = vec![rect(0, 0, 49, 20), rect(50, 0, 50, 20)];
-        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Right), Some(1));
+        assert_eq!(
+            find_directional_neighbor(&areas, 0, FocusDir::Right),
+            Some(1)
+        );
         assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Right), None);
     }
 
     #[test]
     fn directional_nav_lr_left() {
         let areas = vec![rect(0, 0, 49, 20), rect(50, 0, 50, 20)];
-        assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Left), Some(0));
+        assert_eq!(
+            find_directional_neighbor(&areas, 1, FocusDir::Left),
+            Some(0)
+        );
         assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Left), None);
     }
 
@@ -1579,7 +1594,10 @@ mod tests {
     fn directional_nav_tb_down() {
         // Two stacked panes.
         let areas = vec![rect(0, 0, 100, 10), rect(0, 10, 100, 10)];
-        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Down), Some(1));
+        assert_eq!(
+            find_directional_neighbor(&areas, 0, FocusDir::Down),
+            Some(1)
+        );
         assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Down), None);
     }
 
@@ -1607,8 +1625,14 @@ mod tests {
             rect(50, 0, 50, 20),  // 1: top-right
             rect(50, 20, 50, 20), // 2: bottom-right
         ];
-        assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Down), Some(2));
-        assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Left), Some(0));
+        assert_eq!(
+            find_directional_neighbor(&areas, 1, FocusDir::Down),
+            Some(2)
+        );
+        assert_eq!(
+            find_directional_neighbor(&areas, 1, FocusDir::Left),
+            Some(0)
+        );
         assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Up), None);
     }
 
@@ -1629,6 +1653,9 @@ mod tests {
             rect(50, 0, 20, 20), // 1: close right (gap=1)
             rect(60, 0, 20, 20), // 2: further right (gap=11)
         ];
-        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Right), Some(1));
+        assert_eq!(
+            find_directional_neighbor(&areas, 0, FocusDir::Right),
+            Some(1)
+        );
     }
 }

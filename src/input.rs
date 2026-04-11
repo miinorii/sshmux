@@ -78,23 +78,34 @@ pub fn handle_key(
             return Action::Continue;
         }
         if g.focus_left.matches(code, ctrl, alt, shift) {
-            app.tab_mut().focus_dir(FocusDir::Left, pane_inner(last_area));
-            if app.tab().zoom { app.resize_all(last_area); }
+            app.tab_mut()
+                .focus_dir(FocusDir::Left, pane_inner(last_area));
+            if app.tab().zoom {
+                app.resize_all(last_area);
+            }
             return Action::Continue;
         }
         if g.focus_right.matches(code, ctrl, alt, shift) {
-            app.tab_mut().focus_dir(FocusDir::Right, pane_inner(last_area));
-            if app.tab().zoom { app.resize_all(last_area); }
+            app.tab_mut()
+                .focus_dir(FocusDir::Right, pane_inner(last_area));
+            if app.tab().zoom {
+                app.resize_all(last_area);
+            }
             return Action::Continue;
         }
         if g.focus_up.matches(code, ctrl, alt, shift) {
             app.tab_mut().focus_dir(FocusDir::Up, pane_inner(last_area));
-            if app.tab().zoom { app.resize_all(last_area); }
+            if app.tab().zoom {
+                app.resize_all(last_area);
+            }
             return Action::Continue;
         }
         if g.focus_down.matches(code, ctrl, alt, shift) {
-            app.tab_mut().focus_dir(FocusDir::Down, pane_inner(last_area));
-            if app.tab().zoom { app.resize_all(last_area); }
+            app.tab_mut()
+                .focus_dir(FocusDir::Down, pane_inner(last_area));
+            if app.tab().zoom {
+                app.resize_all(last_area);
+            }
             return Action::Continue;
         }
         if g.close.matches(code, ctrl, alt, shift) {
@@ -942,7 +953,11 @@ pub fn handle_mouse(
         .is_some_and(|p| p.is_browser());
 
     if is_browser {
-        let effective_leaf_count = if zoom_active { 1 } else { app.tabs[app.selected_tab].root.leaf_count() };
+        let effective_leaf_count = if zoom_active {
+            1
+        } else {
+            app.tabs[app.selected_tab].root.leaf_count()
+        };
         handle_browser_mouse(app, kind, column, row, pane_area, effective_leaf_count);
         return Action::Continue;
     }
@@ -1074,7 +1089,6 @@ fn handle_browser_mouse(
     pane_area: Rect,
     leaf_count: usize,
 ) {
-
     let Some(browser) = app
         .tab_mut()
         .focused_pane_mut()
@@ -1396,8 +1410,19 @@ mod tests {
         app.tab_mut().zoom = true;
         // Click on the right half — in normal mode this would focus pane 1,
         // in zoom mode it should stay on pane 0 (the zoomed pane fills the whole area).
-        let full = Rect { x: 0, y: 0, width: 200, height: 51 };
-        handle_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 150, 20, full);
+        let full = Rect {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 51,
+        };
+        handle_mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            150,
+            20,
+            full,
+        );
         assert_eq!(app.tab().focus_idx, 0);
     }
 
