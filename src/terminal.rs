@@ -66,6 +66,28 @@ pub(crate) fn vc(c: vt100::Color) -> Color {
     }
 }
 
+/// Resize a `vt100::Parser` to `(new_rows, new_cols)`, preserving content near
+/// the cursor when shrinking height on the main screen.
+///
+/// `vt100::Screen::set_size()` naively truncates rows from the bottom of the
+/// screen grid, which destroys content at the cursor position. Real terminals
+/// push top rows into the scrollback buffer so the cursor stays visible. This
+/// function replicates that behaviour: it pre-scrolls by exactly as many lines
+/// as needed to bring the cursor within the new bounds, then calls `set_size`.
+/// On alternate-screen (vim, htop, …) the app redraws itself after SIGWINCH, so
+/// the default truncation is fine and no pre-scroll is applied.
+fn resize_parser(p: &mut Parser, new_rows: u16, new_cols: u16) {
+    let (old_rows, _) = p.screen().size();
+    if new_rows < old_rows && !p.screen().alternate_screen() {
+        let cursor_row = p.screen().cursor_position().0;
+        if cursor_row >= new_rows {
+            let scroll_by = cursor_row - new_rows + 1;
+            p.process(format!("\x1b[{}S", scroll_by).as_bytes());
+        }
+    }
+    p.screen_mut().set_size(new_rows, new_cols);
+}
+
 /// A single pseudo-terminal session driven by an arbitrary command.
 pub struct EmbeddedTerminal {
     pub parser: Arc<Mutex<Parser>>,
@@ -229,7 +251,7 @@ impl EmbeddedTerminal {
         };
         if pty_ok {
             if let Ok(mut p) = self.parser.lock() {
-                p.screen_mut().set_size(rows, cols);
+                resize_parser(&mut p, rows, cols);
             }
             self.rows = rows;
             self.cols = cols;
@@ -620,5 +642,120 @@ mod tests {
     #[test]
     fn vc_default_is_reset() {
         assert_eq!(vc(vt100::Color::Default), Color::Reset);
+    }
+
+    // ---- resize_parser -------------------------------------------------------
+
+    /// Read the non-blank text content of a screen row, trimmed of trailing spaces.
+    fn row_text(p: &Parser, row: u16) -> String {
+        let (_, cols) = p.screen().size();
+        let mut s = String::new();
+        for c in 0..cols {
+            if let Some(cell) = p.screen().cell(row, c) {
+                let contents = cell.contents();
+                s.push_str(if contents.is_empty() { " " } else { contents });
+            }
+        }
+        s.trim_end().to_string()
+    }
+
+    /// Fill a parser with N labelled rows: "R00\r\nR01\r\n…\r\nR{N-1}"
+    /// (no trailing newline so the cursor lands at the end of the last row).
+    fn fill_rows(p: &mut Parser, n: u8) {
+        let mut input = String::new();
+        for i in 0..n {
+            if i > 0 {
+                input.push_str("\r\n");
+            }
+            input.push_str(&format!("R{:02}", i));
+        }
+        p.process(input.as_bytes());
+    }
+
+    // Shrinking when the cursor is at the very bottom row must push top rows
+    // into scrollback so the prompt stays visible.
+    #[test]
+    fn resize_shrink_cursor_at_bottom_preserves_prompt() {
+        let mut p = Parser::new(10, 10, 1000);
+        fill_rows(&mut p, 10); // R00..R09, cursor at (9, 3)
+
+        assert_eq!(p.screen().cursor_position(), (9, 3));
+
+        resize_parser(&mut p, 5, 10);
+
+        assert_eq!(p.screen().size(), (5, 10));
+        // Top rows pushed into scrollback; the bottom 5 originals now fill the screen.
+        assert_eq!(row_text(&p, 0), "R05");
+        assert_eq!(row_text(&p, 4), "R09");
+        // Cursor clamped to the last visible row.
+        assert_eq!(p.screen().cursor_position().0, 4);
+    }
+
+    // Expanding then shrinking back must not lose content: after the expand the
+    // cursor is well above the new bottom, so zero pre-scroll is needed and only
+    // the blank rows added during the expand are removed.
+    #[test]
+    fn resize_expand_then_shrink_preserves_all_content() {
+        let mut p = Parser::new(10, 10, 1000);
+        fill_rows(&mut p, 10); // cursor at (9, 3)
+
+        resize_parser(&mut p, 20, 10); // expand: 10 blank rows appended, cursor stays at (9, 3)
+        assert_eq!(p.screen().cursor_position(), (9, 3));
+
+        resize_parser(&mut p, 10, 10); // shrink back: cursor (9) < new_rows (10), no pre-scroll
+        assert_eq!(p.screen().size(), (10, 10));
+        // All original rows must still be present.
+        assert_eq!(row_text(&p, 0), "R00");
+        assert_eq!(row_text(&p, 9), "R09");
+        assert_eq!(p.screen().cursor_position(), (9, 3));
+    }
+
+    // When the cursor is already within the new height no pre-scroll should
+    // happen; set_size only drops the blank rows below the cursor.
+    #[test]
+    fn resize_shrink_cursor_already_in_bounds_no_scroll() {
+        let mut p = Parser::new(20, 10, 1000);
+        fill_rows(&mut p, 5); // rows 0..4 filled, rows 5..19 blank, cursor at (4, 3)
+
+        resize_parser(&mut p, 10, 10);
+
+        assert_eq!(p.screen().size(), (10, 10));
+        // Rows 0..4 intact, rows 5..9 blank.
+        assert_eq!(row_text(&p, 0), "R00");
+        assert_eq!(row_text(&p, 4), "R04");
+        assert_eq!(row_text(&p, 5), "");
+        assert_eq!(p.screen().cursor_position(), (4, 3));
+    }
+
+    // Alternate screen (vim/htop) must NOT trigger the pre-scroll: those apps
+    // redraw the whole screen after SIGWINCH, so the default set_size truncation
+    // is correct and we must not disturb it.
+    #[test]
+    fn resize_alternate_screen_skips_prescroll() {
+        let mut p = Parser::new(10, 10, 1000);
+        p.process(b"\x1b[?1049h"); // enter alternate screen
+        fill_rows(&mut p, 10); // cursor at (9, 3) on alternate screen
+
+        resize_parser(&mut p, 5, 10);
+
+        assert_eq!(p.screen().size(), (5, 10));
+        // No pre-scroll: top rows are visible, bottom rows were truncated.
+        assert_eq!(row_text(&p, 0), "R00");
+        assert_eq!(row_text(&p, 4), "R04");
+    }
+
+    // Cursor sitting exactly one row below the new bottom boundary: scroll by
+    // exactly 1 to bring it into view.
+    #[test]
+    fn resize_shrink_cursor_one_past_boundary() {
+        let mut p = Parser::new(10, 10, 1000);
+        fill_rows(&mut p, 6); // rows 0..5 filled, cursor at (5, 3)
+
+        resize_parser(&mut p, 5, 10); // new_rows=5, cursor_row=5 → scroll_by=1
+
+        assert_eq!(p.screen().size(), (5, 10));
+        assert_eq!(row_text(&p, 0), "R01"); // R00 pushed to scrollback
+        assert_eq!(row_text(&p, 4), "R05");
+        assert_eq!(p.screen().cursor_position().0, 4);
     }
 }
