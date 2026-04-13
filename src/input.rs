@@ -7,7 +7,7 @@ use crate::browser::common::Browser;
 use crate::browser::{
     BrowserKeyAction, DragAction, FileBrowser, SshBrowser, SshBrowserState, handle_browser_key,
 };
-use crate::connect::{
+use crate::pane::connect::{
     ConnectOverlay, ConnectPane, KeyEditorState, editor_binding_index, editor_nav_down,
     editor_nav_up,
 };
@@ -1138,7 +1138,7 @@ pub fn handle_paste(app: &mut App, text: &str) {
 mod tests {
     use super::*;
     use crate::app::ContextMenu;
-    use crate::connect::{ConnectOverlay, ConnectPane};
+    use crate::pane::connect::{ConnectOverlay, ConnectPane};
     use crate::keybindings::KeyBindings;
     use crate::pane::Pane;
     use crate::ssh_config::SshHost;

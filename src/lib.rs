@@ -1,7 +1,6 @@
 pub mod app;
 pub mod browser;
 pub mod color_backend;
-pub mod connect;
 pub mod input;
 pub mod keybindings;
 pub mod pane;

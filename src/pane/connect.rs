@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::keybindings::KeyBindings;
-use crate::pane::render_pane_border;
+use super::render_pane_border;
 use crate::ssh_config::SshHost;
 
 // ---------------------------------------------------------------------------

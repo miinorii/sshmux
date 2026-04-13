@@ -1,19 +1,28 @@
+mod browser;
+pub mod connect;
+mod session;
+pub mod tree;
+
 use std::sync::atomic::Ordering;
 
 use ratatui::{
     buffer::Buffer,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Widget},
+    widgets::{Block, Borders, Widget},
 };
 
 use crate::browser::common::Browser;
 use crate::browser::{FileBrowser, SshBrowser};
-use crate::connect::ConnectPane;
+use connect::ConnectPane;
 use crate::keybindings::KeyBindings;
 use crate::ssh_config::SshHost;
 use crate::terminal::EmbeddedTerminal;
+
+pub use tree::{
+    SeparatorHit, find_directional_neighbor, hit_test_separator, remove_leaf, split_at_path_mut,
+};
 
 // ---------------------------------------------------------------------------
 // Split direction
@@ -279,65 +288,29 @@ impl Pane {
             } => {
                 let is_focus = ctx.my_idx == focus_idx;
                 ctx.my_idx += 1;
-
-                let host = ssh_args.split_whitespace().last().unwrap_or("ssh");
-                let inner = render_pane_border(area, buf, is_focus, leaf_count, host);
-                terminal.render_into(inner, buf);
-
-                if terminal.process_exited() {
-                    let menu_w = 34u16.min(inner.width.saturating_sub(2));
-                    let menu_h = 3u16;
-                    let cx = inner.x + inner.width.saturating_sub(menu_w) / 2;
-                    let cy = inner.y + inner.height.saturating_sub(menu_h) / 2;
-                    let menu_area = Rect {
-                        x: cx,
-                        y: cy,
-                        width: menu_w,
-                        height: menu_h,
-                    };
-                    let sel = Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD);
-                    let dim = Style::default().fg(Color::DarkGray);
-                    let items = ["Reconnect", "Close pane"];
-                    let mut spans = Vec::new();
-                    for (i, item) in items.iter().enumerate() {
-                        if i > 0 {
-                            spans.push(Span::raw(" / ").style(dim));
-                        }
-                        let style = if i as u8 == *exit_selection { sel } else { dim };
-                        spans.push(Span::raw(*item).style(style));
-                    }
-                    // Clear the overlay area so terminal content doesn't bleed through
-                    for y in menu_area.y..menu_area.y + menu_area.height {
-                        for x in menu_area.x..menu_area.x + menu_area.width {
-                            buf[(x, y)].reset();
-                        }
-                    }
-                    let paragraph = Paragraph::new(Line::from(spans))
-                        .alignment(Alignment::Center)
-                        .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(Color::Yellow))
-                                .title(" session ended "),
-                        );
-                    paragraph.render(menu_area, buf);
-                }
+                session::render_session(
+                    area,
+                    buf,
+                    terminal,
+                    ssh_args,
+                    *exit_selection,
+                    is_focus,
+                    leaf_count,
+                );
             }
 
             Pane::FileBrowser { browser } => {
                 let is_focus = ctx.my_idx == focus_idx;
                 ctx.my_idx += 1;
                 browser.render(area, buf, is_focus, leaf_count, &keybindings.browser);
-                render_browser_exit_overlay(browser, area, buf);
+                browser::render_browser_exit_overlay(browser, area, buf);
             }
 
             Pane::SshBrowser { browser } => {
                 let is_focus = ctx.my_idx == focus_idx;
                 ctx.my_idx += 1;
                 browser.render(area, buf, is_focus, leaf_count, &keybindings.browser);
-                render_browser_exit_overlay(browser, area, buf);
+                browser::render_browser_exit_overlay(browser, area, buf);
             }
 
             Pane::Split {
@@ -351,15 +324,14 @@ impl Pane {
                         let sep_style = Style::default().fg(Color::DarkGray);
                         for pair in areas.windows(2) {
                             let x = pair[0].right();
-                            // Use ┼ instead of ┬ when a vertical separator from a sibling
-                            // above ends exactly at this row (TopBottom split above us).
                             if area.height > 0 {
                                 let top_sym = if area.y > 0 {
                                     buf[(x, area.y - 1)].symbol()
                                 } else {
                                     ""
                                 };
-                                let top_connects = matches!(top_sym, "│" | "┬" | "├" | "┤" | "┼");
+                                let top_connects =
+                                    matches!(top_sym, "│" | "┬" | "├" | "┤" | "┼");
                                 let junction = if top_connects { '┼' } else { '┬' };
                                 buf[(x, area.y)].set_char(junction).set_style(sep_style);
                             }
@@ -372,11 +344,11 @@ impl Pane {
                         }
                     }
                     Split::TopBottom => {
-                        for (i, (child, a)) in children.iter_mut().zip(areas.iter()).enumerate() {
+                        for (i, (child, a)) in
+                            children.iter_mut().zip(areas.iter()).enumerate()
+                        {
                             child.render(*a, buf, ctx);
                             if i > 0 {
-                                // Fix ├/┤/┼ junction characters where outer vertical
-                                // separators meet the title-bar row of this pane.
                                 let ty = a.y;
                                 let buf_right = buf.area().x + buf.area().width;
                                 if a.x > 0 {
@@ -539,245 +511,9 @@ pub fn render_pane_border(
     }
 }
 
-/// Render a "session ended / Reconnect / Close pane" overlay on top of a browser
-/// pane when its underlying PTY has exited.
-fn render_browser_exit_overlay(browser: &dyn Browser, area: Rect, buf: &mut Buffer) {
-    if !browser.process_exited() {
-        return;
-    }
-    let menu_w = 34u16.min(area.width.saturating_sub(2));
-    let menu_h = 3u16;
-    let cx = area.x + area.width.saturating_sub(menu_w) / 2;
-    let cy = area.y + area.height.saturating_sub(menu_h) / 2;
-    let menu_area = Rect {
-        x: cx,
-        y: cy,
-        width: menu_w,
-        height: menu_h,
-    };
-    let sel = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(Color::DarkGray);
-    let items = ["Reconnect", "Close pane"];
-    let mut spans = Vec::new();
-    for (i, item) in items.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::raw(" / ").style(dim));
-        }
-        let style = if i as u8 == browser.core().exit_selection {
-            sel
-        } else {
-            dim
-        };
-        spans.push(Span::raw(*item).style(style));
-    }
-    for y in menu_area.y..menu_area.y + menu_area.height {
-        for x in menu_area.x..menu_area.x + menu_area.width {
-            buf[(x, y)].reset();
-        }
-    }
-    let paragraph = Paragraph::new(Line::from(spans))
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow))
-                .title(" session ended "),
-        );
-    paragraph.render(menu_area, buf);
-}
-
 // ---------------------------------------------------------------------------
-// Separator hit-testing and resize support
+// Tests
 // ---------------------------------------------------------------------------
-
-/// Identifies which separator was hit by a mouse click.
-pub struct SeparatorHit {
-    /// Path from root to the Split node, as child indices.
-    pub path: Vec<usize>,
-    /// Index of the separator: between `children[sep_idx]` and `children[sep_idx + 1]`.
-    pub sep_idx: usize,
-    /// True for LeftRight (drag horizontally), false for TopBottom (drag vertically).
-    pub horizontal: bool,
-    /// The screen area of the Split node that owns this separator.
-    pub split_area: Rect,
-}
-
-/// Walk the pane tree and check if `(col, row)` lands on a separator.
-/// Returns the innermost separator hit, or `None`.
-pub fn hit_test_separator(pane: &Pane, area: Rect, col: u16, row: u16) -> Option<SeparatorHit> {
-    match pane {
-        Pane::Split {
-            kind,
-            children,
-            ratios,
-        } => {
-            let areas = split_areas(area, kind, ratios);
-            match kind {
-                Split::LeftRight => {
-                    // Check explicit 1-cell separator columns first.
-                    for (i, pair) in areas.windows(2).enumerate() {
-                        let sep_x = pair[0].right();
-                        if col == sep_x && row >= area.y && row < area.y + area.height {
-                            return Some(SeparatorHit {
-                                path: vec![],
-                                sep_idx: i,
-                                horizontal: true,
-                                split_area: area,
-                            });
-                        }
-                    }
-                }
-                Split::TopBottom => {
-                    // The separator is the title-bar row of child[i] for i > 0.
-                    for (i, a) in areas.iter().enumerate().skip(1) {
-                        if row == a.y && col >= a.x && col < a.x + a.width {
-                            return Some(SeparatorHit {
-                                path: vec![],
-                                sep_idx: i - 1,
-                                horizontal: false,
-                                split_area: area,
-                            });
-                        }
-                    }
-                }
-            }
-            // Not a separator at this level — recurse into the child that contains
-            // the point and prepend our child index to the path.
-            for (i, (child, a)) in children.iter().zip(areas.iter()).enumerate() {
-                if col >= a.x && col < a.x + a.width && row >= a.y && row < a.y + a.height {
-                    if let Some(mut hit) = hit_test_separator(child, *a, col, row) {
-                        hit.path.insert(0, i);
-                        return Some(hit);
-                    }
-                    break;
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-/// Navigate the pane tree to the Split node identified by `path`.
-pub fn split_at_path_mut<'a>(pane: &'a mut Pane, path: &[usize]) -> Option<&'a mut Pane> {
-    if path.is_empty() {
-        return Some(pane);
-    }
-    if let Pane::Split { children, .. } = pane {
-        children
-            .get_mut(path[0])
-            .and_then(|child| split_at_path_mut(child, &path[1..]))
-    } else {
-        None
-    }
-}
-
-// ---------------------------------------------------------------------------
-// remove_leaf
-// ---------------------------------------------------------------------------
-
-pub fn remove_leaf(pane: &mut Pane, n: usize) {
-    match pane {
-        Pane::Connect(_)
-        | Pane::Session { .. }
-        | Pane::FileBrowser { .. }
-        | Pane::SshBrowser { .. } => {}
-        Pane::Split {
-            children, ratios, ..
-        } => {
-            let mut offset = 0;
-            let mut to_remove = None;
-            for (i, child) in children.iter_mut().enumerate() {
-                let count = child.leaf_count();
-                if n < offset + count {
-                    if count == 1 {
-                        to_remove = Some(i);
-                    } else {
-                        remove_leaf(child, n - offset);
-                    }
-                    break;
-                }
-                offset += count;
-            }
-            if let Some(i) = to_remove {
-                children.remove(i);
-                ratios.remove(i);
-            }
-        }
-    }
-    // Collapse a Split that is down to a single child into that child directly.
-    if let Pane::Split { children, .. } = pane
-        && children.len() == 1
-    {
-        *pane = children.remove(0);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Directional neighbor lookup
-// ---------------------------------------------------------------------------
-
-fn h_overlap(a: Rect, b: Rect) -> u16 {
-    let start = a.x.max(b.x);
-    let end = (a.x + a.width).min(b.x + b.width);
-    end.saturating_sub(start)
-}
-
-fn v_overlap(a: Rect, b: Rect) -> u16 {
-    let start = a.y.max(b.y);
-    let end = (a.y + a.height).min(b.y + b.height);
-    end.saturating_sub(start)
-}
-
-/// Given all leaf rects (from `Pane::leaf_areas`), the index of the focused leaf,
-/// and a direction, return the index of the best spatial neighbor, or `None`.
-///
-/// "Best" means: smallest gap along the primary axis, with largest perpendicular
-/// overlap as a tie-breaker. Returns `None` if no candidate exists in that direction.
-pub fn find_directional_neighbor(
-    areas: &[Rect],
-    focused_idx: usize,
-    dir: FocusDir,
-) -> Option<usize> {
-    let src = areas.get(focused_idx)?;
-    let mut best: Option<(i32, i32, usize)> = None; // (primary_gap, neg_overlap, idx)
-
-    for (idx, cand) in areas.iter().enumerate() {
-        if idx == focused_idx {
-            continue;
-        }
-        let (primary_gap, perp_overlap) = match dir {
-            FocusDir::Left => (
-                src.x as i32 - (cand.x + cand.width) as i32,
-                v_overlap(*src, *cand) as i32,
-            ),
-            FocusDir::Right => (
-                cand.x as i32 - (src.x + src.width) as i32,
-                v_overlap(*src, *cand) as i32,
-            ),
-            FocusDir::Up => (
-                src.y as i32 - (cand.y + cand.height) as i32,
-                h_overlap(*src, *cand) as i32,
-            ),
-            FocusDir::Down => (
-                cand.y as i32 - (src.y + src.height) as i32,
-                h_overlap(*src, *cand) as i32,
-            ),
-        };
-        if primary_gap < 0 || perp_overlap <= 0 {
-            continue;
-        }
-        let score = (primary_gap, -perp_overlap);
-        match best {
-            None => best = Some((score.0, score.1, idx)),
-            Some((bg, bo, _)) if score < (bg, bo) => best = Some((score.0, score.1, idx)),
-            _ => {}
-        }
-    }
-    best.map(|(_, _, idx)| idx)
-}
 
 #[cfg(test)]
 mod tests {
@@ -815,7 +551,6 @@ mod tests {
 
     #[test]
     fn split_areas_horizontal_even() {
-        // 100-wide split into 2 panes with a 1-cell separator: widths are 50 + 49 = 99.
         let a = split_areas(r(100, 20), &Split::LeftRight, &[100, 100]);
         assert_eq!(
             a[0],
@@ -839,14 +574,12 @@ mod tests {
 
     #[test]
     fn split_areas_horizontal_remainder() {
-        // 1 cell reserved for separator between the 2 panes.
         let a = split_areas(r(101, 20), &Split::LeftRight, &[100, 100]);
         assert_eq!(a[0].width + a[1].width, 100);
     }
 
     #[test]
     fn split_areas_vertical_even() {
-        // TopBottom has no spacing: each pane's title bar acts as the visual separator.
         let a = split_areas(r(80, 40), &Split::TopBottom, &[100, 100]);
         assert_eq!(
             a[0],
@@ -870,7 +603,6 @@ mod tests {
 
     #[test]
     fn split_areas_vertical_three() {
-        // TopBottom has no spacing: heights sum to the full parent height.
         let a = split_areas(r(80, 30), &Split::TopBottom, &[100, 100, 100]);
         assert_eq!(a.len(), 3);
         assert_eq!(a.iter().map(|x| x.height).sum::<u16>(), 30);
@@ -926,7 +658,6 @@ mod tests {
 
     #[test]
     fn leaf_areas_sum_equals_parent() {
-        // 1 cell is the separator between the two panes.
         let a = hsplit().leaf_areas(r(100, 50));
         assert_eq!(a[0].width + a[1].width, 99);
     }
@@ -941,45 +672,10 @@ mod tests {
         assert_eq!(p.leaf_areas(r(120, 60)).len(), p.leaf_count());
     }
 
-    // ---- remove_leaf -------------------------------------------------------
-
-    #[test]
-    fn remove_leaf_first() {
-        let mut p = hsplit();
-        remove_leaf(&mut p, 0);
-        assert_eq!(p.leaf_count(), 1);
-    }
-
-    #[test]
-    fn remove_leaf_second() {
-        let mut p = hsplit();
-        remove_leaf(&mut p, 1);
-        assert_eq!(p.leaf_count(), 1);
-    }
-
-    #[test]
-    fn remove_leaf_nested() {
-        let mut p = Pane::Split {
-            kind: Split::LeftRight,
-            children: vec![connect(), vsplit()],
-            ratios: vec![100, 100],
-        };
-        remove_leaf(&mut p, 1);
-        assert_eq!(p.leaf_count(), 2);
-    }
-
-    #[test]
-    fn remove_leaf_noop_on_single() {
-        let mut p = connect();
-        remove_leaf(&mut p, 0); // must not panic
-        assert_eq!(p.leaf_count(), 1);
-    }
-
     // ---- pane_inner --------------------------------------------------------
 
     #[test]
     fn pane_inner_shrinks_by_one() {
-        // pane_inner strips the bottom tab-bar row; x/y/width are unchanged.
         let inner = pane_inner(r(10, 8));
         assert_eq!(inner.x, 0);
         assert_eq!(inner.y, 0);
@@ -1031,7 +727,6 @@ mod tests {
     #[test]
     fn leaf_mut_modifies_correct_pane() {
         let mut p = hsplit();
-        // Replace leaf 1 with a differently-configured connect pane
         if let Some(pane) = p.leaf_mut(1) {
             *pane = connect();
         }
@@ -1060,47 +755,9 @@ mod tests {
 
     #[test]
     fn split_leaf_noop_on_single() {
-        // split_leaf on a non-Split pane is a no-op
         let mut p = connect();
         p.split_leaf(0, Split::LeftRight);
         assert_eq!(p.leaf_count(), 1);
-    }
-
-    // ---- remove_leaf (additional) ------------------------------------------
-
-    #[test]
-    fn remove_leaf_collapses_to_single() {
-        let mut p = hsplit();
-        remove_leaf(&mut p, 0);
-        // After removing one child from a 2-child split, it collapses
-        assert!(matches!(p, Pane::Connect(_)));
-    }
-
-    #[test]
-    fn remove_leaf_deep_nested() {
-        // 4-leaf tree: split(connect, split(connect, split(connect, connect)))
-        let mut p = Pane::Split {
-            kind: Split::LeftRight,
-            children: vec![
-                connect(),
-                Pane::Split {
-                    kind: Split::TopBottom,
-                    children: vec![
-                        connect(),
-                        Pane::Split {
-                            kind: Split::LeftRight,
-                            children: vec![connect(), connect()],
-                            ratios: vec![100, 100],
-                        },
-                    ],
-                    ratios: vec![100, 100],
-                },
-            ],
-            ratios: vec![100, 100],
-        };
-        assert_eq!(p.leaf_count(), 4);
-        remove_leaf(&mut p, 3); // remove deepest right leaf
-        assert_eq!(p.leaf_count(), 3);
     }
 
     // ---- split_areas (additional) ------------------------------------------
@@ -1114,7 +771,6 @@ mod tests {
 
     #[test]
     fn split_areas_vertical_remainder() {
-        // TopBottom has no spacing: heights sum to the full parent height.
         let a = split_areas(r(80, 31), &Split::TopBottom, &[100, 100]);
         assert_eq!(a[0].height + a[1].height, 31);
     }
@@ -1136,13 +792,8 @@ mod tests {
         buf
     }
 
-    // With Fill(1)/Length(1)/Fill(1) constraints and width=21, the two pane
-    // areas are x=0 w=10 and x=11 w=10, with the separator drawn at x=10.
-    // With width=41 the separator is at x=20, safely past the 11-char title.
-
     #[test]
     fn junction_lr_separator_is_tee_down_at_top() {
-        // LeftRight 2-pane: separator column starts with ┬ then │ below.
         let area = Rect {
             x: 0,
             y: 0,
@@ -1289,9 +940,7 @@ mod tests {
 
     #[test]
     fn split_areas_lr_unequal_ratios_left_is_wider() {
-        // ratio [200, 100] should give the left pane roughly double the right pane.
         let a = split_areas(r(90, 20), &Split::LeftRight, &[200, 100]);
-        // Total pane space = 89 (1 separator). Left ~ 59, right ~ 30.
         assert!(
             a[0].width > a[1].width,
             "left pane should be wider with ratio 200:100"
@@ -1305,7 +954,6 @@ mod tests {
 
     #[test]
     fn split_areas_tb_unequal_ratios_top_is_taller() {
-        // ratio [300, 100] should give the top pane roughly 3x the bottom.
         let a = split_areas(r(80, 40), &Split::TopBottom, &[300, 100]);
         assert!(
             a[0].height > a[1].height,
@@ -1320,342 +968,10 @@ mod tests {
 
     #[test]
     fn split_areas_lr_min_ratio_still_allocates_space() {
-        // Even with a very small ratio, the pane still gets at least some space.
         let a = split_areas(r(60, 10), &Split::LeftRight, &[1, 99]);
         assert!(a[0].width >= 1);
         assert!(a[1].width >= 1);
-        assert_eq!(a[0].width + a[1].width, 59); // 1 separator
+        assert_eq!(a[0].width + a[1].width, 59);
     }
 
-    // ---- hit_test_separator -------------------------------------------------
-
-    #[test]
-    fn hit_test_lr_hits_separator() {
-        // r(21,10) with [100,100]: separator is at x=10 (child[0] has width=10).
-        let p = hsplit();
-        let areas = split_areas(r(21, 10), &Split::LeftRight, &[100, 100]);
-        let sep_x = areas[0].right();
-        let hit = hit_test_separator(&p, r(21, 10), sep_x, 5);
-        assert!(hit.is_some(), "should hit LR separator at x={sep_x}");
-        let hit = hit.unwrap();
-        assert_eq!(hit.sep_idx, 0);
-        assert!(hit.horizontal);
-        assert_eq!(hit.path, vec![]);
-    }
-
-    #[test]
-    fn hit_test_lr_misses_left_of_separator() {
-        let p = hsplit();
-        let areas = split_areas(r(21, 10), &Split::LeftRight, &[100, 100]);
-        let sep_x = areas[0].right();
-        assert!(hit_test_separator(&p, r(21, 10), sep_x - 1, 5).is_none());
-    }
-
-    #[test]
-    fn hit_test_lr_misses_right_of_separator() {
-        let p = hsplit();
-        let areas = split_areas(r(21, 10), &Split::LeftRight, &[100, 100]);
-        let sep_x = areas[0].right();
-        assert!(hit_test_separator(&p, r(21, 10), sep_x + 1, 5).is_none());
-    }
-
-    #[test]
-    fn hit_test_tb_hits_separator() {
-        // r(80,20) with [100,100]: separator is the title bar row of child[1] at y=10.
-        let p = vsplit();
-        let areas = split_areas(r(80, 20), &Split::TopBottom, &[100, 100]);
-        let sep_y = areas[1].y;
-        let hit = hit_test_separator(&p, r(80, 20), 40, sep_y);
-        assert!(hit.is_some(), "should hit TB separator at y={sep_y}");
-        let hit = hit.unwrap();
-        assert_eq!(hit.sep_idx, 0);
-        assert!(!hit.horizontal);
-        assert_eq!(hit.path, vec![]);
-    }
-
-    #[test]
-    fn hit_test_tb_misses_above_separator() {
-        let p = vsplit();
-        let areas = split_areas(r(80, 20), &Split::TopBottom, &[100, 100]);
-        let sep_y = areas[1].y;
-        assert!(hit_test_separator(&p, r(80, 20), 40, sep_y - 1).is_none());
-    }
-
-    #[test]
-    fn hit_test_leaf_returns_none() {
-        assert!(hit_test_separator(&connect(), r(80, 20), 10, 10).is_none());
-    }
-
-    #[test]
-    fn hit_test_lr_three_panes_second_separator() {
-        // 3-child LR split: sep[0] between child[0] and child[1], sep[1] between [1] and [2].
-        let p = Pane::Split {
-            kind: Split::LeftRight,
-            children: vec![connect(), connect(), connect()],
-            ratios: vec![100, 100, 100],
-        };
-        let area = r(62, 10);
-        let areas = split_areas(area, &Split::LeftRight, &[100, 100, 100]);
-        let sep1_x = areas[1].right(); // right edge of child[1] = second separator
-        let hit = hit_test_separator(&p, area, sep1_x, 5);
-        assert!(hit.is_some(), "should hit second LR separator");
-        assert_eq!(hit.unwrap().sep_idx, 1);
-    }
-
-    #[test]
-    fn hit_test_nested_prepends_path() {
-        // Outer LeftRight: child[0]=connect, child[1]=TopBottom(connect, connect).
-        // Clicking the TB separator inside child[1] should return path=[1].
-        let inner_area_r = r(80, 20);
-        let outer = Pane::Split {
-            kind: Split::LeftRight,
-            children: vec![
-                connect(),
-                Pane::Split {
-                    kind: Split::TopBottom,
-                    children: vec![connect(), connect()],
-                    ratios: vec![100, 100],
-                },
-            ],
-            ratios: vec![100, 100],
-        };
-        let outer_areas = split_areas(inner_area_r, &Split::LeftRight, &[100, 100]);
-        let right_area = outer_areas[1];
-        let inner_areas = split_areas(right_area, &Split::TopBottom, &[100, 100]);
-        let sep_y = inner_areas[1].y;
-        // Click in the right child's TB separator row.
-        let hit = hit_test_separator(&outer, inner_area_r, right_area.x + 2, sep_y);
-        assert!(hit.is_some(), "should hit nested TB separator");
-        let hit = hit.unwrap();
-        assert_eq!(hit.path, vec![1], "path should point to child[1]");
-        assert!(!hit.horizontal);
-        assert_eq!(hit.sep_idx, 0);
-    }
-
-    #[test]
-    fn hit_test_split_area_is_containing_node_area() {
-        // The split_area in the returned hit should match the area passed to the hit-testing Split.
-        let p = hsplit();
-        let area = r(21, 10);
-        let areas = split_areas(area, &Split::LeftRight, &[100, 100]);
-        let sep_x = areas[0].right();
-        let hit = hit_test_separator(&p, area, sep_x, 5).unwrap();
-        assert_eq!(hit.split_area, area);
-    }
-
-    // ---- split_at_path_mut --------------------------------------------------
-
-    #[test]
-    fn split_at_path_empty_returns_root() {
-        let mut p = hsplit();
-        let result = split_at_path_mut(&mut p, &[]);
-        assert!(result.is_some());
-        assert!(matches!(
-            result.unwrap(),
-            Pane::Split {
-                kind: Split::LeftRight,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn split_at_path_single_step_child0() {
-        // path [0] navigates into child[0] — which is a leaf, so returns Some(leaf)
-        let mut p = Pane::Split {
-            kind: Split::LeftRight,
-            children: vec![vsplit(), connect()],
-            ratios: vec![100, 100],
-        };
-        let result = split_at_path_mut(&mut p, &[0]);
-        assert!(result.is_some());
-        assert!(matches!(
-            result.unwrap(),
-            Pane::Split {
-                kind: Split::TopBottom,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn split_at_path_single_step_child1() {
-        let mut p = Pane::Split {
-            kind: Split::LeftRight,
-            children: vec![connect(), vsplit()],
-            ratios: vec![100, 100],
-        };
-        let result = split_at_path_mut(&mut p, &[1]);
-        assert!(result.is_some());
-        assert!(matches!(
-            result.unwrap(),
-            Pane::Split {
-                kind: Split::TopBottom,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn split_at_path_nested_two_levels() {
-        // root=LR(connect, TB(connect, LR(connect, connect)))
-        // path [1, 1] should reach the inner LR split
-        let mut p = Pane::Split {
-            kind: Split::LeftRight,
-            children: vec![
-                connect(),
-                Pane::Split {
-                    kind: Split::TopBottom,
-                    children: vec![
-                        connect(),
-                        Pane::Split {
-                            kind: Split::LeftRight,
-                            children: vec![connect(), connect()],
-                            ratios: vec![100, 100],
-                        },
-                    ],
-                    ratios: vec![100, 100],
-                },
-            ],
-            ratios: vec![100, 100],
-        };
-        let result = split_at_path_mut(&mut p, &[1, 1]);
-        assert!(result.is_some());
-        assert!(matches!(
-            result.unwrap(),
-            Pane::Split {
-                kind: Split::LeftRight,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn split_at_path_out_of_bounds_returns_none() {
-        let mut p = hsplit(); // 2 children
-        assert!(split_at_path_mut(&mut p, &[5]).is_none());
-    }
-
-    #[test]
-    fn split_at_path_into_leaf_returns_none() {
-        // path [0, 0] into an LR split whose children are leaves — can't descend further
-        let mut p = hsplit();
-        assert!(split_at_path_mut(&mut p, &[0, 0]).is_none());
-    }
-
-    #[test]
-    fn split_at_path_mut_modifies_ratios() {
-        // Verify we can actually mutate the node returned by split_at_path_mut.
-        let mut p = hsplit();
-        if let Some(Pane::Split { ratios, .. }) = split_at_path_mut(&mut p, &[]) {
-            ratios[0] = 200;
-        }
-        if let Pane::Split { ratios, .. } = &p {
-            assert_eq!(
-                ratios[0], 200,
-                "mutation through split_at_path_mut should be visible"
-            );
-        }
-    }
-
-    // ---- find_directional_neighbor -----------------------------------------
-
-    fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
-        Rect {
-            x,
-            y,
-            width: w,
-            height: h,
-        }
-    }
-
-    #[test]
-    fn directional_nav_lr_right() {
-        // Two side-by-side panes.
-        let areas = vec![rect(0, 0, 49, 20), rect(50, 0, 50, 20)];
-        assert_eq!(
-            find_directional_neighbor(&areas, 0, FocusDir::Right),
-            Some(1)
-        );
-        assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Right), None);
-    }
-
-    #[test]
-    fn directional_nav_lr_left() {
-        let areas = vec![rect(0, 0, 49, 20), rect(50, 0, 50, 20)];
-        assert_eq!(
-            find_directional_neighbor(&areas, 1, FocusDir::Left),
-            Some(0)
-        );
-        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Left), None);
-    }
-
-    #[test]
-    fn directional_nav_tb_down() {
-        // Two stacked panes.
-        let areas = vec![rect(0, 0, 100, 10), rect(0, 10, 100, 10)];
-        assert_eq!(
-            find_directional_neighbor(&areas, 0, FocusDir::Down),
-            Some(1)
-        );
-        assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Down), None);
-    }
-
-    #[test]
-    fn directional_nav_tb_up() {
-        let areas = vec![rect(0, 0, 100, 10), rect(0, 10, 100, 10)];
-        assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Up), Some(0));
-        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Up), None);
-    }
-
-    #[test]
-    fn directional_nav_single_pane_returns_none() {
-        let areas = vec![rect(0, 0, 100, 40)];
-        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Left), None);
-        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Right), None);
-        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Up), None);
-        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Down), None);
-    }
-
-    #[test]
-    fn directional_nav_l_shape_from_top_right_down() {
-        // Pane 0: left half. Pane 1: top-right. Pane 2: bottom-right.
-        let areas = vec![
-            rect(0, 0, 49, 40),   // 0: left half (full height)
-            rect(50, 0, 50, 20),  // 1: top-right
-            rect(50, 20, 50, 20), // 2: bottom-right
-        ];
-        assert_eq!(
-            find_directional_neighbor(&areas, 1, FocusDir::Down),
-            Some(2)
-        );
-        assert_eq!(
-            find_directional_neighbor(&areas, 1, FocusDir::Left),
-            Some(0)
-        );
-        assert_eq!(find_directional_neighbor(&areas, 1, FocusDir::Up), None);
-    }
-
-    #[test]
-    fn directional_nav_diagonal_no_overlap_not_reachable() {
-        // Pane 0 is top-left, pane 1 is bottom-right — no overlap on either axis.
-        let areas = vec![rect(0, 0, 50, 20), rect(51, 21, 50, 20)];
-        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Right), None);
-        assert_eq!(find_directional_neighbor(&areas, 0, FocusDir::Down), None);
-    }
-
-    #[test]
-    fn directional_nav_picks_closest_of_two_candidates() {
-        // Pane 0 is on the left. Panes 1 and 2 are both to the right but at
-        // different distances. The closer one (pane 1, gap=1) should win over pane 2 (gap=10).
-        let areas = vec![
-            rect(0, 0, 49, 20),  // 0: source
-            rect(50, 0, 20, 20), // 1: close right (gap=1)
-            rect(60, 0, 20, 20), // 2: further right (gap=11)
-        ];
-        assert_eq!(
-            find_directional_neighbor(&areas, 0, FocusDir::Right),
-            Some(1)
-        );
-    }
 }
