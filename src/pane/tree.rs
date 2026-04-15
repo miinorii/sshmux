@@ -1,6 +1,6 @@
 use ratatui::layout::Rect;
 
-use super::{split_areas, FocusDir, Pane, Split};
+use super::{FocusDir, Pane, Split, split_areas};
 
 // ---------------------------------------------------------------------------
 // Separator hit-testing and resize support
@@ -598,11 +598,7 @@ mod tests {
 
     #[test]
     fn directional_nav_picks_closest_of_two_candidates() {
-        let areas = vec![
-            rect(0, 0, 49, 20),
-            rect(50, 0, 20, 20),
-            rect(60, 0, 20, 20),
-        ];
+        let areas = vec![rect(0, 0, 49, 20), rect(50, 0, 20, 20), rect(60, 0, 20, 20)];
         assert_eq!(
             find_directional_neighbor(&areas, 0, FocusDir::Right),
             Some(1)

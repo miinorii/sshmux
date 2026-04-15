@@ -7,11 +7,11 @@ use crate::browser::common::Browser;
 use crate::browser::{
     BrowserKeyAction, DragAction, FileBrowser, SshBrowser, SshBrowserState, handle_browser_key,
 };
+use crate::keybindings::KeyBinding;
 use crate::pane::connect::{
     ConnectOverlay, ConnectPane, KeyEditorState, editor_binding_index, editor_nav_down,
     editor_nav_up,
 };
-use crate::keybindings::KeyBinding;
 use crate::pane::{
     FocusDir, Pane, Split, hit_test_separator, pane_border_inner, pane_inner, split_areas,
     split_at_path_mut,
@@ -1138,9 +1138,9 @@ pub fn handle_paste(app: &mut App, text: &str) {
 mod tests {
     use super::*;
     use crate::app::ContextMenu;
-    use crate::pane::connect::{ConnectOverlay, ConnectPane};
     use crate::keybindings::KeyBindings;
     use crate::pane::Pane;
+    use crate::pane::connect::{ConnectOverlay, ConnectPane};
     use crate::ssh_config::SshHost;
     use ratatui::layout::Rect;
 

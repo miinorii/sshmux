@@ -6,8 +6,8 @@ use ratatui::{
     widgets::{Block, Borders, List, ListState, Paragraph, StatefulWidget, Widget},
 };
 
-use crate::keybindings::KeyBindings;
 use super::render_pane_border;
+use crate::keybindings::KeyBindings;
 use crate::ssh_config::SshHost;
 
 // ---------------------------------------------------------------------------

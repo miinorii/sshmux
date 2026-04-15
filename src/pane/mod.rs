@@ -15,10 +15,10 @@ use ratatui::{
 
 use crate::browser::common::Browser;
 use crate::browser::{FileBrowser, SshBrowser};
-use connect::ConnectPane;
 use crate::keybindings::KeyBindings;
 use crate::ssh_config::SshHost;
 use crate::terminal::EmbeddedTerminal;
+use connect::ConnectPane;
 
 pub use tree::{
     SeparatorHit, find_directional_neighbor, hit_test_separator, remove_leaf, split_at_path_mut,
@@ -330,8 +330,7 @@ impl Pane {
                                 } else {
                                     ""
                                 };
-                                let top_connects =
-                                    matches!(top_sym, "│" | "┬" | "├" | "┤" | "┼");
+                                let top_connects = matches!(top_sym, "│" | "┬" | "├" | "┤" | "┼");
                                 let junction = if top_connects { '┼' } else { '┬' };
                                 buf[(x, area.y)].set_char(junction).set_style(sep_style);
                             }
@@ -344,9 +343,7 @@ impl Pane {
                         }
                     }
                     Split::TopBottom => {
-                        for (i, (child, a)) in
-                            children.iter_mut().zip(areas.iter()).enumerate()
-                        {
+                        for (i, (child, a)) in children.iter_mut().zip(areas.iter()).enumerate() {
                             child.render(*a, buf, ctx);
                             if i > 0 {
                                 let ty = a.y;
@@ -973,5 +970,4 @@ mod tests {
         assert!(a[1].width >= 1);
         assert_eq!(a[0].width + a[1].width, 59);
     }
-
 }
