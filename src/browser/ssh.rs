@@ -125,7 +125,7 @@ impl SshBrowser {
                         } else {
                             debug!("SCP auto-sending saved password");
                             scp.send_str(&format!("{}\r\n", pw));
-                            if let Some(ref t) = self.core.last_transfer {
+                            if let Some(ref t) = self.core.transfer.last {
                                 let verb = match t.direction {
                                     TransferDirection::Download => "Downloading",
                                     TransferDirection::Upload => "Uploading",
@@ -148,7 +148,7 @@ impl SshBrowser {
 
                 let pct = scrape_transfer_progress(&lines);
 
-                if let Some(ref mut t) = self.core.last_transfer
+                if let Some(ref mut t) = self.core.transfer.last
                     && let Some(pct) = pct
                     && pct != t.progress
                 {
@@ -158,7 +158,7 @@ impl SshBrowser {
 
                 if exited {
                     info!("SCP transfer done (process exited)");
-                    let completion_msg = self.core.last_transfer.as_mut().map(|t| {
+                    let completion_msg = self.core.transfer.last.as_mut().map(|t| {
                         t.done = true;
                         t.progress = 100;
                         let verb = match t.direction {
@@ -172,17 +172,17 @@ impl SshBrowser {
                         self.core.status_color = Color::Green;
                     }
                     self.scp_pty = None;
-                    self.core.batch_done += 1;
-                    self.core.local_entries = read_local_dir(&self.core.local_path);
+                    self.core.transfer.batch_done += 1;
+                    self.core.local.entries = read_local_dir(&self.core.local.path);
                     info!("SCP transfer complete");
                     self.ssh.drain_raw();
                     self.core.prev_raw_len = 0;
                     self.core.prompt_stable = 0;
                     // Batch complete — reset counters before the final ls refresh.
-                    if self.core.pending_transfers.is_empty() {
-                        self.core.transfer_start = None;
-                        self.core.batch_done = 0;
-                        self.core.batch_total = 0;
+                    if self.core.transfer.pending.is_empty() {
+                        self.core.transfer.start = None;
+                        self.core.transfer.batch_done = 0;
+                        self.core.transfer.batch_total = 0;
                     }
                     self.send_ls();
                     self.ssh_state = SshBrowserState::WaitingLs;
@@ -192,11 +192,11 @@ impl SshBrowser {
                 // scp_pty is None while state is Transferring — recover.
                 warn!("SCP transfer state with no process, recovering");
                 self.core.drop_confirm = None;
-                self.core.pending_transfers.clear();
-                self.core.pending_deletes.clear();
-                self.core.batch_done = 0;
-                self.core.batch_total = 0;
-                self.core.transfer_start = None;
+                self.core.transfer.pending.clear();
+                self.core.delete.pending.clear();
+                self.core.transfer.batch_done = 0;
+                self.core.transfer.batch_total = 0;
+                self.core.transfer.start = None;
                 self.ssh_state = SshBrowserState::Idle;
                 self.core.status_msg = "Transfer failed".to_string();
                 self.core.status_color = Color::Red;
@@ -324,9 +324,9 @@ impl SshBrowser {
                 if prompt_ready {
                     self.core.prompt_stable = 0;
                     let lines = self.ssh.raw_lines();
-                    self.core.remote_path =
-                        parse_pwd(&lines).unwrap_or_else(|| self.core.remote_path.clone());
-                    debug!("SSH pwd => {}, sending ls -la", self.core.remote_path);
+                    self.core.remote.path =
+                        parse_pwd(&lines).unwrap_or_else(|| self.core.remote.path.clone());
+                    debug!("SSH pwd => {}, sending ls -la", self.core.remote.path);
                     self.ssh.drain_raw();
                     self.core.prev_raw_len = 0;
                     self.send_ls();
@@ -339,15 +339,15 @@ impl SshBrowser {
                     self.core.prompt_stable = 0;
                     let lines = self.ssh.raw_lines();
                     if let Some(p) = parse_pwd(&lines) {
-                        self.core.remote_path = p;
+                        self.core.remote.path = p;
                     }
                     let parsed = parse_ls(&lines);
                     debug!("SSH ls done: {} entries", parsed.len());
-                    self.core.remote_entries = parsed;
+                    self.core.remote.entries = parsed;
                     self.core.raw_snapshot.clear();
-                    let max = self.core.remote_entries.len().saturating_sub(1);
-                    let cur = self.core.remote_sel.selected().unwrap_or(0);
-                    self.core.remote_sel.select(Some(cur.min(max)));
+                    let max = self.core.remote.entries.len().saturating_sub(1);
+                    let cur = self.core.remote.sel.selected().unwrap_or(0);
+                    self.core.remote.sel.select(Some(cur.min(max)));
                     self.ssh.drain_raw();
                     self.core.prev_raw_len = 0;
                     self.ssh_state = SshBrowserState::Idle;
@@ -357,7 +357,7 @@ impl SshBrowser {
                     }
                     self.core.needs_redraw = true;
                     // Chain next queued transfer if any
-                    if !self.core.pending_transfers.is_empty() {
+                    if !self.core.transfer.pending.is_empty() {
                         match self.core.last_transfer_direction() {
                             TransferDirection::Upload => self.upload(),
                             TransferDirection::Download => self.download(),
@@ -387,12 +387,12 @@ impl SshBrowser {
                             || t.contains("not empty")
                             || t.contains("directory not empty")
                     });
-                    if let Some(name) = self.core.pending_delete_name.take() {
+                    if let Some(name) = self.core.delete.pending_name.take() {
                         if has_error {
                             warn!("SSH delete failed: {}", name);
                             self.core.status_msg = format!("Delete failed: {}", name);
                             self.core.status_color = Color::Red;
-                            self.core.pending_deletes.clear();
+                            self.core.delete.pending.clear();
                         } else {
                             self.core.status_msg = format!("Deleted remote: {}", name);
                             self.core.status_color = Color::Green;
@@ -457,19 +457,19 @@ impl SshBrowser {
                 if self.ssh_state != SshBrowserState::Idle {
                     return;
                 }
-                if let Some(i) = self.core.remote_sel.selected()
-                    && let Some(entry) = self.core.remote_entries.get(i).cloned()
+                if let Some(i) = self.core.remote.sel.selected()
+                    && let Some(entry) = self.core.remote.entries.get(i).cloned()
                 {
                     if entry.is_dir {
                         self.core.apply_cd(&entry.name);
-                        self.core.status_msg = format!("Remote: {}", self.core.remote_path);
+                        self.core.status_msg = format!("Remote: {}", self.core.remote.path);
                         self.core.status_color = Color::Yellow;
                         self.ssh.drain_raw();
                         self.core.prev_raw_len = 0;
                         self.core.prompt_stable = 0;
                         self.send_ls();
                         self.ssh_state = SshBrowserState::WaitingLs;
-                        debug!("SSH ls {}", self.core.remote_path);
+                        debug!("SSH ls {}", self.core.remote.path);
                     } else {
                         self.download();
                     }
@@ -486,20 +486,20 @@ impl SshBrowser {
                     return;
                 }
                 self.core.apply_cd("..");
-                self.core.status_msg = format!("Remote: {}", self.core.remote_path);
+                self.core.status_msg = format!("Remote: {}", self.core.remote.path);
                 self.core.status_color = Color::Yellow;
                 self.ssh.drain_raw();
                 self.core.prev_raw_len = 0;
                 self.core.prompt_stable = 0;
                 self.send_ls();
                 self.ssh_state = SshBrowserState::WaitingLs;
-                debug!("SSH ls {}", self.core.remote_path);
+                debug!("SSH ls {}", self.core.remote.path);
             }
         }
     }
 
     fn send_ls(&mut self) {
-        let cmd = format!("ls -la {}\r\n", shell_quote(&self.core.remote_path));
+        let cmd = format!("ls -la {}\r\n", shell_quote(&self.core.remote.path));
         self.core.cmd_start = Some(Instant::now());
         self.ssh.send_str(&cmd);
     }
@@ -512,8 +512,8 @@ impl SshBrowser {
         }
         let (remote_file, name, is_dir) = if let Some(t) = self.core.pop_pending() {
             (t.path, t.name, t.is_dir)
-        } else if let Some(i) = self.core.remote_sel.selected() {
-            let Some(entry) = self.core.remote_entries.get(i) else {
+        } else if let Some(i) = self.core.remote.sel.selected() {
+            let Some(entry) = self.core.remote.entries.get(i) else {
                 return;
             };
             if entry.name == ".." {
@@ -521,14 +521,14 @@ impl SshBrowser {
             }
             let path = format!(
                 "{}/{}",
-                self.core.remote_path.trim_end_matches('/'),
+                self.core.remote.path.trim_end_matches('/'),
                 entry.name
             );
             (path, entry.name.clone(), entry.is_dir)
         } else {
             return;
         };
-        let local_dest = self.core.local_path.to_string_lossy().replace('\\', "/");
+        let local_dest = self.core.local.path.to_string_lossy().replace('\\', "/");
         let mut cmd = CommandBuilder::new("scp");
         cmd.arg("-O");
         if is_dir {
@@ -545,11 +545,11 @@ impl SshBrowser {
         match EmbeddedTerminal::new(24, 80, cmd, true) {
             Ok(term) => {
                 self.scp_pty = Some(Box::new(term));
-                if self.core.batch_done == 0 {
-                    self.core.batch_total = self.core.pending_transfers.len() + 1;
+                if self.core.transfer.batch_done == 0 {
+                    self.core.transfer.batch_total = self.core.transfer.pending.len() + 1;
                 }
-                self.core.transfer_start = Some(Instant::now());
-                self.core.last_transfer = Some(TransferStatus {
+                self.core.transfer.start = Some(Instant::now());
+                self.core.transfer.last = Some(TransferStatus {
                     filename: name.clone(),
                     direction: TransferDirection::Download,
                     is_dir,
@@ -579,8 +579,8 @@ impl SshBrowser {
         }
         let (local_str, name, is_dir) = if let Some(t) = self.core.pop_pending() {
             (t.path, t.name, t.is_dir)
-        } else if let Some(i) = self.core.local_sel.selected() {
-            let Some(entry) = self.core.local_entries.get(i) else {
+        } else if let Some(i) = self.core.local.sel.selected() {
+            let Some(entry) = self.core.local.entries.get(i) else {
                 return;
             };
             if entry.name == ".." {
@@ -588,7 +588,8 @@ impl SshBrowser {
             }
             let path = self
                 .core
-                .local_path
+                .local
+                .path
                 .join(&entry.name)
                 .to_string_lossy()
                 .replace('\\', "/");
@@ -606,24 +607,24 @@ impl SshBrowser {
         cmd.arg(format!(
             "{}:{}",
             self.core.host,
-            self.core.remote_path.trim_end_matches('/')
+            self.core.remote.path.trim_end_matches('/')
         ));
         cmd.env("TERM", "xterm");
         info!(
             "SCP upload: {} -> {}:{}",
             local_str,
             self.core.host,
-            self.core.remote_path.trim_end_matches('/')
+            self.core.remote.path.trim_end_matches('/')
         );
 
         match EmbeddedTerminal::new(24, 80, cmd, true) {
             Ok(term) => {
                 self.scp_pty = Some(Box::new(term));
-                if self.core.batch_done == 0 {
-                    self.core.batch_total = self.core.pending_transfers.len() + 1;
+                if self.core.transfer.batch_done == 0 {
+                    self.core.transfer.batch_total = self.core.transfer.pending.len() + 1;
                 }
-                self.core.transfer_start = Some(Instant::now());
-                self.core.last_transfer = Some(TransferStatus {
+                self.core.transfer.start = Some(Instant::now());
+                self.core.transfer.last = Some(TransferStatus {
                     filename: name.clone(),
                     direction: TransferDirection::Upload,
                     is_dir,
@@ -668,7 +669,7 @@ impl SshBrowser {
         } else if let Some(ref mut scp) = self.scp_pty {
             debug!("SCP sending user password ({} chars)", pw.len());
             scp.send_str(&format!("{}\r\n", pw));
-            if let Some(ref t) = self.core.last_transfer {
+            if let Some(ref t) = self.core.transfer.last {
                 let verb = match t.direction {
                     TransferDirection::Download => "Downloading",
                     TransferDirection::Upload => "Uploading",
@@ -709,7 +710,7 @@ impl SshBrowser {
         if self.core.local_confirm_delete() {
             return;
         }
-        if let Some(target) = self.core.confirm_delete.take() {
+        if let Some(target) = self.core.delete.confirm.take() {
             if target.location != DeleteLocation::Remote {
                 return;
             }
@@ -727,7 +728,7 @@ impl SshBrowser {
             self.ssh_state = SshBrowserState::WaitingDelete;
             self.core.status_msg = format!("Deleting {}...", target.path);
             self.core.status_color = Color::Yellow;
-            self.core.pending_delete_name = Some(target.path);
+            self.core.delete.pending_name = Some(target.path);
             self.ssh.drain_raw();
             self.core.prev_raw_len = 0;
             self.core.prompt_stable = 0;
@@ -761,7 +762,7 @@ impl SshBrowser {
         }
         self.core.render_upload_confirm(area, buf);
         self.core
-            .render_transfer_progress(area, buf, self.core.transfer_start.is_some());
+            .render_transfer_progress(area, buf, self.core.transfer.start.is_some());
         self.core.render_drag_arrow(area, buf, leaf_count);
         self.core.render_drag_ghost(buf);
     }
@@ -794,7 +795,7 @@ impl SshBrowser {
     }
 
     fn progress_suffix(&self) -> String {
-        if let Some(ref t) = self.core.last_transfer {
+        if let Some(ref t) = self.core.transfer.last {
             if !t.done {
                 format!(" {}%", t.progress)
             } else {
@@ -1038,7 +1039,7 @@ mod tests {
         sb.ssh_state = SshBrowserState::Transferring;
         sb.waiting_password = true;
         sb.password_buf = "scppass".to_string();
-        sb.core.last_transfer = Some(TransferStatus {
+        sb.core.transfer.last = Some(TransferStatus {
             filename: "file.txt".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,
@@ -1095,7 +1096,7 @@ mod tests {
         tick_until_stable(&mut sb);
 
         assert_eq!(sb.ssh_state, SshBrowserState::WaitingLs);
-        assert_eq!(sb.core.remote_path, "/home/testuser");
+        assert_eq!(sb.core.remote.path, "/home/testuser");
         let sent = h.sent();
         assert!(
             sent.iter().any(|s| s.starts_with("ls ")),
@@ -1115,7 +1116,7 @@ mod tests {
         tick_until_stable(&mut sb);
 
         assert_eq!(sb.ssh_state, SshBrowserState::Idle);
-        assert!(sb.core.remote_entries.len() >= 2);
+        assert!(sb.core.remote.entries.len() >= 2);
         assert!(sb.core.raw_snapshot.is_empty());
     }
 
@@ -1123,7 +1124,7 @@ mod tests {
     fn waiting_ls_chains_pending_delete() {
         let (mut sb, h) = make_ssh();
         sb.ssh_state = SshBrowserState::WaitingLs;
-        sb.core.pending_deletes.push(DeleteTarget {
+        sb.core.delete.pending.push(DeleteTarget {
             location: DeleteLocation::Remote,
             kind: DeleteKind::File,
             path: "/remote/todelete.txt".to_string(),
@@ -1147,7 +1148,7 @@ mod tests {
     fn transferring_completes_on_scp_exit() {
         let (mut sb, h) = make_ssh();
         sb.ssh_state = SshBrowserState::Transferring;
-        sb.core.last_transfer = Some(TransferStatus {
+        sb.core.transfer.last = Some(TransferStatus {
             filename: "test.txt".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,
@@ -1164,8 +1165,8 @@ mod tests {
 
         assert_eq!(sb.ssh_state, SshBrowserState::WaitingLs);
         assert!(sb.scp_pty.is_none(), "scp_pty should be dropped after exit");
-        assert!(sb.core.last_transfer.as_ref().unwrap().done);
-        assert_eq!(sb.core.last_transfer.as_ref().unwrap().progress, 100);
+        assert!(sb.core.transfer.last.as_ref().unwrap().done);
+        assert_eq!(sb.core.transfer.last.as_ref().unwrap().progress, 100);
         let sent = h.sent();
         assert!(
             sent.iter().any(|s| s.starts_with("ls ")),
@@ -1178,7 +1179,7 @@ mod tests {
     fn transferring_scrapes_scp_progress() {
         let (mut sb, _h) = make_ssh();
         sb.ssh_state = SshBrowserState::Transferring;
-        sb.core.last_transfer = Some(TransferStatus {
+        sb.core.transfer.last = Some(TransferStatus {
             filename: "big.bin".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,
@@ -1192,14 +1193,14 @@ mod tests {
         sb.tick();
 
         assert_eq!(sb.ssh_state, SshBrowserState::Transferring);
-        assert_eq!(sb.core.last_transfer.as_ref().unwrap().progress, 50);
+        assert_eq!(sb.core.transfer.last.as_ref().unwrap().progress, 50);
     }
 
     #[test]
     fn transferring_detects_scp_password_prompt() {
         let (mut sb, _h) = make_ssh();
         sb.ssh_state = SshBrowserState::Transferring;
-        sb.core.last_transfer = Some(TransferStatus {
+        sb.core.transfer.last = Some(TransferStatus {
             filename: "file.txt".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,
@@ -1221,7 +1222,7 @@ mod tests {
         let (mut sb, _h) = make_ssh();
         sb.ssh_state = SshBrowserState::Transferring;
         sb.saved_password = Some("secret".to_string());
-        sb.core.last_transfer = Some(TransferStatus {
+        sb.core.transfer.last = Some(TransferStatus {
             filename: "file.txt".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,
@@ -1249,7 +1250,7 @@ mod tests {
         sb.ssh_state = SshBrowserState::Transferring;
         sb.saved_password = Some("wrong".to_string());
         sb.password_prompts_seen = 1;
-        sb.core.last_transfer = Some(TransferStatus {
+        sb.core.transfer.last = Some(TransferStatus {
             filename: "file.txt".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,
@@ -1300,10 +1301,10 @@ mod tests {
     fn transferring_resets_batch_on_last_transfer() {
         let (mut sb, _h) = make_ssh();
         sb.ssh_state = SshBrowserState::Transferring;
-        sb.core.batch_done = 0;
-        sb.core.batch_total = 1;
-        sb.core.transfer_start = Some(Instant::now());
-        sb.core.last_transfer = Some(TransferStatus {
+        sb.core.transfer.batch_done = 0;
+        sb.core.transfer.batch_total = 1;
+        sb.core.transfer.start = Some(Instant::now());
+        sb.core.transfer.last = Some(TransferStatus {
             filename: "only.txt".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,
@@ -1317,11 +1318,11 @@ mod tests {
         sb.tick();
 
         assert_eq!(
-            sb.core.batch_done, 0,
+            sb.core.transfer.batch_done, 0,
             "batch should reset after last transfer"
         );
-        assert_eq!(sb.core.batch_total, 0);
-        assert!(sb.core.transfer_start.is_none());
+        assert_eq!(sb.core.transfer.batch_total, 0);
+        assert!(sb.core.transfer.start.is_none());
     }
 
     // ---- WaitingDelete state ----
@@ -1330,7 +1331,7 @@ mod tests {
     fn waiting_delete_success_sends_ls() {
         let (mut sb, h) = make_ssh();
         sb.ssh_state = SshBrowserState::WaitingDelete;
-        sb.core.pending_delete_name = Some("removed.txt".to_string());
+        sb.core.delete.pending_name = Some("removed.txt".to_string());
         h.clear_sent();
 
         h.feed(b"SSHMUX> ");
@@ -1347,7 +1348,7 @@ mod tests {
     fn waiting_delete_failure_shows_error() {
         let (mut sb, h) = make_ssh();
         sb.ssh_state = SshBrowserState::WaitingDelete;
-        sb.core.pending_delete_name = Some("protected.txt".to_string());
+        sb.core.delete.pending_name = Some("protected.txt".to_string());
 
         // First line is the command echo, error is on subsequent lines
         h.feed(
@@ -1364,8 +1365,8 @@ mod tests {
     fn waiting_delete_chains_next_delete() {
         let (mut sb, h) = make_ssh();
         sb.ssh_state = SshBrowserState::WaitingDelete;
-        sb.core.pending_delete_name = Some("first.txt".to_string());
-        sb.core.pending_deletes.push(DeleteTarget {
+        sb.core.delete.pending_name = Some("first.txt".to_string());
+        sb.core.delete.pending.push(DeleteTarget {
             location: DeleteLocation::Remote,
             kind: DeleteKind::File,
             path: "/remote/second.txt".to_string(),
@@ -1376,7 +1377,7 @@ mod tests {
         tick_until_stable(&mut sb);
 
         assert_eq!(sb.ssh_state, SshBrowserState::WaitingDelete);
-        assert!(sb.core.pending_deletes.is_empty());
+        assert!(sb.core.delete.pending.is_empty());
         let sent = h.sent();
         assert!(
             sent.iter().any(|s| s.starts_with("rm ")),
@@ -1389,7 +1390,7 @@ mod tests {
     fn waiting_delete_uses_rm_rf_for_dirs() {
         let (mut sb, h) = make_ssh();
         sb.ssh_state = SshBrowserState::Idle;
-        sb.core.confirm_delete = Some(DeleteTarget {
+        sb.core.delete.confirm = Some(DeleteTarget {
             location: DeleteLocation::Remote,
             kind: DeleteKind::Dir,
             path: "/remote/somedir".to_string(),
@@ -1411,7 +1412,7 @@ mod tests {
     fn waiting_delete_uses_rm_for_files() {
         let (mut sb, h) = make_ssh();
         sb.ssh_state = SshBrowserState::Idle;
-        sb.core.confirm_delete = Some(DeleteTarget {
+        sb.core.delete.confirm = Some(DeleteTarget {
             location: DeleteLocation::Remote,
             kind: DeleteKind::File,
             path: "/remote/somefile.txt".to_string(),
@@ -1441,22 +1442,22 @@ mod tests {
     fn enter_on_remote_dir_sends_ls() {
         let (mut sb, h) = make_ssh();
         sb.ssh_state = SshBrowserState::Idle;
-        sb.core.remote_path = "/home".to_string();
+        sb.core.remote.path = "/home".to_string();
         sb.core.focus = BrowserFocus::Remote;
-        sb.core.remote_entries.push(FsEntry {
+        sb.core.remote.entries.push(FsEntry {
             name: "subdir".to_string(),
             is_dir: true,
             size: "4096".to_string(),
             modified: "Jan 1 12:00".to_string(),
             perms: "drwxr-xr-x".to_string(),
         });
-        sb.core.remote_sel.select(Some(0));
+        sb.core.remote.sel.select(Some(0));
         h.clear_sent();
 
         sb.enter();
 
         assert_eq!(sb.ssh_state, SshBrowserState::WaitingLs);
-        assert_eq!(sb.core.remote_path, "/home/subdir");
+        assert_eq!(sb.core.remote.path, "/home/subdir");
         let sent = h.sent();
         assert!(sent.iter().any(|s| s.starts_with("ls ")));
     }
@@ -1465,14 +1466,14 @@ mod tests {
     fn go_up_remote_sends_ls() {
         let (mut sb, h) = make_ssh();
         sb.ssh_state = SshBrowserState::Idle;
-        sb.core.remote_path = "/home/user".to_string();
+        sb.core.remote.path = "/home/user".to_string();
         sb.core.focus = BrowserFocus::Remote;
         h.clear_sent();
 
         sb.go_up();
 
         assert_eq!(sb.ssh_state, SshBrowserState::WaitingLs);
-        assert_eq!(sb.core.remote_path, "/home");
+        assert_eq!(sb.core.remote.path, "/home");
         let sent = h.sent();
         assert!(sent.iter().any(|s| s.starts_with("ls ")));
     }
@@ -1482,14 +1483,14 @@ mod tests {
         let (mut sb, h) = make_ssh();
         sb.ssh_state = SshBrowserState::WaitingLs;
         sb.core.focus = BrowserFocus::Remote;
-        sb.core.remote_entries.push(FsEntry {
+        sb.core.remote.entries.push(FsEntry {
             name: "dir".to_string(),
             is_dir: true,
             size: "4096".to_string(),
             modified: "Jan 1 12:00".to_string(),
             perms: "drwxr-xr-x".to_string(),
         });
-        sb.core.remote_sel.select(Some(0));
+        sb.core.remote.sel.select(Some(0));
         h.clear_sent();
 
         sb.enter();
@@ -1542,7 +1543,7 @@ mod tests {
     #[test]
     fn progress_suffix_in_progress() {
         let (mut sb, _h) = make_ssh();
-        sb.core.last_transfer = Some(TransferStatus {
+        sb.core.transfer.last = Some(TransferStatus {
             filename: "f.txt".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,
@@ -1556,7 +1557,7 @@ mod tests {
     #[test]
     fn progress_suffix_done() {
         let (mut sb, _h) = make_ssh();
-        sb.core.last_transfer = Some(TransferStatus {
+        sb.core.transfer.last = Some(TransferStatus {
             filename: "f.txt".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,

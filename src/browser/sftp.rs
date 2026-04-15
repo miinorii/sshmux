@@ -92,11 +92,11 @@ impl FileBrowser {
                 self.sftp_state
             );
             self.core.drop_confirm = None;
-            self.core.pending_transfers.clear();
-            self.core.pending_deletes.clear();
-            self.core.batch_done = 0;
-            self.core.batch_total = 0;
-            self.core.transfer_start = None;
+            self.core.transfer.pending.clear();
+            self.core.delete.pending.clear();
+            self.core.transfer.batch_done = 0;
+            self.core.transfer.batch_total = 0;
+            self.core.transfer.start = None;
             self.sftp_state = SftpState::Idle;
             self.core.status_msg = "SFTP connection lost".to_string();
             self.core.status_color = Color::Red;
@@ -139,9 +139,9 @@ impl FileBrowser {
                 if prompt_ready {
                     self.core.prompt_stable = 0;
                     let lines = self.sftp.raw_lines();
-                    self.core.remote_path =
-                        parse_pwd(&lines).unwrap_or_else(|| self.core.remote_path.clone());
-                    debug!("SFTP pwd => {}, sending ls -la", self.core.remote_path);
+                    self.core.remote.path =
+                        parse_pwd(&lines).unwrap_or_else(|| self.core.remote.path.clone());
+                    debug!("SFTP pwd => {}, sending ls -la", self.core.remote.path);
                     self.sftp.drain_raw();
                     self.core.prev_raw_len = 0;
                     self.send_ls();
@@ -154,15 +154,15 @@ impl FileBrowser {
                     self.core.prompt_stable = 0;
                     let lines = self.sftp.raw_lines();
                     if let Some(p) = parse_pwd(&lines) {
-                        self.core.remote_path = p;
+                        self.core.remote.path = p;
                     }
                     let parsed = parse_ls(&lines);
                     debug!("SFTP ls done: {} entries", parsed.len());
-                    self.core.remote_entries = parsed;
+                    self.core.remote.entries = parsed;
                     self.core.raw_snapshot.clear();
-                    let max = self.core.remote_entries.len().saturating_sub(1);
-                    let cur = self.core.remote_sel.selected().unwrap_or(0);
-                    self.core.remote_sel.select(Some(cur.min(max)));
+                    let max = self.core.remote.entries.len().saturating_sub(1);
+                    let cur = self.core.remote.sel.selected().unwrap_or(0);
+                    self.core.remote.sel.select(Some(cur.min(max)));
                     self.sftp.drain_raw();
                     self.core.prev_raw_len = 0;
                     self.sftp_state = SftpState::Idle;
@@ -174,10 +174,10 @@ impl FileBrowser {
                     // Chain next queued transfer if any
                     debug!(
                         "SFTP WaitingLs done: pending_transfers={}, pending_deletes={}",
-                        self.core.pending_transfers.len(),
-                        self.core.pending_deletes.len(),
+                        self.core.transfer.pending.len(),
+                        self.core.delete.pending.len(),
                     );
-                    if !self.core.pending_transfers.is_empty() {
+                    if !self.core.transfer.pending.is_empty() {
                         debug!(
                             "SFTP chaining next transfer, direction={:?}",
                             self.core.last_transfer_direction()
@@ -194,7 +194,7 @@ impl FileBrowser {
             SftpState::Transferring => {
                 if prompt_ready {
                     self.core.prompt_stable = 0;
-                    let completion_msg = self.core.last_transfer.as_mut().map(|t| {
+                    let completion_msg = self.core.transfer.last.as_mut().map(|t| {
                         t.done = true;
                         t.progress = 100;
                         let verb = match t.direction {
@@ -207,18 +207,18 @@ impl FileBrowser {
                         self.core.status_msg = msg;
                         self.core.status_color = Color::Green;
                     }
-                    self.core.batch_done += 1;
-                    self.core.local_entries = read_local_dir(&self.core.local_path);
+                    self.core.transfer.batch_done += 1;
+                    self.core.local.entries = read_local_dir(&self.core.local.path);
                     info!(
                         "SFTP transfer complete, pending_transfers={}",
-                        self.core.pending_transfers.len(),
+                        self.core.transfer.pending.len(),
                     );
                     self.sftp.drain_raw();
                     self.core.prev_raw_len = 0;
                     // Skip the ls round-trip when more transfers are queued.
                     // sftp get/put does not remove the source file, so the
                     // existing entries are still valid for chaining.
-                    if !self.core.pending_transfers.is_empty() {
+                    if !self.core.transfer.pending.is_empty() {
                         self.sftp_state = SftpState::Idle;
                         match self.core.last_transfer_direction() {
                             TransferDirection::Upload => self.upload(),
@@ -227,14 +227,14 @@ impl FileBrowser {
                         return;
                     }
                     // Batch complete — reset counters before the final ls refresh.
-                    self.core.transfer_start = None;
-                    self.core.batch_done = 0;
-                    self.core.batch_total = 0;
+                    self.core.transfer.start = None;
+                    self.core.transfer.batch_done = 0;
+                    self.core.transfer.batch_total = 0;
                     self.send_ls();
                     self.sftp_state = SftpState::WaitingLs;
                 } else {
                     let lines = self.sftp.raw_lines();
-                    if let Some(ref mut t) = self.core.last_transfer {
+                    if let Some(ref mut t) = self.core.transfer.last {
                         if t.is_dir {
                             let count = lines
                                 .iter()
@@ -262,12 +262,12 @@ impl FileBrowser {
                             || t.contains("not empty")
                             || t.contains("permission denied")
                     });
-                    if let Some(name) = self.core.pending_delete_name.take() {
+                    if let Some(name) = self.core.delete.pending_name.take() {
                         if has_error {
                             warn!("SFTP delete failed: {}", name);
                             self.core.status_msg = format!("Delete failed: {}", name);
                             self.core.status_color = Color::Red;
-                            self.core.pending_deletes.clear();
+                            self.core.delete.pending.clear();
                         } else {
                             self.core.status_msg = format!("Deleted remote: {}", name);
                             self.core.status_color = Color::Green;
@@ -312,19 +312,19 @@ impl FileBrowser {
                 if self.sftp_state != SftpState::Idle {
                     return;
                 }
-                if let Some(i) = self.core.remote_sel.selected()
-                    && let Some(entry) = self.core.remote_entries.get(i).cloned()
+                if let Some(i) = self.core.remote.sel.selected()
+                    && let Some(entry) = self.core.remote.entries.get(i).cloned()
                 {
                     if entry.is_dir {
                         self.core.apply_cd(&entry.name);
-                        self.core.status_msg = format!("Remote: {}", self.core.remote_path);
+                        self.core.status_msg = format!("Remote: {}", self.core.remote.path);
                         self.core.status_color = Color::Yellow;
                         self.sftp.drain_raw();
                         self.core.prev_raw_len = 0;
                         self.core.prompt_stable = 0;
                         self.send_ls();
                         self.sftp_state = SftpState::WaitingLs;
-                        debug!("SFTP ls {}", self.core.remote_path);
+                        debug!("SFTP ls {}", self.core.remote.path);
                     } else {
                         self.download();
                     }
@@ -341,20 +341,20 @@ impl FileBrowser {
                     return;
                 }
                 self.core.apply_cd("..");
-                self.core.status_msg = format!("Remote: {}", self.core.remote_path);
+                self.core.status_msg = format!("Remote: {}", self.core.remote.path);
                 self.core.status_color = Color::Yellow;
                 self.sftp.drain_raw();
                 self.core.prev_raw_len = 0;
                 self.core.prompt_stable = 0;
                 self.send_ls();
                 self.sftp_state = SftpState::WaitingLs;
-                debug!("SFTP ls {}", self.core.remote_path);
+                debug!("SFTP ls {}", self.core.remote.path);
             }
         }
     }
 
     fn send_ls(&mut self) {
-        let cmd = format!("ls -la {}\r\n", shell_quote(&self.core.remote_path));
+        let cmd = format!("ls -la {}\r\n", shell_quote(&self.core.remote.path));
         self.core.cmd_start = Some(Instant::now());
         self.sftp.send_str(&cmd);
     }
@@ -368,8 +368,8 @@ impl FileBrowser {
         }
         let (remote_file, name, is_dir) = if let Some(t) = self.core.pop_pending() {
             (t.path, t.name, t.is_dir)
-        } else if let Some(i) = self.core.remote_sel.selected() {
-            let Some(entry) = self.core.remote_entries.get(i) else {
+        } else if let Some(i) = self.core.remote.sel.selected() {
+            let Some(entry) = self.core.remote.entries.get(i) else {
                 return;
             };
             if entry.name == ".." {
@@ -377,14 +377,14 @@ impl FileBrowser {
             }
             let path = format!(
                 "{}/{}",
-                self.core.remote_path.trim_end_matches('/'),
+                self.core.remote.path.trim_end_matches('/'),
                 entry.name
             );
             (path, entry.name.clone(), entry.is_dir)
         } else {
             return;
         };
-        let local_dest = self.core.local_path.to_string_lossy().replace('\\', "/");
+        let local_dest = self.core.local.path.to_string_lossy().replace('\\', "/");
         let flag = if is_dir { "-r " } else { "" };
         let cmd = format!(
             "get {}{} {}/\r\n",
@@ -392,11 +392,11 @@ impl FileBrowser {
             shell_quote(&remote_file),
             local_dest
         );
-        if self.core.batch_done == 0 {
-            self.core.batch_total = self.core.pending_transfers.len() + 1;
+        if self.core.transfer.batch_done == 0 {
+            self.core.transfer.batch_total = self.core.transfer.pending.len() + 1;
         }
-        self.core.transfer_start = Some(Instant::now());
-        self.core.last_transfer = Some(TransferStatus {
+        self.core.transfer.start = Some(Instant::now());
+        self.core.transfer.last = Some(TransferStatus {
             filename: name.clone(),
             direction: TransferDirection::Download,
             is_dir,
@@ -418,8 +418,8 @@ impl FileBrowser {
         }
         let (local_str, name, is_dir) = if let Some(t) = self.core.pop_pending() {
             (t.path, t.name, t.is_dir)
-        } else if let Some(i) = self.core.local_sel.selected() {
-            let Some(entry) = self.core.local_entries.get(i) else {
+        } else if let Some(i) = self.core.local.sel.selected() {
+            let Some(entry) = self.core.local.entries.get(i) else {
                 return;
             };
             if entry.name == ".." {
@@ -427,7 +427,8 @@ impl FileBrowser {
             }
             let path = self
                 .core
-                .local_path
+                .local
+                .path
                 .join(&entry.name)
                 .to_string_lossy()
                 .replace('\\', "/");
@@ -440,13 +441,13 @@ impl FileBrowser {
             "put {}{} {}/\r\n",
             flag,
             shell_quote(&local_str),
-            shell_quote(&self.core.remote_path)
+            shell_quote(&self.core.remote.path)
         );
-        if self.core.batch_done == 0 {
-            self.core.batch_total = self.core.pending_transfers.len() + 1;
+        if self.core.transfer.batch_done == 0 {
+            self.core.transfer.batch_total = self.core.transfer.pending.len() + 1;
         }
-        self.core.transfer_start = Some(Instant::now());
-        self.core.last_transfer = Some(TransferStatus {
+        self.core.transfer.start = Some(Instant::now());
+        self.core.transfer.last = Some(TransferStatus {
             filename: name.clone(),
             direction: TransferDirection::Upload,
             is_dir,
@@ -487,7 +488,7 @@ impl FileBrowser {
         if self.core.local_confirm_delete() {
             return;
         }
-        if let Some(target) = self.core.confirm_delete.take() {
+        if let Some(target) = self.core.delete.confirm.take() {
             if target.location != DeleteLocation::Remote {
                 return;
             }
@@ -506,7 +507,7 @@ impl FileBrowser {
             self.sftp_state = SftpState::WaitingDelete;
             self.core.status_msg = format!("Deleting {}...", target.path);
             self.core.status_color = Color::Yellow;
-            self.core.pending_delete_name = Some(target.path);
+            self.core.delete.pending_name = Some(target.path);
             self.core.needs_redraw = true;
         }
     }
@@ -533,7 +534,7 @@ impl FileBrowser {
         }
         self.core.render_upload_confirm(area, buf);
         self.core
-            .render_transfer_progress(area, buf, self.core.transfer_start.is_some());
+            .render_transfer_progress(area, buf, self.core.transfer.start.is_some());
         self.core.render_drag_arrow(area, buf, leaf_count);
         self.core.render_drag_ghost(buf);
     }
@@ -549,7 +550,7 @@ impl FileBrowser {
     }
 
     fn progress_suffix(&self) -> String {
-        if let Some(ref t) = self.core.last_transfer {
+        if let Some(ref t) = self.core.transfer.last {
             if t.is_dir && !t.done {
                 format!(" ({} files)", t.file_count)
             } else if !t.is_dir && !t.done {
@@ -685,7 +686,7 @@ mod tests {
         tick_until_stable(&mut fb);
 
         assert_eq!(fb.sftp_state, SftpState::WaitingLs);
-        assert_eq!(fb.core.remote_path, "/home/user");
+        assert_eq!(fb.core.remote.path, "/home/user");
         let ls_cmds: Vec<_> = h
             .sent()
             .iter()
@@ -702,7 +703,7 @@ mod tests {
     #[test]
     fn waiting_pwd_keeps_old_path_on_parse_failure() {
         let (mut fb, h) = make_sftp();
-        fb.core.remote_path = "/original".to_string();
+        fb.core.remote.path = "/original".to_string();
         h.feed(b"sftp> ");
         tick_until_stable(&mut fb);
         assert_eq!(fb.sftp_state, SftpState::WaitingPwd);
@@ -711,7 +712,7 @@ mod tests {
         tick_until_stable(&mut fb);
 
         assert_eq!(fb.sftp_state, SftpState::WaitingLs);
-        assert_eq!(fb.core.remote_path, "/original");
+        assert_eq!(fb.core.remote.path, "/original");
     }
 
     // ---- WaitingLs state ----
@@ -725,7 +726,7 @@ mod tests {
         tick_until_stable(&mut fb);
 
         assert_eq!(fb.sftp_state, SftpState::Idle);
-        assert!(fb.core.remote_entries.len() >= 2);
+        assert!(fb.core.remote.entries.len() >= 2);
         assert!(
             fb.core.raw_snapshot.is_empty(),
             "raw_snapshot should be cleared"
@@ -736,35 +737,35 @@ mod tests {
     fn waiting_ls_updates_remote_path_from_pwd_line() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::WaitingLs;
-        fb.core.remote_path = "/old".to_string();
+        fb.core.remote.path = "/old".to_string();
 
         h.feed(
             b"Remote working directory: /new/path\n-rw-r--r-- 1 u u 10 Jan 1 12:00 a.txt\nsftp> ",
         );
         tick_until_stable(&mut fb);
 
-        assert_eq!(fb.core.remote_path, "/new/path");
+        assert_eq!(fb.core.remote.path, "/new/path");
     }
 
     #[test]
     fn waiting_ls_clamps_selection() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::WaitingLs;
-        fb.core.remote_sel.select(Some(50));
+        fb.core.remote.sel.select(Some(50));
 
         h.feed(b"-rw-r--r--  1 user user  1234 Jan  1 12:00 file.txt\nsftp> ");
         tick_until_stable(&mut fb);
 
         assert_eq!(fb.sftp_state, SftpState::Idle);
-        let sel = fb.core.remote_sel.selected().unwrap_or(999);
-        assert!(sel < fb.core.remote_entries.len());
+        let sel = fb.core.remote.sel.selected().unwrap_or(999);
+        assert!(sel < fb.core.remote.entries.len());
     }
 
     #[test]
     fn waiting_ls_chains_pending_transfer() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::WaitingLs;
-        fb.core.last_transfer = Some(TransferStatus {
+        fb.core.transfer.last = Some(TransferStatus {
             filename: "prev.txt".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,
@@ -772,7 +773,7 @@ mod tests {
             progress: 100,
             file_count: 0,
         });
-        fb.core.pending_transfers.push(PendingTransfer {
+        fb.core.transfer.pending.push(PendingTransfer {
             path: "/remote/next.txt".to_string(),
             name: "next.txt".to_string(),
             is_dir: false,
@@ -783,7 +784,7 @@ mod tests {
 
         // download() should have been called, sending a get command
         assert_eq!(fb.sftp_state, SftpState::Transferring);
-        assert!(fb.core.pending_transfers.is_empty());
+        assert!(fb.core.transfer.pending.is_empty());
         let get_cmds: Vec<_> = h
             .sent()
             .iter()
@@ -801,7 +802,7 @@ mod tests {
     fn waiting_ls_chains_pending_delete() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::WaitingLs;
-        fb.core.pending_deletes.push(DeleteTarget {
+        fb.core.delete.pending.push(DeleteTarget {
             location: DeleteLocation::Remote,
             kind: DeleteKind::File,
             path: "/remote/todelete.txt".to_string(),
@@ -833,7 +834,7 @@ mod tests {
     fn transferring_completes_on_prompt_and_sends_ls() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::Transferring;
-        fb.core.last_transfer = Some(TransferStatus {
+        fb.core.transfer.last = Some(TransferStatus {
             filename: "test.txt".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,
@@ -847,13 +848,13 @@ mod tests {
         tick_until_stable(&mut fb);
 
         assert_eq!(fb.sftp_state, SftpState::WaitingLs);
-        assert!(fb.core.last_transfer.as_ref().unwrap().done);
-        assert_eq!(fb.core.last_transfer.as_ref().unwrap().progress, 100);
+        assert!(fb.core.transfer.last.as_ref().unwrap().done);
+        assert_eq!(fb.core.transfer.last.as_ref().unwrap().progress, 100);
         assert_eq!(
-            fb.core.batch_done, 0,
+            fb.core.transfer.batch_done, 0,
             "batch counters should reset after final transfer"
         );
-        assert_eq!(fb.core.batch_total, 0);
+        assert_eq!(fb.core.transfer.batch_total, 0);
         let ls_cmds: Vec<_> = h
             .sent()
             .iter()
@@ -871,7 +872,7 @@ mod tests {
     fn transferring_scrapes_progress() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::Transferring;
-        fb.core.last_transfer = Some(TransferStatus {
+        fb.core.transfer.last = Some(TransferStatus {
             filename: "big.bin".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,
@@ -884,14 +885,14 @@ mod tests {
         fb.tick();
 
         assert_eq!(fb.sftp_state, SftpState::Transferring);
-        assert_eq!(fb.core.last_transfer.as_ref().unwrap().progress, 50);
+        assert_eq!(fb.core.transfer.last.as_ref().unwrap().progress, 50);
     }
 
     #[test]
     fn transferring_counts_dir_files() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::Transferring;
-        fb.core.last_transfer = Some(TransferStatus {
+        fb.core.transfer.last = Some(TransferStatus {
             filename: "mydir".to_string(),
             direction: TransferDirection::Download,
             is_dir: true,
@@ -903,14 +904,14 @@ mod tests {
         h.feed(b"Fetching /remote/mydir/ to mydir\nFetching /remote/mydir/a.txt\nFetching /remote/mydir/b.txt\n");
         fb.tick();
 
-        assert_eq!(fb.core.last_transfer.as_ref().unwrap().file_count, 3);
+        assert_eq!(fb.core.transfer.last.as_ref().unwrap().file_count, 3);
     }
 
     #[test]
     fn transferring_chains_next_download() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::Transferring;
-        fb.core.last_transfer = Some(TransferStatus {
+        fb.core.transfer.last = Some(TransferStatus {
             filename: "first.txt".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,
@@ -918,7 +919,7 @@ mod tests {
             progress: 0,
             file_count: 0,
         });
-        fb.core.pending_transfers.push(PendingTransfer {
+        fb.core.transfer.pending.push(PendingTransfer {
             path: "/remote/second.txt".to_string(),
             name: "second.txt".to_string(),
             is_dir: false,
@@ -929,7 +930,7 @@ mod tests {
 
         // download() sets sftp_state to Transferring and sends get command
         assert_eq!(fb.sftp_state, SftpState::Transferring);
-        assert!(fb.core.pending_transfers.is_empty());
+        assert!(fb.core.transfer.pending.is_empty());
         let get_cmds: Vec<_> = h
             .sent()
             .iter()
@@ -947,7 +948,7 @@ mod tests {
     fn transferring_chains_next_upload() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::Transferring;
-        fb.core.last_transfer = Some(TransferStatus {
+        fb.core.transfer.last = Some(TransferStatus {
             filename: "first.txt".to_string(),
             direction: TransferDirection::Upload,
             is_dir: false,
@@ -955,7 +956,7 @@ mod tests {
             progress: 0,
             file_count: 0,
         });
-        fb.core.pending_transfers.push(PendingTransfer {
+        fb.core.transfer.pending.push(PendingTransfer {
             path: "/local/second.txt".to_string(),
             name: "second.txt".to_string(),
             is_dir: false,
@@ -965,7 +966,7 @@ mod tests {
         tick_until_stable(&mut fb);
 
         assert_eq!(fb.sftp_state, SftpState::Transferring);
-        assert!(fb.core.pending_transfers.is_empty());
+        assert!(fb.core.transfer.pending.is_empty());
         let put_cmds: Vec<_> = h
             .sent()
             .iter()
@@ -983,9 +984,9 @@ mod tests {
     fn transferring_increments_batch_done() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::Transferring;
-        fb.core.batch_done = 0;
-        fb.core.batch_total = 1;
-        fb.core.last_transfer = Some(TransferStatus {
+        fb.core.transfer.batch_done = 0;
+        fb.core.transfer.batch_total = 1;
+        fb.core.transfer.last = Some(TransferStatus {
             filename: "only.txt".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,
@@ -998,9 +999,9 @@ mod tests {
         tick_until_stable(&mut fb);
 
         // After the last transfer, batch counters reset to 0
-        assert_eq!(fb.core.batch_done, 0);
-        assert_eq!(fb.core.batch_total, 0);
-        assert!(fb.core.transfer_start.is_none());
+        assert_eq!(fb.core.transfer.batch_done, 0);
+        assert_eq!(fb.core.transfer.batch_total, 0);
+        assert!(fb.core.transfer.start.is_none());
     }
 
     // ---- WaitingDelete state ----
@@ -1009,7 +1010,7 @@ mod tests {
     fn waiting_delete_success_sends_ls() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::WaitingDelete;
-        fb.core.pending_delete_name = Some("removed.txt".to_string());
+        fb.core.delete.pending_name = Some("removed.txt".to_string());
         h.clear_sent();
 
         h.feed(b"sftp> ");
@@ -1035,7 +1036,7 @@ mod tests {
     fn waiting_delete_failure_shows_error() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::WaitingDelete;
-        fb.core.pending_delete_name = Some("protected.txt".to_string());
+        fb.core.delete.pending_name = Some("protected.txt".to_string());
 
         h.feed(b"Couldn't remove file: permission denied\nsftp> ");
         tick_until_stable(&mut fb);
@@ -1049,8 +1050,8 @@ mod tests {
     fn waiting_delete_chains_next_delete() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::WaitingDelete;
-        fb.core.pending_delete_name = Some("first.txt".to_string());
-        fb.core.pending_deletes.push(DeleteTarget {
+        fb.core.delete.pending_name = Some("first.txt".to_string());
+        fb.core.delete.pending.push(DeleteTarget {
             location: DeleteLocation::Remote,
             kind: DeleteKind::File,
             path: "/remote/second.txt".to_string(),
@@ -1061,7 +1062,7 @@ mod tests {
         tick_until_stable(&mut fb);
 
         assert_eq!(fb.sftp_state, SftpState::WaitingDelete);
-        assert!(fb.core.pending_deletes.is_empty());
+        assert!(fb.core.delete.pending.is_empty());
         let rm_cmds: Vec<_> = h
             .sent()
             .iter()
@@ -1079,8 +1080,8 @@ mod tests {
     fn waiting_delete_failure_clears_pending_and_sends_ls() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::WaitingDelete;
-        fb.core.pending_delete_name = Some("bad.txt".to_string());
-        fb.core.pending_deletes.push(DeleteTarget {
+        fb.core.delete.pending_name = Some("bad.txt".to_string());
+        fb.core.delete.pending.push(DeleteTarget {
             location: DeleteLocation::Remote,
             kind: DeleteKind::File,
             path: "/remote/next.txt".to_string(),
@@ -1091,7 +1092,7 @@ mod tests {
         tick_until_stable(&mut fb);
 
         assert_eq!(fb.sftp_state, SftpState::WaitingLs);
-        assert!(fb.core.pending_deletes.is_empty());
+        assert!(fb.core.delete.pending.is_empty());
         let ls_cmds: Vec<_> = h
             .sent()
             .iter()
@@ -1109,7 +1110,7 @@ mod tests {
     fn waiting_delete_rmdir_for_directories() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::Idle;
-        fb.core.confirm_delete = Some(DeleteTarget {
+        fb.core.delete.confirm = Some(DeleteTarget {
             location: DeleteLocation::Remote,
             kind: DeleteKind::Dir,
             path: "/remote/somedir".to_string(),
@@ -1136,7 +1137,7 @@ mod tests {
     fn waiting_delete_rm_for_files() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::Idle;
-        fb.core.confirm_delete = Some(DeleteTarget {
+        fb.core.delete.confirm = Some(DeleteTarget {
             location: DeleteLocation::Remote,
             kind: DeleteKind::File,
             path: "/remote/somefile.txt".to_string(),
@@ -1172,12 +1173,12 @@ mod tests {
     fn process_death_recovers_to_idle() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::WaitingLs;
-        fb.core.pending_transfers.push(PendingTransfer {
+        fb.core.transfer.pending.push(PendingTransfer {
             path: "/a".to_string(),
             name: "a".to_string(),
             is_dir: false,
         });
-        fb.core.pending_deletes.push(DeleteTarget {
+        fb.core.delete.pending.push(DeleteTarget {
             location: DeleteLocation::Remote,
             kind: DeleteKind::File,
             path: "/b".to_string(),
@@ -1190,11 +1191,11 @@ mod tests {
         assert_eq!(fb.core.status_color, Color::Red);
         assert!(fb.core.status_msg.contains("connection lost"));
         assert!(
-            fb.core.pending_transfers.is_empty(),
+            fb.core.transfer.pending.is_empty(),
             "pending_transfers should be cleared"
         );
         assert!(
-            fb.core.pending_deletes.is_empty(),
+            fb.core.delete.pending.is_empty(),
             "pending_deletes should be cleared"
         );
         assert!(fb.core.drop_confirm.is_none());
@@ -1275,22 +1276,22 @@ mod tests {
     fn enter_on_remote_dir_sends_ls() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::Idle;
-        fb.core.remote_path = "/home".to_string();
+        fb.core.remote.path = "/home".to_string();
         fb.core.focus = BrowserFocus::Remote;
-        fb.core.remote_entries.push(FsEntry {
+        fb.core.remote.entries.push(FsEntry {
             name: "subdir".to_string(),
             is_dir: true,
             size: "4096".to_string(),
             modified: "Jan 1 12:00".to_string(),
             perms: "drwxr-xr-x".to_string(),
         });
-        fb.core.remote_sel.select(Some(0));
+        fb.core.remote.sel.select(Some(0));
         h.clear_sent();
 
         fb.enter();
 
         assert_eq!(fb.sftp_state, SftpState::WaitingLs);
-        assert_eq!(fb.core.remote_path, "/home/subdir");
+        assert_eq!(fb.core.remote.path, "/home/subdir");
         let ls_cmds: Vec<_> = h
             .sent()
             .iter()
@@ -1304,14 +1305,14 @@ mod tests {
     fn go_up_remote_sends_ls() {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::Idle;
-        fb.core.remote_path = "/home/user".to_string();
+        fb.core.remote.path = "/home/user".to_string();
         fb.core.focus = BrowserFocus::Remote;
         h.clear_sent();
 
         fb.go_up();
 
         assert_eq!(fb.sftp_state, SftpState::WaitingLs);
-        assert_eq!(fb.core.remote_path, "/home");
+        assert_eq!(fb.core.remote.path, "/home");
         let ls_cmds: Vec<_> = h
             .sent()
             .iter()
@@ -1326,14 +1327,14 @@ mod tests {
         let (mut fb, h) = make_sftp();
         fb.sftp_state = SftpState::WaitingLs;
         fb.core.focus = BrowserFocus::Remote;
-        fb.core.remote_entries.push(FsEntry {
+        fb.core.remote.entries.push(FsEntry {
             name: "dir".to_string(),
             is_dir: true,
             size: "4096".to_string(),
             modified: "Jan 1 12:00".to_string(),
             perms: "drwxr-xr-x".to_string(),
         });
-        fb.core.remote_sel.select(Some(0));
+        fb.core.remote.sel.select(Some(0));
         h.clear_sent();
 
         fb.enter();
@@ -1389,7 +1390,7 @@ mod tests {
     #[test]
     fn progress_suffix_file() {
         let (mut fb, _h) = make_sftp();
-        fb.core.last_transfer = Some(TransferStatus {
+        fb.core.transfer.last = Some(TransferStatus {
             filename: "f.txt".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,
@@ -1403,7 +1404,7 @@ mod tests {
     #[test]
     fn progress_suffix_dir() {
         let (mut fb, _h) = make_sftp();
-        fb.core.last_transfer = Some(TransferStatus {
+        fb.core.transfer.last = Some(TransferStatus {
             filename: "d".to_string(),
             direction: TransferDirection::Download,
             is_dir: true,
@@ -1417,7 +1418,7 @@ mod tests {
     #[test]
     fn progress_suffix_done() {
         let (mut fb, _h) = make_sftp();
-        fb.core.last_transfer = Some(TransferStatus {
+        fb.core.transfer.last = Some(TransferStatus {
             filename: "f.txt".to_string(),
             direction: TransferDirection::Download,
             is_dir: false,
