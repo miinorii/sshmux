@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::Result;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::browser::parse::strip_ansi;
@@ -383,7 +383,10 @@ impl EmbeddedTerminal {
                             let reply = format!("\x1b[{};{}R", row, col);
                             if let Ok(mut w) = writer_c.lock() {
                                 for _ in 0..dsr_count {
-                                    let _ = w.write_all(reply.as_bytes());
+                                    if let Err(e) = w.write_all(reply.as_bytes()) {
+                                        debug!("DSR reply write failed: {}", e);
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -447,8 +450,13 @@ impl EmbeddedTerminal {
     }
 
     pub fn send_str(&mut self, s: &str) {
-        if let Ok(mut w) = self.writer.lock() {
-            let _ = w.write_all(s.as_bytes());
+        if self.exited.load(Ordering::Acquire) {
+            return;
+        }
+        if let Ok(mut w) = self.writer.lock()
+            && let Err(e) = w.write_all(s.as_bytes())
+        {
+            warn!("PTY write failed ({} bytes): {}", s.len(), e);
         }
     }
 
@@ -492,8 +500,7 @@ impl EmbeddedTerminal {
                 if cfg!(windows)
                     && let Ok(mut guard) = self.suppress_until.lock()
                 {
-                    *guard =
-                        Some(Instant::now() + std::time::Duration::from_millis(100));
+                    *guard = Some(Instant::now() + std::time::Duration::from_millis(100));
                 }
             } else {
                 // Alternate screen (vim, htop, …) — the app redraws itself
@@ -710,8 +717,12 @@ impl Drop for EmbeddedTerminal {
         if let Some(child) = self.child.take() {
             thread::spawn(move || {
                 if let Ok(mut c) = child.lock() {
-                    let _ = c.kill();
-                    let _ = c.wait();
+                    if let Err(e) = c.kill() {
+                        debug!("child kill failed (likely already exited): {}", e);
+                    }
+                    if let Err(e) = c.wait() {
+                        debug!("child wait failed: {}", e);
+                    }
                 }
                 debug!("background child cleanup finished");
             });
@@ -1301,5 +1312,4 @@ mod tests {
         assert_eq!(row_text(&p, 0), "R00");
         assert_eq!(row_text(&p, 4), "R04");
     }
-
 }
