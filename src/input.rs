@@ -1,12 +1,10 @@
 use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 use log::{debug, error, trace};
-use ratatui::{layout::Rect, style::Color, widgets::ListState};
+use ratatui::{layout::Rect, widgets::ListState};
 
 use crate::app::{App, CONTEXT_MENU_ITEMS, ContextMenu, PaneResizeDrag, context_menu_rect};
 use crate::browser::common::Browser;
-use crate::browser::{
-    BrowserKeyAction, DragAction, FileBrowser, SshBrowser, SshBrowserState, handle_browser_key,
-};
+use crate::browser::{BrowserKeyAction, DragAction, FileBrowser, SshBrowser, handle_browser_key};
 use crate::keybindings::KeyBinding;
 use crate::pane::connect::{
     ConnectOverlay, ConnectPane, KeyEditorState, editor_binding_index, editor_nav_down,
@@ -527,25 +525,7 @@ fn handle_browser_key_dispatch(
     if let Some(Pane::SshBrowser { browser }) = app.tab_mut().focused_pane_mut()
         && browser.waiting_password
     {
-        match code {
-            KeyCode::Char(c) => browser.password_char(c),
-            KeyCode::Backspace => browser.password_backspace(),
-            KeyCode::Enter => browser.submit_password(),
-            KeyCode::Esc => {
-                browser.waiting_password = false;
-                browser.password_buf.clear();
-                browser.core.needs_redraw = true;
-                if browser.ssh_state == SshBrowserState::Transferring {
-                    browser.scp_pty = None;
-                    browser.ssh_state = SshBrowserState::Idle;
-                    browser.core.status_msg = "Transfer cancelled".to_string();
-                } else {
-                    browser.core.status_msg = "Password cancelled".to_string();
-                }
-                browser.core.status_color = Color::Yellow;
-            }
-            _ => {}
-        }
+        browser.handle_password_key(code);
         return Some(Action::Continue);
     }
 

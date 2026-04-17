@@ -42,6 +42,10 @@ pub enum SshBrowserState {
 /// Larger tail for shell prompt detection (PS1 can be longer than sftp>).
 const PROMPT_TAIL_BYTES_LONG: usize = 128;
 
+/// Upper bound on password input length. OpenSSH caps passwords at 1024 bytes;
+/// anything beyond this is either a misdirected paste or intentional junk.
+const MAX_PASSWORD_LEN: usize = 1024;
+
 // ---------------------------------------------------------------------------
 // SshBrowser
 // ---------------------------------------------------------------------------
@@ -651,12 +655,41 @@ impl SshBrowser {
     // ---- password input for SCP auth ----------------------------------------
 
     pub fn password_char(&mut self, c: char) {
+        if self.password_buf.len() >= MAX_PASSWORD_LEN {
+            return;
+        }
         self.password_buf.push(c);
         self.core.needs_redraw = true;
     }
 
     pub fn password_backspace(&mut self) {
         self.password_buf.pop();
+        self.core.needs_redraw = true;
+    }
+
+    /// Dispatch a key event for the password prompt. Called when
+    /// `waiting_password` is true; swallows all keys.
+    pub fn handle_password_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Char(c) => self.password_char(c),
+            KeyCode::Backspace => self.password_backspace(),
+            KeyCode::Enter => self.submit_password(),
+            KeyCode::Esc => self.cancel_password(),
+            _ => {}
+        }
+    }
+
+    fn cancel_password(&mut self) {
+        self.waiting_password = false;
+        self.password_buf.clear();
+        if self.ssh_state == SshBrowserState::Transferring {
+            self.scp_pty = None;
+            self.ssh_state = SshBrowserState::Idle;
+            self.core.status_msg = "Transfer cancelled".to_string();
+        } else {
+            self.core.status_msg = "Password cancelled".to_string();
+        }
+        self.core.status_color = Color::Yellow;
         self.core.needs_redraw = true;
     }
 
@@ -1014,6 +1047,52 @@ mod tests {
         assert_eq!(sb.password_buf, "abc");
         sb.password_backspace();
         assert_eq!(sb.password_buf, "ab");
+    }
+
+    #[test]
+    fn password_char_caps_at_max_len() {
+        let (mut sb, _h) = make_ssh();
+        for _ in 0..MAX_PASSWORD_LEN {
+            sb.password_char('a');
+        }
+        assert_eq!(sb.password_buf.len(), MAX_PASSWORD_LEN);
+        sb.password_char('b');
+        assert_eq!(sb.password_buf.len(), MAX_PASSWORD_LEN);
+        assert!(!sb.password_buf.ends_with('b'));
+    }
+
+    #[test]
+    fn handle_password_key_dispatches_chars_and_backspace() {
+        let (mut sb, _h) = make_ssh();
+        sb.waiting_password = true;
+        sb.handle_password_key(KeyCode::Char('x'));
+        sb.handle_password_key(KeyCode::Char('y'));
+        assert_eq!(sb.password_buf, "xy");
+        sb.handle_password_key(KeyCode::Backspace);
+        assert_eq!(sb.password_buf, "x");
+    }
+
+    #[test]
+    fn handle_password_key_esc_cancels_connecting() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Connecting;
+        sb.waiting_password = true;
+        sb.password_buf = "secret".to_string();
+        sb.handle_password_key(KeyCode::Esc);
+        assert!(!sb.waiting_password);
+        assert!(sb.password_buf.is_empty());
+        assert_eq!(sb.core.status_msg, "Password cancelled");
+    }
+
+    #[test]
+    fn handle_password_key_esc_during_transfer_cancels_transfer() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Transferring;
+        sb.waiting_password = true;
+        sb.handle_password_key(KeyCode::Esc);
+        assert_eq!(sb.ssh_state, SshBrowserState::Idle);
+        assert!(sb.scp_pty.is_none());
+        assert_eq!(sb.core.status_msg, "Transfer cancelled");
     }
 
     #[test]
