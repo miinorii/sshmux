@@ -274,14 +274,14 @@ fn sftp_browser_connects_and_lists() {
 
     // Should have remote entries (home directory listing)
     assert!(
-        !browser.core.remote_entries.is_empty(),
+        !browser.core.remote.entries.is_empty(),
         "remote entries should not be empty after ls"
     );
 
     // Should contain known test directories
     let names: Vec<&str> = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .map(|e| e.name.as_str())
         .collect();
@@ -310,11 +310,11 @@ fn sftp_browser_navigate_into_directory() {
     // Find "documents" in the listing and select it
     let doc_idx = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .position(|e| e.name == "documents")
         .expect("'documents' not found in listing");
-    browser.core.remote_sel.select(Some(doc_idx));
+    browser.core.remote.sel.select(Some(doc_idx));
     browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
 
     // Enter the directory
@@ -328,15 +328,15 @@ fn sftp_browser_navigate_into_directory() {
 
     // Remote path should now include "documents"
     assert!(
-        browser.core.remote_path.contains("documents"),
+        browser.core.remote.path.contains("documents"),
         "remote_path should contain 'documents', got: {}",
-        browser.core.remote_path
+        browser.core.remote.path
     );
 
     // Should see the test files
     let names: Vec<&str> = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .map(|e| e.name.as_str())
         .collect();
@@ -360,11 +360,11 @@ fn sftp_browser_download_file() {
     // Navigate into "documents"
     let doc_idx = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .position(|e| e.name == "documents")
         .expect("'documents' not found");
-    browser.core.remote_sel.select(Some(doc_idx));
+    browser.core.remote.sel.select(Some(doc_idx));
     browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
     browser.enter();
 
@@ -376,18 +376,18 @@ fn sftp_browser_download_file() {
     // Select "readme.txt"
     let file_idx = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .position(|e| e.name == "readme.txt")
         .expect("'readme.txt' not found");
-    browser.core.remote_sel.select(Some(file_idx));
+    browser.core.remote.sel.select(Some(file_idx));
 
     // Set local path to a temp directory for download
     let tmp = std::env::temp_dir().join("sshmux_test_sftp_dl");
     let _ = std::fs::create_dir_all(&tmp);
     let dest = tmp.join("readme.txt");
     let _ = std::fs::remove_file(&dest); // clean any previous run
-    browser.core.local_path = tmp.clone();
+    browser.core.local.path = tmp.clone();
 
     // Download
     browser.download();
@@ -432,17 +432,17 @@ fn sftp_browser_upload_file() {
     std::fs::write(&upload_file, "uploaded from integration test").unwrap();
 
     // Set local path to the temp dir
-    browser.core.local_path = tmp.clone();
-    browser.core.local_entries = sshmux::browser::parse::read_local_dir(&tmp);
+    browser.core.local.path = tmp.clone();
+    browser.core.local.entries = sshmux::browser::parse::read_local_dir(&tmp);
 
     // Select the upload file in the local panel
     let file_idx = browser
         .core
-        .local_entries
+        .local.entries
         .iter()
         .position(|e| e.name == "upload_test.txt")
         .expect("'upload_test.txt' not found in local entries");
-    browser.core.local_sel.select(Some(file_idx));
+    browser.core.local.sel.select(Some(file_idx));
     browser.core.focus = sshmux::browser::common::BrowserFocus::Local;
 
     // Upload
@@ -461,7 +461,7 @@ fn sftp_browser_upload_file() {
     // Verify: the remote listing should now contain "upload_test.txt"
     let names: Vec<&str> = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .map(|e| e.name.as_str())
         .collect();
@@ -488,16 +488,16 @@ fn sftp_browser_go_up() {
     });
     assert!(reached_idle, "SFTP browser did not reach Idle");
 
-    let home_path = browser.core.remote_path.clone();
+    let home_path = browser.core.remote.path.clone();
 
     // Navigate into "documents"
     let doc_idx = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .position(|e| e.name == "documents")
         .expect("'documents' not found");
-    browser.core.remote_sel.select(Some(doc_idx));
+    browser.core.remote.sel.select(Some(doc_idx));
     browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
     browser.enter();
 
@@ -506,7 +506,7 @@ fn sftp_browser_go_up() {
     });
     assert!(reached_idle, "did not reach Idle after cd");
 
-    assert!(browser.core.remote_path.contains("documents"));
+    assert!(browser.core.remote.path.contains("documents"));
 
     // Go up
     browser.go_up();
@@ -517,7 +517,7 @@ fn sftp_browser_go_up() {
     assert!(reached_idle, "did not reach Idle after go_up");
 
     assert_eq!(
-        browser.core.remote_path, home_path,
+        browser.core.remote.path, home_path,
         "should be back to home directory"
     );
 }
@@ -567,13 +567,13 @@ fn ssh_browser_connects_and_lists() {
     );
 
     assert!(
-        !browser.core.remote_entries.is_empty(),
+        !browser.core.remote.entries.is_empty(),
         "remote entries should not be empty after ls"
     );
 
     let names: Vec<&str> = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .map(|e| e.name.as_str())
         .collect();
@@ -597,11 +597,11 @@ fn ssh_browser_navigate_into_directory() {
     // Find "documents" and navigate into it
     let doc_idx = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .position(|e| e.name == "documents")
         .expect("'documents' not found");
-    browser.core.remote_sel.select(Some(doc_idx));
+    browser.core.remote.sel.select(Some(doc_idx));
     browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
     browser.enter();
 
@@ -611,14 +611,14 @@ fn ssh_browser_navigate_into_directory() {
     assert!(reached_idle, "did not reach Idle after entering directory");
 
     assert!(
-        browser.core.remote_path.contains("documents"),
+        browser.core.remote.path.contains("documents"),
         "remote_path should contain 'documents', got: {}",
-        browser.core.remote_path
+        browser.core.remote.path
     );
 
     let names: Vec<&str> = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .map(|e| e.name.as_str())
         .collect();
@@ -642,11 +642,11 @@ fn ssh_browser_download_file() {
     // Navigate into documents
     let doc_idx = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .position(|e| e.name == "documents")
         .expect("'documents' not found");
-    browser.core.remote_sel.select(Some(doc_idx));
+    browser.core.remote.sel.select(Some(doc_idx));
     browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
     browser.enter();
 
@@ -658,18 +658,18 @@ fn ssh_browser_download_file() {
     // Select readme.txt
     let file_idx = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .position(|e| e.name == "readme.txt")
         .expect("'readme.txt' not found");
-    browser.core.remote_sel.select(Some(file_idx));
+    browser.core.remote.sel.select(Some(file_idx));
 
     // Set local download path
     let tmp = std::env::temp_dir().join("sshmux_test_scp_dl");
     let _ = std::fs::create_dir_all(&tmp);
     let dest = tmp.join("readme.txt");
     let _ = std::fs::remove_file(&dest);
-    browser.core.local_path = tmp.clone();
+    browser.core.local.path = tmp.clone();
 
     // Download — spawns a separate SCP process that resolves via SSH config alias
     browser.download();
@@ -712,16 +712,16 @@ fn ssh_browser_upload_file() {
     let upload_file = tmp.join("scp_upload_test.txt");
     std::fs::write(&upload_file, "uploaded via scp integration test").unwrap();
 
-    browser.core.local_path = tmp.clone();
-    browser.core.local_entries = sshmux::browser::parse::read_local_dir(&tmp);
+    browser.core.local.path = tmp.clone();
+    browser.core.local.entries = sshmux::browser::parse::read_local_dir(&tmp);
 
     let file_idx = browser
         .core
-        .local_entries
+        .local.entries
         .iter()
         .position(|e| e.name == "scp_upload_test.txt")
         .expect("'scp_upload_test.txt' not found in local entries");
-    browser.core.local_sel.select(Some(file_idx));
+    browser.core.local.sel.select(Some(file_idx));
     browser.core.focus = sshmux::browser::common::BrowserFocus::Local;
 
     // Upload — spawns a separate SCP process
@@ -740,7 +740,7 @@ fn ssh_browser_upload_file() {
     // Verify remote listing contains the uploaded file
     let names: Vec<&str> = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .map(|e| e.name.as_str())
         .collect();
@@ -767,16 +767,16 @@ fn ssh_browser_go_up() {
     });
     assert!(reached_idle, "SSH browser did not reach Idle");
 
-    let home_path = browser.core.remote_path.clone();
+    let home_path = browser.core.remote.path.clone();
 
     // Navigate into documents
     let doc_idx = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .position(|e| e.name == "documents")
         .expect("'documents' not found");
-    browser.core.remote_sel.select(Some(doc_idx));
+    browser.core.remote.sel.select(Some(doc_idx));
     browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
     browser.enter();
 
@@ -794,7 +794,7 @@ fn ssh_browser_go_up() {
     assert!(reached_idle, "did not reach Idle after go_up");
 
     assert_eq!(
-        browser.core.remote_path, home_path,
+        browser.core.remote.path, home_path,
         "should be back to home directory"
     );
 }
@@ -819,15 +819,15 @@ fn sftp_browser_delete_file() {
     let upload_file = tmp.join("to_delete.txt");
     std::fs::write(&upload_file, "delete me").unwrap();
 
-    browser.core.local_path = tmp.clone();
-    browser.core.local_entries = sshmux::browser::parse::read_local_dir(&tmp);
+    browser.core.local.path = tmp.clone();
+    browser.core.local.entries = sshmux::browser::parse::read_local_dir(&tmp);
     let file_idx = browser
         .core
-        .local_entries
+        .local.entries
         .iter()
         .position(|e| e.name == "to_delete.txt")
         .expect("'to_delete.txt' not found");
-    browser.core.local_sel.select(Some(file_idx));
+    browser.core.local.sel.select(Some(file_idx));
     browser.core.focus = sshmux::browser::common::BrowserFocus::Local;
     browser.upload();
 
@@ -839,17 +839,17 @@ fn sftp_browser_delete_file() {
     // Now select the uploaded file on the remote side and delete it
     let file_idx = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .position(|e| e.name == "to_delete.txt")
         .expect("'to_delete.txt' not found on remote after upload");
-    browser.core.remote_sel.select(Some(file_idx));
+    browser.core.remote.sel.select(Some(file_idx));
     browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
 
     // Initiate delete (sets confirm dialog)
     browser.delete_focused();
     assert!(
-        browser.core.confirm_delete.is_some(),
+        browser.core.delete.confirm.is_some(),
         "confirm dialog should appear"
     );
 
@@ -865,7 +865,7 @@ fn sftp_browser_delete_file() {
     // Verify it's gone
     let names: Vec<&str> = browser
         .core
-        .remote_entries
+        .remote.entries
         .iter()
         .map(|e| e.name.as_str())
         .collect();
