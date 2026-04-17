@@ -216,6 +216,24 @@ pub trait Browser {
     fn send_connect_key(&mut self, code: KeyCode);
     /// True when the underlying PTY process has exited.
     fn process_exited(&self) -> bool;
+
+    /// Chain the next queued action: start a pending transfer if any, otherwise
+    /// trigger a pending delete. Called at the end of a state arm that returns
+    /// control to `Idle`. Returns true if an action was chained.
+    fn chain_next_queued(&mut self) -> bool {
+        if !self.core().transfer.pending.is_empty() {
+            match self.core().last_transfer_direction() {
+                TransferDirection::Upload => self.upload(),
+                TransferDirection::Download => self.download(),
+            }
+            true
+        } else if self.core_mut().pop_pending_delete() {
+            self.confirm_delete_yes();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

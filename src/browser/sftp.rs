@@ -10,7 +10,8 @@ use super::common::{
     TransferDirection, TransferStatus,
 };
 use super::parse::{
-    parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote, strip_ansi,
+    contains_any_error, parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote,
+    strip_ansi,
 };
 use crate::keybindings::BrowserBindings;
 use crate::terminal::{EmbeddedTerminal, PtyChannel};
@@ -162,24 +163,12 @@ impl FileBrowser {
                         self.core.status_color = Color::Green;
                     }
                     self.core.needs_redraw = true;
-                    // Chain next queued transfer if any
                     debug!(
                         "SFTP WaitingLs done: pending_transfers={}, pending_deletes={}",
                         self.core.transfer.pending.len(),
                         self.core.delete.pending.len(),
                     );
-                    if !self.core.transfer.pending.is_empty() {
-                        debug!(
-                            "SFTP chaining next transfer, direction={:?}",
-                            self.core.last_transfer_direction()
-                        );
-                        match self.core.last_transfer_direction() {
-                            TransferDirection::Upload => self.upload(),
-                            TransferDirection::Download => self.download(),
-                        }
-                    } else if self.core.pop_pending_delete() {
-                        self.confirm_delete_yes();
-                    }
+                    self.chain_next_queued();
                 }
             }
             SftpState::Transferring => {
@@ -246,13 +235,10 @@ impl FileBrowser {
                 if prompt_ready {
                     self.core.prompt_stable = 0;
                     let lines = self.sftp.raw_lines();
-                    let has_error = lines.iter().any(|l| {
-                        let t = l.to_lowercase();
-                        t.contains("failure")
-                            || t.contains("couldn't")
-                            || t.contains("not empty")
-                            || t.contains("permission denied")
-                    });
+                    let has_error = contains_any_error(
+                        &lines,
+                        &["failure", "couldn't", "not empty", "permission denied"],
+                    );
                     if let Some(name) = self.core.delete.pending_name.take() {
                         if has_error {
                             warn!("SFTP delete failed: {}", name);

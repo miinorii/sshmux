@@ -16,7 +16,8 @@ use super::common::{
     TransferDirection, TransferStatus,
 };
 use super::parse::{
-    parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote, strip_ansi,
+    contains_any_error, parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote,
+    strip_ansi,
 };
 use crate::keybindings::BrowserBindings;
 use crate::terminal::{EmbeddedTerminal, PtyChannel};
@@ -349,15 +350,7 @@ impl SshBrowser {
                         self.core.status_color = Color::Green;
                     }
                     self.core.needs_redraw = true;
-                    // Chain next queued transfer if any
-                    if !self.core.transfer.pending.is_empty() {
-                        match self.core.last_transfer_direction() {
-                            TransferDirection::Upload => self.upload(),
-                            TransferDirection::Download => self.download(),
-                        }
-                    } else if self.core.pop_pending_delete() {
-                        self.confirm_delete_yes();
-                    }
+                    self.chain_next_queued();
                 }
             }
             SshBrowserState::WaitingDelete => {
@@ -372,14 +365,16 @@ impl SshBrowser {
                     } else {
                         &lines[..]
                     };
-                    let has_error = output_lines.iter().any(|l| {
-                        let t = l.to_lowercase();
-                        t.contains("cannot remove")
-                            || t.contains("no such file")
-                            || t.contains("permission denied")
-                            || t.contains("not empty")
-                            || t.contains("directory not empty")
-                    });
+                    let has_error = contains_any_error(
+                        output_lines,
+                        &[
+                            "cannot remove",
+                            "no such file",
+                            "permission denied",
+                            "not empty",
+                            "directory not empty",
+                        ],
+                    );
                     if let Some(name) = self.core.delete.pending_name.take() {
                         if has_error {
                             warn!("SSH delete failed: {}", name);

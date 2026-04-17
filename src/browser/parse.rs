@@ -176,6 +176,15 @@ pub fn skip_n_tokens(line: &str, n: usize) -> &str {
 
 /// Scrape a transfer progress percentage from sftp/scp output lines.
 /// Returns a value in 0–100.
+/// Case-insensitively scan output lines for any of the given error substrings.
+/// Used to detect failures from `rm`, `rmdir`, and sftp delete responses.
+pub fn contains_any_error(lines: &[String], needles: &[&str]) -> bool {
+    lines.iter().any(|l| {
+        let low = l.to_lowercase();
+        needles.iter().any(|n| low.contains(n))
+    })
+}
+
 pub fn scrape_transfer_progress(lines: &[String]) -> Option<u8> {
     lines.iter().rev().find_map(|l| {
         // SCP uses \r to overwrite progress on the same line; take the last segment.
@@ -318,6 +327,27 @@ mod tests {
 
     fn ls(raw: &str) -> Vec<String> {
         raw.lines().map(|l| l.to_string()).collect()
+    }
+
+    // ---- contains_any_error -----------------------------------------------
+
+    #[test]
+    fn contains_any_error_matches_case_insensitively() {
+        let lines = vec!["rm: CANNOT remove 'x': Permission denied".to_string()];
+        assert!(contains_any_error(&lines, &["cannot remove"]));
+        assert!(contains_any_error(&lines, &["permission denied"]));
+    }
+
+    #[test]
+    fn contains_any_error_no_match() {
+        let lines = vec!["removed: x".to_string()];
+        assert!(!contains_any_error(&lines, &["cannot remove", "not empty"]));
+    }
+
+    #[test]
+    fn contains_any_error_empty_inputs() {
+        assert!(!contains_any_error(&[], &["failure"]));
+        assert!(!contains_any_error(&["anything".to_string()], &[]));
     }
 
     // ---- parse_pwd ---------------------------------------------------------
