@@ -57,98 +57,10 @@ pub fn handle_key(
         }))
     );
 
-    if !editor_capturing {
-        // ---- Global shortcuts ----
-        let g = &app.keybindings.global;
-        if g.quit.matches(code, ctrl, alt, shift) {
-            return Action::Quit;
-        }
-        if g.prev_tab.matches(code, ctrl, alt, shift) {
-            if app.selected_tab > 0 {
-                app.selected_tab -= 1;
-            } else {
-                app.selected_tab = app.tabs.len() - 1;
-            }
-            app.pane_resize_drag = None;
-            return Action::Continue;
-        }
-        if g.next_tab.matches(code, ctrl, alt, shift) {
-            app.selected_tab = (app.selected_tab + 1) % app.tabs.len();
-            app.pane_resize_drag = None;
-            return Action::Continue;
-        }
-        if g.focus_left.matches(code, ctrl, alt, shift) {
-            app.tab_mut()
-                .focus_dir(FocusDir::Left, pane_inner(last_area));
-            if app.tab().zoom {
-                app.resize_all(last_area);
-            }
-            return Action::Continue;
-        }
-        if g.focus_right.matches(code, ctrl, alt, shift) {
-            app.tab_mut()
-                .focus_dir(FocusDir::Right, pane_inner(last_area));
-            if app.tab().zoom {
-                app.resize_all(last_area);
-            }
-            return Action::Continue;
-        }
-        if g.focus_up.matches(code, ctrl, alt, shift) {
-            app.tab_mut().focus_dir(FocusDir::Up, pane_inner(last_area));
-            if app.tab().zoom {
-                app.resize_all(last_area);
-            }
-            return Action::Continue;
-        }
-        if g.focus_down.matches(code, ctrl, alt, shift) {
-            app.tab_mut()
-                .focus_dir(FocusDir::Down, pane_inner(last_area));
-            if app.tab().zoom {
-                app.resize_all(last_area);
-            }
-            return Action::Continue;
-        }
-        if g.close.matches(code, ctrl, alt, shift) {
-            app.tab_mut().zoom = false;
-            let was_last_pane = app.tab().leaf_count() == 1;
-            if was_last_pane {
-                app.close_tab();
-            } else {
-                app.tab_mut().close_focused();
-                app.resize_all(last_area);
-            }
-            return Action::Continue;
-        }
-        if g.new_tab.matches(code, ctrl, alt, shift) {
-            app.new_tab();
-            return Action::Continue;
-        }
-        if g.split_horizontal.matches(code, ctrl, alt, shift) {
-            app.tab_mut().zoom = false;
-            app.tab_mut().split(Split::TopBottom, pane_inner(last_area));
-            return Action::Continue;
-        }
-        if g.split_vertical.matches(code, ctrl, alt, shift) {
-            app.tab_mut().zoom = false;
-            app.tab_mut().split(Split::LeftRight, pane_inner(last_area));
-            return Action::Continue;
-        }
-        if g.zoom.matches(code, ctrl, alt, shift) {
-            if app.tab().leaf_count() > 1 {
-                app.tab_mut().zoom = !app.tab().zoom;
-                app.pane_resize_drag = None;
-                let content = pane_inner(last_area);
-                if app.tab().zoom {
-                    let focus_idx = app.tab().focus_idx;
-                    if let Some(pane) = app.tab_mut().root.leaf_mut(focus_idx) {
-                        pane.resize_all(content, false);
-                    }
-                } else {
-                    app.resize_all(last_area);
-                }
-            }
-            return Action::Continue;
-        }
+    if !editor_capturing
+        && let Some(action) = handle_global_key(app, code, ctrl, alt, shift, last_area)
+    {
+        return action;
     }
 
     // ---- Connect pane ----
@@ -179,35 +91,135 @@ pub fn handle_key(
         return Action::Continue;
     }
 
-    // ---- Session: reset scrollback on any keypress ----
+    handle_session_key(app, code, ctrl, alt, focused_pane_has_app_cursor);
+    Action::Continue
+}
+
+// ---------------------------------------------------------------------------
+// Global shortcuts
+// ---------------------------------------------------------------------------
+
+/// Returns `Some(Action)` if a global shortcut was matched and handled.
+fn handle_global_key(
+    app: &mut App,
+    code: KeyCode,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    last_area: Rect,
+) -> Option<Action> {
+    let g = &app.keybindings.global;
+    if g.quit.matches(code, ctrl, alt, shift) {
+        return Some(Action::Quit);
+    }
+    if g.prev_tab.matches(code, ctrl, alt, shift) {
+        if app.selected_tab > 0 {
+            app.selected_tab -= 1;
+        } else {
+            app.selected_tab = app.tabs.len() - 1;
+        }
+        app.pane_resize_drag = None;
+        return Some(Action::Continue);
+    }
+    if g.next_tab.matches(code, ctrl, alt, shift) {
+        app.selected_tab = (app.selected_tab + 1) % app.tabs.len();
+        app.pane_resize_drag = None;
+        return Some(Action::Continue);
+    }
+    let focus_dir = if g.focus_left.matches(code, ctrl, alt, shift) {
+        Some(FocusDir::Left)
+    } else if g.focus_right.matches(code, ctrl, alt, shift) {
+        Some(FocusDir::Right)
+    } else if g.focus_up.matches(code, ctrl, alt, shift) {
+        Some(FocusDir::Up)
+    } else if g.focus_down.matches(code, ctrl, alt, shift) {
+        Some(FocusDir::Down)
+    } else {
+        None
+    };
+    if let Some(dir) = focus_dir {
+        app.tab_mut().focus_dir(dir, pane_inner(last_area));
+        if app.tab().zoom {
+            app.resize_all(last_area);
+        }
+        return Some(Action::Continue);
+    }
+    if g.close.matches(code, ctrl, alt, shift) {
+        app.tab_mut().zoom = false;
+        let was_last_pane = app.tab().leaf_count() == 1;
+        if was_last_pane {
+            app.close_tab();
+        } else {
+            app.tab_mut().close_focused();
+            app.resize_all(last_area);
+        }
+        return Some(Action::Continue);
+    }
+    if g.new_tab.matches(code, ctrl, alt, shift) {
+        app.new_tab();
+        return Some(Action::Continue);
+    }
+    if g.split_horizontal.matches(code, ctrl, alt, shift) {
+        app.tab_mut().zoom = false;
+        app.tab_mut().split(Split::TopBottom, pane_inner(last_area));
+        return Some(Action::Continue);
+    }
+    if g.split_vertical.matches(code, ctrl, alt, shift) {
+        app.tab_mut().zoom = false;
+        app.tab_mut().split(Split::LeftRight, pane_inner(last_area));
+        return Some(Action::Continue);
+    }
+    if g.zoom.matches(code, ctrl, alt, shift) {
+        if app.tab().leaf_count() > 1 {
+            app.tab_mut().zoom = !app.tab().zoom;
+            app.pane_resize_drag = None;
+            let content = pane_inner(last_area);
+            if app.tab().zoom {
+                let focus_idx = app.tab().focus_idx;
+                if let Some(pane) = app.tab_mut().root.leaf_mut(focus_idx) {
+                    pane.resize_all(content, false);
+                }
+            } else {
+                app.resize_all(last_area);
+            }
+        }
+        return Some(Action::Continue);
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Session key passthrough
+// ---------------------------------------------------------------------------
+
+/// Translate a key into the matching escape sequence and forward it to the
+/// focused session pane. Also resets scrollback on any keypress.
+fn handle_session_key(
+    app: &mut App,
+    code: KeyCode,
+    ctrl: bool,
+    alt: bool,
+    focused_pane_has_app_cursor: bool,
+) {
     if let Some(Pane::Session { terminal, .. }) = app.tab_mut().focused_pane_mut() {
         terminal.reset_scroll();
     }
 
-    // ---- Session: Ctrl+Arrow word-jump ----
+    // Ctrl+Arrow word-jump
     if ctrl && !alt {
-        match code {
-            KeyCode::Left => {
-                app.send_str("\x1b[1;5D");
-                return Action::Continue;
-            }
-            KeyCode::Right => {
-                app.send_str("\x1b[1;5C");
-                return Action::Continue;
-            }
-            KeyCode::Up => {
-                app.send_str("\x1b[1;5A");
-                return Action::Continue;
-            }
-            KeyCode::Down => {
-                app.send_str("\x1b[1;5B");
-                return Action::Continue;
-            }
-            _ => {}
+        let seq = match code {
+            KeyCode::Left => Some("\x1b[1;5D"),
+            KeyCode::Right => Some("\x1b[1;5C"),
+            KeyCode::Up => Some("\x1b[1;5A"),
+            KeyCode::Down => Some("\x1b[1;5B"),
+            _ => None,
+        };
+        if let Some(s) = seq {
+            app.send_str(s);
+            return;
         }
     }
 
-    // ---- Session: regular keys ----
     match code {
         KeyCode::Char(c) if ctrl && !alt => {
             // Convert Ctrl+<letter> to the corresponding control byte (0x01..0x1A).
@@ -230,34 +242,26 @@ pub fn handle_key(
         KeyCode::Delete => app.send_str("\x1b[3~"),
         KeyCode::Tab => app.send_str("\t"),
         KeyCode::BackTab => app.send_str("\x1b[Z"),
-        KeyCode::Left => {
-            if focused_pane_has_app_cursor {
-                app.send_str("\x1bOD");
-            } else {
-                app.send_str("\x1b[D");
-            }
-        }
-        KeyCode::Right => {
-            if focused_pane_has_app_cursor {
-                app.send_str("\x1bOC");
-            } else {
-                app.send_str("\x1b[C");
-            }
-        }
-        KeyCode::Up => {
-            if focused_pane_has_app_cursor {
-                app.send_str("\x1bOA");
-            } else {
-                app.send_str("\x1b[A");
-            }
-        }
-        KeyCode::Down => {
-            if focused_pane_has_app_cursor {
-                app.send_str("\x1bOB");
-            } else {
-                app.send_str("\x1b[B");
-            }
-        }
+        KeyCode::Left => app.send_str(if focused_pane_has_app_cursor {
+            "\x1bOD"
+        } else {
+            "\x1b[D"
+        }),
+        KeyCode::Right => app.send_str(if focused_pane_has_app_cursor {
+            "\x1bOC"
+        } else {
+            "\x1b[C"
+        }),
+        KeyCode::Up => app.send_str(if focused_pane_has_app_cursor {
+            "\x1bOA"
+        } else {
+            "\x1b[A"
+        }),
+        KeyCode::Down => app.send_str(if focused_pane_has_app_cursor {
+            "\x1bOB"
+        } else {
+            "\x1b[B"
+        }),
         KeyCode::Home => app.send_str("\x1b[H"),
         KeyCode::End => app.send_str("\x1b[F"),
         KeyCode::Esc => app.send_str("\x1b"),
@@ -285,8 +289,6 @@ pub fn handle_key(
         }
         _ => {}
     }
-
-    Action::Continue
 }
 
 // ---------------------------------------------------------------------------
@@ -833,76 +835,9 @@ pub fn handle_mouse(
         return handle_context_menu_mouse(app, kind, column, row, last_area);
     }
 
-    // ---- Pane resize drag intercept ----
-    if let Some(ref drag) = app.pane_resize_drag {
-        match kind {
-            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved => {
-                let pos = if drag.horizontal { column } else { row };
-                let delta = pos as i32 - drag.start_pos as i32;
-                let (new_r0, new_r1) = compute_drag_ratios(drag.start_ratios, drag.span, delta);
-                // Apply to the target Split node.
-                let path = drag.path.clone();
-                let sep_idx = drag.sep_idx;
-                if let Some(Pane::Split { ratios, .. }) =
-                    split_at_path_mut(&mut app.tabs[app.selected_tab].root, &path)
-                {
-                    ratios[sep_idx] = new_r0;
-                    ratios[sep_idx + 1] = new_r1;
-                }
-                app.resize_all(last_area);
-                return Action::Continue;
-            }
-            MouseEventKind::Up(MouseButton::Left) => {
-                app.pane_resize_drag = None;
-                return Action::Continue;
-            }
-            _ => {
-                app.pane_resize_drag = None;
-                return Action::Continue;
-            }
-        }
-    }
-
-    // ---- Separator drag start (disabled in zoom mode — no visible separators) ----
-    if !app.tab().zoom && matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
-        let content = pane_inner(last_area);
-        if let Some(hit) =
-            hit_test_separator(&app.tabs[app.selected_tab].root, content, column, row)
-        {
-            // Look up the Split node to read current ratios and compute span.
-            let (start_ratios, span) = {
-                let split_pane = split_at_path_mut(&mut app.tabs[app.selected_tab].root, &hit.path);
-                if let Some(Pane::Split { kind, ratios, .. }) = split_pane {
-                    let r0 = ratios[hit.sep_idx];
-                    let r1 = ratios[hit.sep_idx + 1];
-                    let areas = split_areas(hit.split_area, kind, ratios);
-                    let a0 = areas[hit.sep_idx];
-                    let a1 = areas[hit.sep_idx + 1];
-                    let span = if hit.horizontal {
-                        a0.width + 1 + a1.width
-                    } else {
-                        a0.height + a1.height
-                    };
-                    if span == 0 {
-                        return Action::Continue;
-                    }
-                    ((r0, r1), span)
-                } else {
-                    return Action::Continue;
-                }
-            };
-            let start_pos = if hit.horizontal { column } else { row };
-            app.pane_resize_drag = Some(PaneResizeDrag {
-                path: hit.path,
-                sep_idx: hit.sep_idx,
-                horizontal: hit.horizontal,
-                start_pos,
-                start_ratios,
-                span,
-                split_area: hit.split_area,
-            });
-            return Action::Continue;
-        }
+    // ---- Pane resize drag intercept + start ----
+    if handle_pane_resize_mouse(app, kind, column, row, last_area) {
+        return Action::Continue;
     }
 
     let content = pane_inner(last_area);
@@ -962,7 +897,122 @@ pub fn handle_mouse(
         return Action::Continue;
     }
 
-    // ---- Session mouse forwarding ----
+    handle_session_mouse(
+        app,
+        kind,
+        column,
+        row,
+        SessionMouseCtx {
+            pane_idx,
+            pane_area,
+            prev_focus,
+            zoom_active,
+        },
+    );
+    Action::Continue
+}
+
+// ---------------------------------------------------------------------------
+// Pane resize drag
+// ---------------------------------------------------------------------------
+
+/// Handle the pane-resize drag lifecycle (in-progress drag updates and new
+/// drag starts from a separator hit). Returns true if the event was consumed.
+fn handle_pane_resize_mouse(
+    app: &mut App,
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+    last_area: Rect,
+) -> bool {
+    if let Some(ref drag) = app.pane_resize_drag {
+        match kind {
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved => {
+                let pos = if drag.horizontal { column } else { row };
+                let delta = pos as i32 - drag.start_pos as i32;
+                let (new_r0, new_r1) = compute_drag_ratios(drag.start_ratios, drag.span, delta);
+                let path = drag.path.clone();
+                let sep_idx = drag.sep_idx;
+                if let Some(Pane::Split { ratios, .. }) =
+                    split_at_path_mut(&mut app.tabs[app.selected_tab].root, &path)
+                {
+                    ratios[sep_idx] = new_r0;
+                    ratios[sep_idx + 1] = new_r1;
+                }
+                app.resize_all(last_area);
+            }
+            _ => {
+                app.pane_resize_drag = None;
+            }
+        }
+        return true;
+    }
+
+    // Separator drag start (disabled in zoom mode — no visible separators)
+    if !app.tab().zoom && matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+        let content = pane_inner(last_area);
+        if let Some(hit) =
+            hit_test_separator(&app.tabs[app.selected_tab].root, content, column, row)
+        {
+            let split_pane = split_at_path_mut(&mut app.tabs[app.selected_tab].root, &hit.path);
+            let Some(Pane::Split { kind, ratios, .. }) = split_pane else {
+                return true;
+            };
+            let r0 = ratios[hit.sep_idx];
+            let r1 = ratios[hit.sep_idx + 1];
+            let areas = split_areas(hit.split_area, kind, ratios);
+            let a0 = areas[hit.sep_idx];
+            let a1 = areas[hit.sep_idx + 1];
+            let span = if hit.horizontal {
+                a0.width + 1 + a1.width
+            } else {
+                a0.height + a1.height
+            };
+            if span == 0 {
+                return true;
+            }
+            let start_pos = if hit.horizontal { column } else { row };
+            app.pane_resize_drag = Some(PaneResizeDrag {
+                path: hit.path,
+                sep_idx: hit.sep_idx,
+                horizontal: hit.horizontal,
+                start_pos,
+                start_ratios: (r0, r1),
+                span,
+                split_area: hit.split_area,
+            });
+            return true;
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Session mouse forwarding
+// ---------------------------------------------------------------------------
+
+struct SessionMouseCtx {
+    pane_idx: usize,
+    pane_area: Rect,
+    prev_focus: usize,
+    zoom_active: bool,
+}
+
+/// Forward a mouse event to the focused session pane. Handles scrollback
+/// translation, alternate-screen arrow translation, and SGR mouse encoding.
+fn handle_session_mouse(
+    app: &mut App,
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+    ctx: SessionMouseCtx,
+) {
+    let SessionMouseCtx {
+        pane_idx,
+        pane_area,
+        prev_focus,
+        zoom_active,
+    } = ctx;
     let same_pane = pane_idx == prev_focus;
     let pane_wants_mouse = app.tabs[app.selected_tab]
         .root
@@ -978,19 +1028,19 @@ pub fn handle_mouse(
 
     // Scrollback / alternate-screen arrow translation
     if !pane_wants_mouse {
-        let in_alt_screen = app.tabs[app.selected_tab]
-            .root
-            .leaf(pane_idx)
-            .map(|p| {
-                if let Pane::Session { terminal, .. } = p {
-                    terminal.alternate_screen()
-                } else {
-                    false
-                }
-            })
-            .unwrap_or(false);
         let is_scroll = matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown);
         if is_scroll {
+            let in_alt_screen = app.tabs[app.selected_tab]
+                .root
+                .leaf(pane_idx)
+                .map(|p| {
+                    if let Pane::Session { terminal, .. } = p {
+                        terminal.alternate_screen()
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
             if in_alt_screen {
                 let use_app = app.focused_pane_app_cursor();
                 let seq = match (kind, use_app) {
@@ -1012,69 +1062,52 @@ pub fn handle_mouse(
                     _ => {}
                 }
             }
-            return Action::Continue;
+            return;
         }
     }
 
-    if same_pane && pane_wants_mouse {
-        let inner = if !zoom_active && app.tabs[app.selected_tab].root.leaf_count() > 1 {
-            pane_border_inner(pane_area)
-        } else {
-            pane_area
-        };
-        let col = (column as i32 - inner.x as i32).max(0) as u16;
-        let r = (row as i32 - inner.y as i32).max(0) as u16;
-
-        // Check if remote app wants motion events (AnyMotion / mode 1003)
-        let wants_motion = app.tabs[app.selected_tab]
-            .root
-            .leaf(pane_idx)
-            .map(|p| {
-                if let Pane::Session { terminal, .. } = p {
-                    terminal.mouse_wants_motion()
-                } else {
-                    false
-                }
-            })
-            .unwrap_or(false);
-
-        // SGR extended mouse encoding: \x1b[<Cb;Cx;CyM (press) / m (release)
-        // Button codes: 0=left, 1=middle, 2=right, 32+=motion flag, 64/65=scroll
-        let seq = match kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                format!("\x1b[<0;{};{}M", col + 1, r + 1)
-            }
-            MouseEventKind::Up(MouseButton::Left) => {
-                format!("\x1b[<0;{};{}m", col + 1, r + 1)
-            }
-            MouseEventKind::Down(MouseButton::Middle) => {
-                format!("\x1b[<1;{};{}M", col + 1, r + 1)
-            }
-            MouseEventKind::Up(MouseButton::Middle) => {
-                format!("\x1b[<1;{};{}m", col + 1, r + 1)
-            }
-            MouseEventKind::ScrollUp => {
-                format!("\x1b[<64;{};{}M", col + 1, r + 1)
-            }
-            MouseEventKind::ScrollDown => {
-                format!("\x1b[<65;{};{}M", col + 1, r + 1)
-            }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                format!("\x1b[<32;{};{}M", col + 1, r + 1)
-            }
-            MouseEventKind::Drag(MouseButton::Middle) => {
-                format!("\x1b[<33;{};{}M", col + 1, r + 1)
-            }
-            MouseEventKind::Moved if wants_motion => {
-                format!("\x1b[<35;{};{}M", col + 1, r + 1)
-            }
-            _ => String::new(),
-        };
-        if !seq.is_empty() {
-            app.send_str(&seq);
-        }
+    if !(same_pane && pane_wants_mouse) {
+        return;
     }
-    Action::Continue
+
+    let inner = if !zoom_active && app.tabs[app.selected_tab].root.leaf_count() > 1 {
+        pane_border_inner(pane_area)
+    } else {
+        pane_area
+    };
+    let col = (column as i32 - inner.x as i32).max(0) as u16;
+    let r = (row as i32 - inner.y as i32).max(0) as u16;
+
+    // Check if remote app wants motion events (AnyMotion / mode 1003)
+    let wants_motion = app.tabs[app.selected_tab]
+        .root
+        .leaf(pane_idx)
+        .map(|p| {
+            if let Pane::Session { terminal, .. } = p {
+                terminal.mouse_wants_motion()
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
+
+    // SGR extended mouse encoding: \x1b[<Cb;Cx;CyM (press) / m (release)
+    // Button codes: 0=left, 1=middle, 2=right, 32+=motion flag, 64/65=scroll
+    let seq = match kind {
+        MouseEventKind::Down(MouseButton::Left) => format!("\x1b[<0;{};{}M", col + 1, r + 1),
+        MouseEventKind::Up(MouseButton::Left) => format!("\x1b[<0;{};{}m", col + 1, r + 1),
+        MouseEventKind::Down(MouseButton::Middle) => format!("\x1b[<1;{};{}M", col + 1, r + 1),
+        MouseEventKind::Up(MouseButton::Middle) => format!("\x1b[<1;{};{}m", col + 1, r + 1),
+        MouseEventKind::ScrollUp => format!("\x1b[<64;{};{}M", col + 1, r + 1),
+        MouseEventKind::ScrollDown => format!("\x1b[<65;{};{}M", col + 1, r + 1),
+        MouseEventKind::Drag(MouseButton::Left) => format!("\x1b[<32;{};{}M", col + 1, r + 1),
+        MouseEventKind::Drag(MouseButton::Middle) => format!("\x1b[<33;{};{}M", col + 1, r + 1),
+        MouseEventKind::Moved if wants_motion => format!("\x1b[<35;{};{}M", col + 1, r + 1),
+        _ => String::new(),
+    };
+    if !seq.is_empty() {
+        app.send_str(&seq);
+    }
 }
 
 // ---------------------------------------------------------------------------
