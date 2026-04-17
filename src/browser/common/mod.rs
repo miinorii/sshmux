@@ -172,6 +172,9 @@ pub const PROMPT_TAIL_BYTES: usize = 64;
 /// Seconds before a waiting command (ls, pwd, delete) is considered timed out.
 pub const COMMAND_TIMEOUT_SECS: u64 = 30;
 
+/// Consecutive stable ticks required before a prompt is considered ready.
+pub const PROMPT_STABLE_TICKS: u8 = 2;
+
 /// Action returned by `handle_browser_key` for browser-specific operations.
 pub enum BrowserKeyAction {
     Handled,

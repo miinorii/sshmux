@@ -250,24 +250,13 @@ impl SshBrowser {
         }
 
         // --- SSH prompt stability ---
-        let cur_len = self.ssh.raw_len();
-        if cur_len != self.core.prev_raw_len {
-            self.core.prompt_stable = 0;
-            self.core.prev_raw_len = cur_len;
-        } else {
-            let has_prompt = match self.ssh_state {
-                SshBrowserState::Connecting => self.shell_prompt_detected(),
-                _ => self.prompt_ends_with_sshmux(),
-            };
-            if has_prompt {
-                self.core.prompt_stable = self.core.prompt_stable.saturating_add(1);
-            } else {
-                self.core.prompt_stable = 0;
-            }
-        }
-
-        const STABLE_NEEDED: u8 = 2;
-        let prompt_ready = self.core.prompt_stable >= STABLE_NEEDED;
+        let has_prompt = match self.ssh_state {
+            SshBrowserState::Connecting => self.shell_prompt_detected(),
+            _ => self.prompt_ends_with_sshmux(),
+        };
+        let prompt_ready = self
+            .core
+            .update_prompt_stability(self.ssh.raw_len(), has_prompt);
 
         if matches!(
             self.ssh_state,

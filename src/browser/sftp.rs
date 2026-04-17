@@ -65,18 +65,9 @@ impl FileBrowser {
 
     pub fn tick(&mut self) {
         self.core.check_paste_deadline();
-        let cur_len = self.sftp.raw_len();
-        if cur_len != self.core.prev_raw_len {
-            self.core.prompt_stable = 0;
-            self.core.prev_raw_len = cur_len;
-        } else if self.prompt_raw_ends_with_prompt() {
-            self.core.prompt_stable = self.core.prompt_stable.saturating_add(1);
-        } else {
-            self.core.prompt_stable = 0;
-        }
-
-        const STABLE_NEEDED: u8 = 2;
-        let prompt_ready = self.core.prompt_stable >= STABLE_NEEDED;
+        let prompt_ready = self
+            .core
+            .update_prompt_stability(self.sftp.raw_len(), self.prompt_raw_ends_with_prompt());
 
         if matches!(self.sftp_state, SftpState::Connecting) {
             self.core.raw_snapshot = self.sftp.raw_lines();
