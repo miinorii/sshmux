@@ -281,10 +281,44 @@ fn snapshot_screen(p: &mut Parser) -> Vec<u8> {
 /// just text + SGR attributes into a fresh parser at the new dimensions.
 /// Lines wrap naturally at the new width — no cursor-positioning escapes that
 /// could become stale at a different size.
+///
+/// Fast path for vertical resizes that don't disturb the cursor row:
+/// when cols are unchanged AND the cursor still fits in `new_rows`, hand
+/// the existing parser back with `set_size` applied. Expansion just
+/// appends blank rows at the bottom; shrinkage truncates blank-or-below-
+/// cursor rows from the bottom. Either way the cursor and every
+/// preserved row stay at the exact same indices — nothing moves.
+///
+/// Snapshot+replay is reserved for cases where movement is unavoidable:
+/// vertical shrink past the cursor, or any column change (which forces
+/// content to re-wrap).
 fn snapshot_resize(p: &mut Parser, new_rows: u16, new_cols: u16) -> Parser {
+    let (_, old_cols) = p.screen().size();
+    let (cursor_row, cursor_col) = p.screen().cursor_position();
+
+    if new_cols == old_cols && cursor_row < new_rows {
+        let mut taken = std::mem::replace(p, Parser::new(1, 1, 0));
+        taken.screen_mut().set_size(new_rows, new_cols);
+        return taken;
+    }
+
     let snapshot = snapshot_screen(p);
     let mut fresh = Parser::new(new_rows, new_cols, 1000);
     fresh.process(&snapshot);
+
+    // After replay the cursor lands at the end of the last emitted cell.
+    // For same-cols resizes that's potentially one column past the
+    // original cursor — `snapshot_row` walks up to the rightmost cell
+    // with `has_contents()`, which includes cells overwritten with a
+    // space (e.g. readline's backspace-space-backspace erase trick).
+    // Re-anchor the cursor column to the original so bash's next
+    // redraw aligns with our parser state.
+    if new_cols == old_cols {
+        let target_col = cursor_col.min(new_cols.saturating_sub(1));
+        let cha = format!("\x1b[{}G", target_col + 1);
+        fresh.process(cha.as_bytes());
+    }
+
     fresh
 }
 
@@ -1104,17 +1138,22 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_includes_scrollback() {
+    fn snapshot_vertical_expand_keeps_cursor_row() {
         // Fill 10 rows in a 5-row terminal → 5 rows scroll into scrollback.
         let mut p = Parser::new(5, 10, 1000);
         p.process(&row_bytes(10));
-        // Visible: R05..R09.  Scrollback: R00..R04.
+        // Visible: R05..R09.  Scrollback: R00..R04.  Cursor at (4, 3).
 
-        // Resize to 8 rows: snapshot should pull scrollback content back
-        // onto the visible screen.
+        // Vertical expansion keeps the prompt at its original visual row
+        // (4) instead of anchoring it to the bottom of the new screen.
+        // The previous visible region stays at rows 0..=4; the new rows
+        // 5..=7 are blank; old scrollback stays in scrollback.
         let fresh = snapshot_resize(&mut p, 8, 10);
-        assert_eq!(row_text(&fresh, 0), "R02"); // R00,R01 still in scrollback
-        assert_eq!(row_text(&fresh, 7), "R09");
+        assert_eq!(row_text(&fresh, 0), "R05");
+        assert_eq!(row_text(&fresh, 4), "R09");
+        assert_eq!(row_text(&fresh, 5), "");
+        assert_eq!(row_text(&fresh, 7), "");
+        assert_eq!(fresh.screen().cursor_position(), (4, 3));
     }
 
     #[test]
@@ -1131,13 +1170,13 @@ mod tests {
         let mut p = snapshot_resize(&mut p, 8, 80);
         assert_eq!(row_text(&p, 7), "prompt>");
 
-        // 2nd resize: expand back to 16.
+        // 2nd resize: expand back to 16. Vertical expansion keeps the
+        // prompt at its old visible row (7) — it does not jump to the
+        // new bottom — and rows 8..15 are blank. Earlier content (file00)
+        // remains in scrollback.
         let mut p = snapshot_resize(&mut p, 16, 80);
-        assert!(
-            (0..16).map(|r| row_text(&p, r)).any(|r| r == "file00"),
-            "file00 should survive expand"
-        );
-        assert_eq!(row_text(&p, 15), "prompt>");
+        assert_eq!(row_text(&p, 7), "prompt>");
+        assert_eq!(row_text(&p, 15), "");
 
         // 3rd resize: shrink to 5.
         let p = snapshot_resize(&mut p, 5, 80);
@@ -1236,22 +1275,23 @@ mod tests {
     fn snapshot_wrap_across_page_boundary() {
         // A wrapped row at the boundary between two scrollback pages must
         // NOT get a spurious \r\n.  Use a 3-row terminal so pages are small.
+        // The 20-char wrapped line is older scrollback; with vertical
+        // expansion it now stays in scrollback.  Check via snapshot_screen
+        // rather than visible rows, which captures both regions.
         let mut p = Parser::new(3, 10, 1000);
-        // A 20-char line wraps into two 10-char rows at width 10.
         p.process(b"ABCDEFGHIJKLMNOPQRST\r\n");
-        // Push more content to move the wrapped pair into scrollback.
         p.process(b"line1\r\n");
         p.process(b"line2\r\n");
         p.process(b"line3\r\n");
         p.process(b"end");
 
-        let fresh = snapshot_resize(&mut p, 6, 20);
-        let rows: Vec<String> = (0..6).map(|r| row_text(&fresh, r)).collect();
-        eprintln!("RESULT: {:?}", rows);
-        // The 20-char line should appear intact at width 20.
+        let mut fresh = snapshot_resize(&mut p, 6, 20);
+        let snap = String::from_utf8_lossy(&snapshot_screen(&mut fresh)).into_owned();
+        // The 20-char line should appear intact (not split by a spurious
+        // \r\n between row 0 and its wrapped continuation).
         assert!(
-            rows.iter().any(|r| r == "ABCDEFGHIJKLMNOPQRST"),
-            "20-char line should be intact: {rows:?}"
+            snap.contains("ABCDEFGHIJKLMNOPQRST"),
+            "20-char line should be intact in snapshot: {snap:?}"
         );
     }
 
@@ -1296,8 +1336,540 @@ mod tests {
         }
     }
 
-    // Alternate screen uses set_size, not snapshot — verify that path still
-    // works for the EmbeddedTerminal::resize() branch.
+    // ---- vertical resize behavior ------------------------------------------
+
+    /// Build a parser of the given size containing `rows-1` labelled lines
+    /// followed by `prompt> ` on the last row, with the cursor at the end
+    /// of the prompt.
+    fn parser_with_prompt(rows: u16, cols: u16) -> Parser {
+        let mut p = Parser::new(rows, cols, 1000);
+        for i in 0..rows.saturating_sub(1) {
+            p.process(format!("R{:02}\r\n", i).as_bytes());
+        }
+        p.process(b"prompt> ");
+        p
+    }
+
+    #[test]
+    fn snapshot_preserves_trailing_space_through_col_change() {
+        // A prompt ending in a space must keep the cursor at the column
+        // immediately after the space when the snapshot path runs.
+        let mut p = Parser::new(5, 20, 1000);
+        p.process(b"$ ");
+        assert_eq!(p.screen().cursor_position(), (0, 2));
+
+        let resized = snapshot_resize(&mut p, 5, 30);
+        assert_eq!(resized.screen().cursor_position(), (0, 2));
+    }
+
+    #[test]
+    fn snapshot_preserves_cursor_col_on_vertical_shrink_past_cursor() {
+        // Vertical shrink past the cursor uses the snapshot path; the
+        // cursor column (including any trailing space typed after the
+        // prompt) must be preserved.
+        let mut p = Parser::new(10, 40, 1000);
+        for i in 0..9 {
+            p.process(format!("R{:02}\r\n", i).as_bytes());
+        }
+        p.process(b"$ abc ");
+        assert_eq!(p.screen().cursor_position(), (9, 6));
+
+        let resized = snapshot_resize(&mut p, 5, 40);
+        assert_eq!(resized.screen().cursor_position().1, 6);
+    }
+
+    #[test]
+    fn vertical_resize_sequence_does_not_drift_cursor_col() {
+        // A series of pure vertical resizes must never drift the cursor
+        // column away from its initial value.
+        let mut p = Parser::new(20, 80, 1000);
+        p.process(b"$ hello world ");
+        let original_col = p.screen().cursor_position().1;
+        assert_eq!(original_col, 14);
+
+        for &rows in &[15u16, 25, 10, 30, 5, 18, 8, 22] {
+            p = snapshot_resize(&mut p, rows, 80);
+            assert_eq!(p.screen().cursor_position().1, original_col);
+        }
+    }
+
+    #[test]
+    fn vertical_resize_after_typed_input_keeps_cursor_col() {
+        let mut p = Parser::new(15, 60, 1000);
+        p.process(b"$ some_input");
+        assert_eq!(p.screen().cursor_position().1, 12);
+
+        let mut p = snapshot_resize(&mut p, 25, 60);
+        assert_eq!(p.screen().cursor_position().1, 12);
+
+        let p = snapshot_resize(&mut p, 8, 60);
+        assert_eq!(p.screen().cursor_position().1, 12);
+    }
+
+    #[test]
+    fn snapshot_resize_preserves_cursor_after_readline_erase() {
+        // Readline's erase-char sequence (backspace, space, backspace)
+        // leaves the erased cell containing a literal space, which still
+        // reports `has_contents() == true`. The snapshot path must not
+        // count that trailing cell when placing the replay cursor.
+        let mut p = Parser::new(10, 30, 1000);
+        for _ in 0..9 {
+            p.process(b"\r\n");
+        }
+        p.process(b"$ x");
+        p.process(b"\x08 \x08");
+        assert_eq!(p.screen().cursor_position(), (9, 2));
+
+        let resized = snapshot_resize(&mut p, 5, 30);
+        assert_eq!(resized.screen().cursor_position().1, 2);
+    }
+
+    #[test]
+    fn snapshot_resize_preserves_cursor_through_grow_shrink_grow_with_erase() {
+        // Reproduction for a one-column drift observed across a
+        // grow → shrink → grow sequence after readline's erase-char.
+        let mut p = Parser::new(10, 80, 1000);
+        p.process(b"debian@vps:~$ x");
+        p.process(b"\x08 \x08");
+        let original_col = p.screen().cursor_position().1;
+        assert_eq!(original_col, 14);
+
+        let mut p = snapshot_resize(&mut p, 20, 80);
+        assert_eq!(p.screen().cursor_position().1, original_col);
+
+        let mut p = snapshot_resize(&mut p, 1, 80);
+        assert_eq!(p.screen().cursor_position().1, original_col);
+
+        let p = snapshot_resize(&mut p, 25, 80);
+        assert_eq!(p.screen().cursor_position().1, original_col);
+    }
+
+    #[test]
+    fn snapshot_preserves_cursor_after_clear_to_end_of_line() {
+        // Cells cleared via \x1b[K should not affect the cursor column
+        // after a snapshot+replay.
+        let mut p = Parser::new(5, 20, 1000);
+        p.process(b"$ helloworld");
+        p.process(b"\x1b[1;8H");
+        p.process(b"\x1b[K");
+        let pos = p.screen().cursor_position();
+
+        let resized = snapshot_resize(&mut p, 5, 30);
+        assert_eq!(resized.screen().cursor_position(), pos);
+    }
+
+    #[test]
+    fn set_size_preserves_pending_wrap_cursor() {
+        // When the cursor sits at col == cols (vt100's pending-wrap state),
+        // set_size must not clamp it inward.
+        let mut p = Parser::new(5, 5, 1000);
+        p.process(b"abcde");
+        assert_eq!(p.screen().cursor_position(), (0, 5));
+
+        p.screen_mut().set_size(5, 10);
+        assert_eq!(p.screen().cursor_position(), (0, 5));
+    }
+
+    #[test]
+    fn shrink_past_cursor_then_expand_preserves_cursor_col() {
+        let mut p = Parser::new(10, 40, 1000);
+        p.process(b"$ hello ");
+        let original_col = p.screen().cursor_position().1;
+
+        let mut p = snapshot_resize(&mut p, 4, 40);
+        assert_eq!(p.screen().cursor_position().1, original_col);
+
+        let p = snapshot_resize(&mut p, 12, 40);
+        assert_eq!(p.screen().cursor_position().1, original_col);
+    }
+
+    #[test]
+    fn snapshot_preserves_cursor_after_typed_trailing_space() {
+        // Typed `"abc "` leaves the cursor immediately after the trailing
+        // space; that position must survive a resize.
+        let mut p = Parser::new(5, 20, 1000);
+        p.process(b"$ abc ");
+        assert_eq!(p.screen().cursor_position(), (0, 6));
+
+        let resized = snapshot_resize(&mut p, 5, 30);
+        assert_eq!(resized.screen().cursor_position(), (0, 6));
+    }
+
+    #[test]
+    fn set_size_keeps_prompt_aligned_with_cursor_row() {
+        // After a vertical expand via set_size, the cursor row must still
+        // contain the prompt and no rows above the cursor may be blanked.
+        let mut p = Parser::new(10, 40, 1000);
+        for i in 0..9 {
+            p.process(format!("R{:02}\r\n", i).as_bytes());
+        }
+        p.process(b"prompt> ");
+        let cursor = p.screen().cursor_position();
+        assert_eq!(cursor, (9, 8));
+        assert_eq!(row_text(&p, 9), "prompt>");
+
+        p.screen_mut().set_size(20, 40);
+        assert_eq!(p.screen().cursor_position(), cursor);
+        assert_eq!(row_text(&p, cursor.0), "prompt>");
+        for r in 0..9u16 {
+            assert!(!row_text(&p, r).is_empty());
+        }
+    }
+
+    #[test]
+    fn set_size_preserves_cursor_position_in_bounds() {
+        // vt100's set_size must leave (row, col) untouched whenever the
+        // cursor remains within the new dimensions.
+        let cases = [
+            // (initial_rows, initial_cols, fill_lines, target_rows, target_cols)
+            (20u16, 40u16, 5u16, 10u16, 40u16),
+            (10, 40, 5, 20, 40),
+            (10, 40, 9, 20, 40),
+        ];
+        for (init_rows, init_cols, fill, new_rows, new_cols) in cases {
+            let mut p = Parser::new(init_rows, init_cols, 1000);
+            for i in 0..fill {
+                p.process(format!("R{:02}\r\n", i).as_bytes());
+            }
+            p.process(b"$ ");
+            let before = p.screen().cursor_position();
+            p.screen_mut().set_size(new_rows, new_cols);
+            assert_eq!(p.screen().cursor_position(), before);
+        }
+    }
+
+    #[test]
+    fn vertical_expand_does_not_move_content_or_cursor() {
+        // Pure vertical expansion (same cols, more rows) must not shift
+        // any existing cell. Every content row keeps its index, the cursor
+        // stays at its (row, col), and the new rows below are blank.
+        let mut p = Parser::new(10, 40, 1000);
+        for i in 0..30 {
+            p.process(format!("line{:02}\r\n", i).as_bytes());
+        }
+        p.process(b"$ ");
+        let cursor = p.screen().cursor_position();
+        let original: Vec<String> = (0..10).map(|r| row_text(&p, r)).collect();
+
+        let p = snapshot_resize(&mut p, 25, 40);
+        assert_eq!(p.screen().size(), (25, 40));
+        assert_eq!(p.screen().cursor_position(), cursor);
+        for r in 0..10u16 {
+            assert_eq!(row_text(&p, r), original[r as usize]);
+        }
+        for r in 10..25u16 {
+            assert_eq!(row_text(&p, r), "");
+        }
+    }
+
+    #[test]
+    fn vertical_shrink_after_expand_does_not_move_content_or_cursor() {
+        // Round-trip: expand 10 → 20 → shrink back to 10. Cursor and
+        // content rows must end exactly where they started.
+        let mut p = Parser::new(10, 40, 1000);
+        for i in 0..30 {
+            p.process(format!("line{:02}\r\n", i).as_bytes());
+        }
+        p.process(b"$ ");
+        let cursor = p.screen().cursor_position();
+        let original: Vec<String> = (0..10).map(|r| row_text(&p, r)).collect();
+
+        let mut p = snapshot_resize(&mut p, 20, 40);
+        assert_eq!(p.screen().cursor_position(), cursor);
+        let p = snapshot_resize(&mut p, 10, 40);
+        assert_eq!(p.screen().cursor_position(), cursor);
+        for r in 0..10u16 {
+            assert_eq!(row_text(&p, r), original[r as usize]);
+        }
+    }
+
+    #[test]
+    fn vertical_shrink_past_blank_tail_does_not_move_cursor() {
+        // Cursor at row 3 of a 20-row screen with rows 4..19 blank.
+        // Shrinking to 8 rows must truncate the blank tail without moving
+        // the cursor or any content row.
+        let mut p = Parser::new(20, 40, 1000);
+        for i in 0..3 {
+            p.process(format!("R{:02}\r\n", i).as_bytes());
+        }
+        p.process(b"$ ");
+        assert_eq!(p.screen().cursor_position(), (3, 2));
+
+        let p = snapshot_resize(&mut p, 8, 40);
+        assert_eq!(p.screen().size(), (8, 40));
+        assert_eq!(p.screen().cursor_position(), (3, 2));
+        assert_eq!(row_text(&p, 0), "R00");
+        assert_eq!(row_text(&p, 1), "R01");
+        assert_eq!(row_text(&p, 2), "R02");
+        assert_eq!(row_text(&p, 3), "$");
+        for r in 4..8u16 {
+            assert_eq!(row_text(&p, r), "");
+        }
+    }
+
+    #[test]
+    fn alternating_vertical_resizes_keep_cursor_pinned() {
+        // Repeated up/down resizes (skipping sizes that crop the cursor
+        // row) must leave the cursor and visible content rows untouched.
+        let mut p = Parser::new(15, 40, 1000);
+        for i in 0..5 {
+            p.process(format!("X{:02}\r\n", i).as_bytes());
+        }
+        p.process(b"prompt> ");
+        let cursor = p.screen().cursor_position();
+        let original: Vec<String> = (0..6).map(|r| row_text(&p, r)).collect();
+
+        for &rows in &[25u16, 10, 30, 8, 20, 7, 40, 15] {
+            if rows <= cursor.0 {
+                continue;
+            }
+            p = snapshot_resize(&mut p, rows, 40);
+            assert_eq!(p.screen().cursor_position(), cursor);
+            for (r, expected) in original.iter().enumerate() {
+                assert_eq!(row_text(&p, r as u16), *expected);
+            }
+        }
+    }
+
+    #[test]
+    fn vertical_expand_preserves_scrollback_length() {
+        let mut p = Parser::new(5, 40, 1000);
+        for i in 0..20 {
+            p.process(format!("L{:02}\r\n", i).as_bytes());
+        }
+        p.process(b"$ ");
+
+        p.screen_mut().set_scrollback(usize::MAX);
+        let before = p.screen().scrollback();
+        p.screen_mut().set_scrollback(0);
+
+        let mut p = snapshot_resize(&mut p, 12, 40);
+        p.screen_mut().set_scrollback(usize::MAX);
+        let after = p.screen().scrollback();
+        p.screen_mut().set_scrollback(0);
+
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn vertical_expand_then_shrink_preserves_prompt_row() {
+        let mut p = parser_with_prompt(10, 40);
+        let cursor = p.screen().cursor_position();
+        assert_eq!(cursor.0, 9);
+
+        let mut expanded = snapshot_resize(&mut p, 20, 40);
+        assert_eq!(expanded.screen().cursor_position(), cursor);
+        assert_eq!(row_text(&expanded, 9), "prompt>");
+        assert_eq!(row_text(&expanded, 19), "");
+
+        let shrunk = snapshot_resize(&mut expanded, 10, 40);
+        assert_eq!(row_text(&shrunk, 9), "prompt>");
+        assert_eq!(shrunk.screen().cursor_position(), cursor);
+    }
+
+    #[test]
+    fn alternating_resizes_keep_prompt_visible() {
+        let mut p = parser_with_prompt(10, 40);
+        for &rows in &[20u16, 8, 16, 12, 20, 5, 14, 6, 18, 10] {
+            p = snapshot_resize(&mut p, rows, 40);
+            assert_eq!(p.screen().size(), (rows, 40));
+            let visible: Vec<String> = (0..rows).map(|r| row_text(&p, r)).collect();
+            assert!(visible.iter().any(|r| r == "prompt>"));
+        }
+    }
+
+    #[test]
+    fn repeated_vertical_expands_do_not_duplicate_content() {
+        let mut p = parser_with_prompt(8, 40);
+        for new_rows in [10u16, 12, 14, 16, 18, 20] {
+            p = snapshot_resize(&mut p, new_rows, 40);
+            let rows: Vec<String> = (0..new_rows).map(|r| row_text(&p, r)).collect();
+
+            let content_rows: Vec<&String> = rows.iter().filter(|r| !r.is_empty()).collect();
+            assert_eq!(content_rows.len(), 8);
+            for i in 0..7u16 {
+                assert!(rows.iter().any(|r| r == &format!("R{:02}", i)));
+            }
+            assert!(rows.iter().any(|r| r == "prompt>"));
+        }
+    }
+
+    #[test]
+    fn repeated_vertical_shrinks_keep_prompt_visible() {
+        let mut p = parser_with_prompt(20, 40);
+        for new_rows in [18u16, 16, 14, 12, 10, 8, 6, 4] {
+            p = snapshot_resize(&mut p, new_rows, 40);
+            assert_eq!(p.screen().size(), (new_rows, 40));
+            let rows: Vec<String> = (0..new_rows).map(|r| row_text(&p, r)).collect();
+            assert!(rows.iter().any(|r| r == "prompt>"));
+        }
+    }
+
+    #[test]
+    fn expand_shrink_expand_round_trip_preserves_layout() {
+        let mut p = parser_with_prompt(10, 40);
+
+        let mut p1 = snapshot_resize(&mut p, 20, 40);
+        let mut p2 = snapshot_resize(&mut p1, 10, 40);
+        let p3 = snapshot_resize(&mut p2, 20, 40);
+
+        assert_eq!(p3.screen().size(), (20, 40));
+        for i in 0..9u16 {
+            assert_eq!(row_text(&p3, i), format!("R{:02}", i));
+        }
+        assert_eq!(row_text(&p3, 9), "prompt>");
+        for i in 10..20u16 {
+            assert_eq!(row_text(&p3, i), "");
+        }
+    }
+
+    #[test]
+    fn vertical_expand_keeps_prompt_with_scrollback_present() {
+        // 5-row screen with 15 lines pushed into scrollback. Expanding to
+        // 12 rows must keep the prompt at its original row with blank rows
+        // below the cursor.
+        let mut p = Parser::new(5, 40, 1000);
+        for i in 0..19 {
+            p.process(format!("L{:02}\r\n", i).as_bytes());
+        }
+        p.process(b"prompt> ");
+        assert_eq!(p.screen().cursor_position(), (4, 8));
+
+        let mut p = snapshot_resize(&mut p, 12, 40);
+        assert_eq!(p.screen().cursor_position(), (4, 8));
+        assert_eq!(row_text(&p, 4), "prompt>");
+        for r in 5..12u16 {
+            assert_eq!(row_text(&p, r), "");
+        }
+
+        let p = snapshot_resize(&mut p, 5, 40);
+        assert_eq!(p.screen().cursor_position(), (4, 8));
+        assert_eq!(row_text(&p, 4), "prompt>");
+    }
+
+    #[test]
+    fn vertical_expand_with_partial_screen_keeps_layout() {
+        // Cursor at row 2 of a 10-row screen with rows 3..9 blank.
+        // Expanding to 18 rows preserves rows 0..2 and leaves 3..17 blank.
+        let mut p = Parser::new(10, 40, 1000);
+        p.process(b"R00\r\n");
+        p.process(b"R01\r\n");
+        p.process(b"prompt> ");
+        assert_eq!(p.screen().cursor_position(), (2, 8));
+
+        let p = snapshot_resize(&mut p, 18, 40);
+        assert_eq!(p.screen().cursor_position(), (2, 8));
+        assert_eq!(row_text(&p, 0), "R00");
+        assert_eq!(row_text(&p, 1), "R01");
+        assert_eq!(row_text(&p, 2), "prompt>");
+        for r in 3..18u16 {
+            assert_eq!(row_text(&p, r), "");
+        }
+    }
+
+    #[test]
+    fn combined_dimension_change_keeps_prompt_visible() {
+        // Combined row+col change forces re-wrap; verify only that the
+        // prompt remains somewhere on screen.
+        let mut p = Parser::new(5, 80, 1000);
+        for i in 0..14 {
+            p.process(format!("L{:02}\r\n", i).as_bytes());
+        }
+        p.process(b"prompt> ");
+
+        let p = snapshot_resize(&mut p, 12, 40);
+        assert_eq!(p.screen().size(), (12, 40));
+        let visible: Vec<String> = (0..12).map(|r| row_text(&p, r)).collect();
+        assert!(visible.iter().any(|r| r == "prompt>"));
+    }
+
+    #[test]
+    fn col_shrink_with_overflow_does_not_pin_prompt_to_bottom() {
+        // Long-line content forces extra wrapped rows when cols shrink.
+        // The prompt must not end up on the new bottom row.
+        let mut p = Parser::new(8, 80, 1000);
+        let long = "X".repeat(70);
+        for _ in 0..6 {
+            p.process(long.as_bytes());
+            p.process(b"\r\n");
+        }
+        p.process(b"prompt> ");
+
+        let p = snapshot_resize(&mut p, 14, 40);
+        assert_eq!(p.screen().size(), (14, 40));
+        let visible: Vec<String> = (0..14).map(|r| row_text(&p, r)).collect();
+        let prompt_row = visible
+            .iter()
+            .position(|r| r == "prompt>")
+            .expect("prompt should be visible");
+        assert_ne!(prompt_row, 13);
+    }
+
+    #[test]
+    fn mixed_dimension_resize_sequence_keeps_content_coherent() {
+        // After a sequence of mixed row+col resizes, the prompt must stay
+        // visible and no content row may appear more than once.
+        let mut p = parser_with_prompt(10, 40);
+        for &(rows, cols) in &[(20u16, 40u16), (15, 60), (8, 80), (16, 50), (10, 40)] {
+            p = snapshot_resize(&mut p, rows, cols);
+            assert_eq!(p.screen().size(), (rows, cols));
+
+            let visible: Vec<String> = (0..rows).map(|r| row_text(&p, r)).collect();
+            assert!(visible.iter().any(|r| r == "prompt>"));
+
+            let content: Vec<&String> = visible
+                .iter()
+                .filter(|r| !r.is_empty() && r.starts_with('R'))
+                .collect();
+            let mut deduped = content.clone();
+            deduped.sort();
+            deduped.dedup();
+            assert_eq!(content.len(), deduped.len());
+        }
+    }
+
+    #[test]
+    fn resize_sequence_through_full_loop_keeps_prompt_visible() {
+        // Mirrors the loop run by EmbeddedTerminal::resize: feed each
+        // returned parser back into the next snapshot_resize call.
+        let mut p = parser_with_prompt(10, 40);
+        for &(rows, cols) in &[
+            (12u16, 40u16),
+            (8, 40),
+            (20, 40),
+            (10, 40),
+            (15, 40),
+            (5, 40),
+        ] {
+            assert!(!p.screen().alternate_screen());
+            p = snapshot_resize(&mut p, rows, cols);
+            let visible: Vec<String> = (0..rows).map(|r| row_text(&p, r)).collect();
+            assert!(visible.iter().any(|r| r == "prompt>"));
+        }
+    }
+
+    #[test]
+    fn vertical_expand_with_cursor_above_bottom() {
+        // Prompt at row 5 of a 10-row screen with rows 6..9 blank.
+        // Expanding to 15 rows must keep the prompt at row 5 with all
+        // rows below it blank.
+        let mut p = Parser::new(10, 40, 1000);
+        for i in 0..5 {
+            p.process(format!("R{:02}\r\n", i).as_bytes());
+        }
+        p.process(b"prompt> ");
+        assert_eq!(p.screen().cursor_position(), (5, 8));
+
+        let p = snapshot_resize(&mut p, 15, 40);
+        assert_eq!(p.screen().cursor_position(), (5, 8));
+        assert_eq!(row_text(&p, 5), "prompt>");
+        for r in 6..15u16 {
+            assert_eq!(row_text(&p, r), "");
+        }
+    }
+
+    // Alternate-screen resize uses set_size rather than the snapshot path;
+    // verify that path remains correct.
     #[test]
     fn alternate_screen_uses_set_size_not_snapshot() {
         let mut p = Parser::new(10, 10, 1000);
