@@ -1605,6 +1605,7 @@ dependencies = [
  "time",
  "toml",
  "vt100",
+ "windows-sys",
 ]
 
 [[package]]

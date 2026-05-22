@@ -152,8 +152,10 @@ sshmux --reset-kb
 │         │                              │                │
 │         v                              v                │
 │  ┌──────────────────────────────────────────────────┐   │
-│  │          portable_pty  (PTY master)              │   │
-│  │          PTY slave fd                            │   │
+│  │  crate::pty  (cross-platform master/slave/child) │   │
+│  │  • Unix: portable_pty                            │   │
+│  │  • Windows: custom ConPTY w/ RESIZE_QUIRK +      │   │
+│  │    WIN32_INPUT_MODE + PASSTHROUGH (Win11 22621+) │   │
 │  └───────────────────────────┬──────────────────────┘   │
 │                              │  spawn                   │
 └──────────────────────────────┼──────────────────────────┘
@@ -184,7 +186,10 @@ sshmux --reset-kb
 | `browser/sftp.rs` | `FileBrowser` — SFTP state machine and commands |
 | `browser/ssh.rs` | `SshBrowser` — SSH/SCP state machine, password handling |
 | `browser/parse.rs` | `ls -la` parsing, ANSI stripping, transfer progress scraping |
-| `terminal.rs` | `EmbeddedTerminal` — PTY wrapper (portable\_pty + vt100), `PtyChannel` trait, `MockPty` |
+| `terminal.rs` | `EmbeddedTerminal` — wraps `crate::pty` + vt100, exposes `PtyChannel` trait; `MockPty` for tests |
+| `pty/mod.rs` | Cross-platform PTY abstraction (re-exports the right backend per target) |
+| `pty/unix.rs` | Unix backend — thin wrapper around `portable_pty` |
+| `pty/win.rs` | Windows backend — custom ConPTY via `windows-sys` with modern compatibility flags |
 | `keybindings.rs` | `KeyBindings` — key binding definitions, config load/save, editor support |
 | `tab.rs` | `Tab` — pane tree + focus index |
 | `ssh_config.rs` | `~/.ssh/config` parser |

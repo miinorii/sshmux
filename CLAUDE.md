@@ -43,9 +43,13 @@ SSH session multiplexer TUI. Uses system `ssh`, `sftp`, and `scp` binaries — n
 
 ### PTY layer
 
-`EmbeddedTerminal` (terminal.rs) wraps `portable_pty`. A background reader thread processes output through `vt100::Parser` (screen grid + 1000-line scrollback), accumulates `raw_output` (only when `capture_raw` is true — browsers only, not interactive sessions), and replies to DSR probes. The main thread writes via `send_str()`/`send_char()`. The `PtyChannel` trait abstracts PTY I/O; `MockPty` implements it for unit tests.
+`EmbeddedTerminal` (terminal.rs) sits on top of `crate::pty`, a small cross-platform abstraction. On Unix, `pty/unix.rs` is a thin wrapper around `portable_pty`. On Windows, `pty/win.rs` is a custom ConPTY backend that uses `windows-sys` directly so we can opt into the modern compatibility flags — `PSEUDOCONSOLE_INHERIT_CURSOR | RESIZE_QUIRK | WIN32_INPUT_MODE` always, plus `PASSTHROUGH_MODE` on Win11 build ≥ 22621. Passthrough makes ConPTY forward escape sequences instead of re-interpreting them, which removes a class of artifacts. Set `SSHMUX_NO_CONPTY_PASSTHROUGH=1` to disable.
+
+A background reader thread processes output through `vt100::Parser` (screen grid + 1000-line scrollback), accumulates `raw_output` (only when `capture_raw` is true — browsers only, not interactive sessions), and replies to DSR probes. The main thread writes via `send_str()`/`send_char()`. The `PtyChannel` trait abstracts PTY I/O; `MockPty` implements it for unit tests.
 
 Terminal state (mouse mode, application cursor, cursor visibility, alternate screen) is queried directly from `vt100::Screen` via methods on `EmbeddedTerminal` (`mouse_active()`, `app_cursor()`, `alternate_screen()`). No manual escape sequence scanning.
+
+Resize is straightforward: `master.resize(rows, cols)` followed by `parser.screen_mut().set_size(rows, cols)`. With ConPTY's `RESIZE_QUIRK` already enabled by the backend, the child shell's own SIGWINCH redraw covers reflow — no local snapshot/replay needed.
 
 Three PTY constructors: `ssh()` (interactive session, no raw capture), `sftp()` (hidden, for SFTP browser, captures raw), `ssh_shell()` (hidden, for SCP browser, captures raw). A fourth, `ssh_raw()`, accepts arbitrary SSH arguments for manual connections.
 
@@ -83,8 +87,7 @@ The Connect pane's `KeyEditor` overlay (replacing the old Help overlay) lets use
 ## Constraints
 
 - No external SSH libraries (ssh2, russh). Must use system binaries only.
-- Must work on both Windows (ConPTY) and Linux.
-- ConPTY on Windows has known quirks: spurious SIGWINCH on mouse mode changes causes double-prompt artifacts in some remote shells. No clean fix found yet.
+- Must work on both Windows (custom ConPTY backend in `pty/win.rs`) and Linux (`portable_pty` via `pty/unix.rs`).
 
 ## Code quality rules
 
