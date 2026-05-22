@@ -379,7 +379,10 @@ fn handle_connect_key(
         }))
     ) {
         match code {
-            KeyCode::Char(c) if !ctrl => {
+            // Accept plain chars and AltGr chars (reported as Ctrl+Alt on
+            // Windows/Linux, e.g. `@` on AZERTY/QWERTZ). Reject Ctrl-only
+            // combos so shortcuts like Ctrl+A aren't typed into the field.
+            KeyCode::Char(c) if !ctrl || alt => {
                 if let ConnectOverlay::ConnectInput(input) = &mut connect_mut!().overlay {
                     input.push(c);
                 }
@@ -1699,6 +1702,27 @@ mod tests {
         })) = app.tab().focused_pane()
         {
             assert_eq!(input, "");
+        } else {
+            panic!("expected ConnectInput");
+        }
+    }
+
+    #[test]
+    fn connect_input_altgr_char_appended() {
+        // AltGr is reported as Ctrl+Alt on Windows/Linux. Characters like `@`
+        // on AZERTY/QWERTZ layouts arrive with both modifiers set and must
+        // still be typed into the input.
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('c'), false, false, false);
+        key(&mut app, KeyCode::Char('u'), false, false, false);
+        key(&mut app, KeyCode::Char('@'), true, true, false);
+        key(&mut app, KeyCode::Char('h'), false, false, false);
+        if let Some(Pane::Connect(ConnectPane {
+            overlay: ConnectOverlay::ConnectInput(input),
+            ..
+        })) = app.tab().focused_pane()
+        {
+            assert_eq!(input, "u@h");
         } else {
             panic!("expected ConnectInput");
         }
