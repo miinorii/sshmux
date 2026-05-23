@@ -17,6 +17,9 @@ ssh2-config = "0.7.0"
 time = { version = "0.3", features = ["macros"] }
 vt100 = "0.16.2"
 
+[profile.release]
+strip = "symbols"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
