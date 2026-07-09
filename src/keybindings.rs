@@ -363,7 +363,7 @@ fn log_bindings(kb: &KeyBindings) {
     let c = &kb.connect;
     let b = &kb.browser;
     info!(
-        "config: global: quit={}, new_tab={}, close={}, split_h={}, split_v={}, prev_tab={}, next_tab={}, focus_left={}, focus_right={}, focus_up={}, focus_down={}",
+        "config: global: quit={}, new_tab={}, close={}, split_h={}, split_v={}, prev_tab={}, next_tab={}, focus_left={}, focus_right={}, focus_up={}, focus_down={}, zoom={}",
         g.quit,
         g.new_tab,
         g.close,
@@ -375,6 +375,7 @@ fn log_bindings(kb: &KeyBindings) {
         g.focus_right,
         g.focus_up,
         g.focus_down,
+        g.zoom,
     );
     info!(
         "config: connect: prev={}, next={}, connect={}, browser={}, manual={}, help={}",
@@ -572,7 +573,9 @@ pub struct BindingEntry {
 }
 
 impl KeyBindings {
-    /// Returns all 30 bindings in display order, grouped by section.
+    /// Returns all 27 bindings in display order, grouped by section.
+    /// The key-editor constants in `pane::connect` are derived from these
+    /// group sizes — a consistency test there guards against drift.
     pub fn entries(&self) -> Vec<BindingEntry> {
         let g = &self.global;
         let c = &self.connect;

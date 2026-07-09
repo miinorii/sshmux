@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cargo build --release        # Release binary at target/release/sshmux
 cargo build                  # Debug build
-cargo test --lib             # Run all tests (~373 tests, inline in source files)
+cargo test --lib             # Run all tests (~490 tests, inline in source files)
 cargo test pane::tests       # Run tests for a specific module
 cargo test test_name         # Run a single test by name
 cargo clippy --release       # Lint — keep at zero warnings
@@ -35,7 +35,7 @@ SSH session multiplexer TUI. Uses system `ssh`, `sftp`, and `scp` binaries — n
 
 ### Core loop
 
-`main.rs` runs a 5ms poll loop: crossterm events → `input.rs` dispatch → ratatui render. The App holds a `Vec<Tab>`, each Tab holds a tree of `Pane` nodes. All key and mouse handling lives in `input.rs`.
+`main.rs` runs a 5ms poll loop (`event::poll` with a 5ms timeout — blocking, not a busy sleep): crossterm events → `input.rs` dispatch → ratatui render. The App holds a `Vec<Tab>`, each Tab holds a tree of `Pane` nodes. All key and mouse handling lives in `input.rs`. A `TerminalGuard` (RAII drop + panic hook) restores the user's terminal on any exit path, including panics.
 
 ### Pane tree
 
@@ -63,13 +63,15 @@ Both browsers (`FileBrowser` in browser/sftp.rs, `SshBrowser` in browser/ssh.rs)
 
 Both use prompt-stability detection: raw PTY buffer byte count unchanged for N ticks + expected prompt string present. They share parsing utilities from `browser/parse.rs` (ANSI stripping, `ls -la` parsing, transfer progress scraping).
 
-**SFTP**: Detects `sftp>` prompt. Commands (`cd`, `get`, `put`, `rm`) run inside the SFTP session.
+**SFTP**: Detects `sftp>` prompt. Commands (`cd`, `get`, `put`, `rm`) run inside the SFTP session. Transfer completion checks output for error text before reporting success.
 
-**SCP**: Sets `PS1='SSHMUX> '` after SSH auth, then detects `SSHMUX> ` prompt. Browsing uses shell commands (`ls`, `rm`, `pwd`). Transfers spawn separate `scp` processes in temporary PTYs.
+**SCP**: States `Connecting → SettingPrompt → WaitingPwd → WaitingLs → Idle`. Sets `PS1='SSHMUX> '` after SSH auth, then detects `SSHMUX> ` prompt. Browsing uses shell commands (`ls`, `rm`, `pwd`). Transfers spawn separate `scp` processes in temporary PTYs and check the scp exit code on completion. A password sub-state machine (`waiting_password`, `saved_password`, `password_prompts_seen`) handles SSH and SCP password prompts, auto-replays the saved password, and restarts a dropped transfer after a password retry. The prompt-count comparison relies on the raw buffer NOT being drained during `Connecting` — never reset `password_prompts_seen` without also draining. `Connecting`/`SettingPrompt` share the 30s command timeout (refreshed by connect-phase keystrokes and password submissions) so undetectable shell prompts fail with a hint instead of hanging.
+
+Transfer queues (`transfer.pending`) always carry an explicit `pending_direction`, recorded when the queue is filled — chaining never infers direction from past transfers. The in-flight transfer is tracked in `transfer.current` for restart-after-password-retry.
 
 ### Keybindings
 
-`keybindings.rs` defines `KeyBinding` (single key combo with code/ctrl/alt/shift) and three binding groups: `GlobalBindings` (9), `ConnectBindings` (6), `BrowserBindings` (9) — 24 total, wrapped in `KeyBindings`. Bindings load from `~/.config/sshmux/config.toml` at startup; `--reset-kb` deletes the config file to restore defaults.
+`keybindings.rs` defines `KeyBinding` (single key combo with code/ctrl/alt/shift) and three binding groups: `GlobalBindings` (12), `ConnectBindings` (6), `BrowserBindings` (9) — 27 total, wrapped in `KeyBindings`. Bindings load from `~/.config/sshmux/config.toml` at startup; `--reset-kb` deletes the config file to restore defaults. When adding a binding, update the group struct, its `Default`, the `Raw*` struct, `merge`, `entries()`, `set_binding()`, and the editor constants in `pane/connect.rs` — a consistency test (`editor_constants_match_binding_entries`) fails if the constants drift.
 
 The Connect pane's `KeyEditor` overlay (replacing the old Help overlay) lets users remap bindings interactively. When in capture mode (`editing: true`), `input.rs` sets `editor_capturing` to bypass global shortcuts and Alt suppression so any key combo can be captured. `KeyBindings::save()` writes changes to disk immediately.
 
@@ -83,6 +85,8 @@ The Connect pane's `KeyEditor` overlay (replacing the old Help overlay) lets use
 - Right-click context menu lives on `App` (not per-pane): `context_menu: Option<ContextMenu>`. Opens on right-click Down, tracks hover via Drag, executes on Up, dismissed by any keypress or resize. Right-click is intercepted before pane dispatch so it is never forwarded to remote apps.
 - Browser focus toggle (`Tab` key) switches between local and remote panels
 - `pane_inner()` computes render area by subtracting tab bar and shortcut bar
+- Exited panes (session or browser) share one exit overlay: `render_exit_overlay()` (pane/mod.rs) draws it, `handle_exit_overlay_key()` (input.rs) handles Reconnect/Close. The key handler MUST run before `handle_browser_key_dispatch` — the browser path consumes every key on browser panes and would make the overlay unreachable.
+- `App::close_focused_or_tab()` is the single close path (global shortcut, context menu, exit overlays)
 
 ## Constraints
 

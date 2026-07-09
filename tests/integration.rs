@@ -281,7 +281,8 @@ fn sftp_browser_connects_and_lists() {
     // Should contain known test directories
     let names: Vec<&str> = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .map(|e| e.name.as_str())
         .collect();
@@ -310,7 +311,8 @@ fn sftp_browser_navigate_into_directory() {
     // Find "documents" in the listing and select it
     let doc_idx = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .position(|e| e.name == "documents")
         .expect("'documents' not found in listing");
@@ -336,7 +338,8 @@ fn sftp_browser_navigate_into_directory() {
     // Should see the test files
     let names: Vec<&str> = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .map(|e| e.name.as_str())
         .collect();
@@ -360,7 +363,8 @@ fn sftp_browser_download_file() {
     // Navigate into "documents"
     let doc_idx = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .position(|e| e.name == "documents")
         .expect("'documents' not found");
@@ -376,7 +380,8 @@ fn sftp_browser_download_file() {
     // Select "readme.txt"
     let file_idx = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .position(|e| e.name == "readme.txt")
         .expect("'readme.txt' not found");
@@ -438,7 +443,8 @@ fn sftp_browser_upload_file() {
     // Select the upload file in the local panel
     let file_idx = browser
         .core
-        .local.entries
+        .local
+        .entries
         .iter()
         .position(|e| e.name == "upload_test.txt")
         .expect("'upload_test.txt' not found in local entries");
@@ -461,7 +467,8 @@ fn sftp_browser_upload_file() {
     // Verify: the remote listing should now contain "upload_test.txt"
     let names: Vec<&str> = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .map(|e| e.name.as_str())
         .collect();
@@ -493,7 +500,8 @@ fn sftp_browser_go_up() {
     // Navigate into "documents"
     let doc_idx = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .position(|e| e.name == "documents")
         .expect("'documents' not found");
@@ -573,7 +581,8 @@ fn ssh_browser_connects_and_lists() {
 
     let names: Vec<&str> = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .map(|e| e.name.as_str())
         .collect();
@@ -597,7 +606,8 @@ fn ssh_browser_navigate_into_directory() {
     // Find "documents" and navigate into it
     let doc_idx = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .position(|e| e.name == "documents")
         .expect("'documents' not found");
@@ -618,7 +628,8 @@ fn ssh_browser_navigate_into_directory() {
 
     let names: Vec<&str> = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .map(|e| e.name.as_str())
         .collect();
@@ -642,7 +653,8 @@ fn ssh_browser_download_file() {
     // Navigate into documents
     let doc_idx = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .position(|e| e.name == "documents")
         .expect("'documents' not found");
@@ -658,7 +670,8 @@ fn ssh_browser_download_file() {
     // Select readme.txt
     let file_idx = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .position(|e| e.name == "readme.txt")
         .expect("'readme.txt' not found");
@@ -717,7 +730,8 @@ fn ssh_browser_upload_file() {
 
     let file_idx = browser
         .core
-        .local.entries
+        .local
+        .entries
         .iter()
         .position(|e| e.name == "scp_upload_test.txt")
         .expect("'scp_upload_test.txt' not found in local entries");
@@ -740,7 +754,8 @@ fn ssh_browser_upload_file() {
     // Verify remote listing contains the uploaded file
     let names: Vec<&str> = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .map(|e| e.name.as_str())
         .collect();
@@ -772,7 +787,8 @@ fn ssh_browser_go_up() {
     // Navigate into documents
     let doc_idx = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .position(|e| e.name == "documents")
         .expect("'documents' not found");
@@ -823,7 +839,8 @@ fn sftp_browser_delete_file() {
     browser.core.local.entries = sshmux::browser::parse::read_local_dir(&tmp);
     let file_idx = browser
         .core
-        .local.entries
+        .local
+        .entries
         .iter()
         .position(|e| e.name == "to_delete.txt")
         .expect("'to_delete.txt' not found");
@@ -839,7 +856,8 @@ fn sftp_browser_delete_file() {
     // Now select the uploaded file on the remote side and delete it
     let file_idx = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .position(|e| e.name == "to_delete.txt")
         .expect("'to_delete.txt' not found on remote after upload");
@@ -865,7 +883,8 @@ fn sftp_browser_delete_file() {
     // Verify it's gone
     let names: Vec<&str> = browser
         .core
-        .remote.entries
+        .remote
+        .entries
         .iter()
         .map(|e| e.name.as_str())
         .collect();

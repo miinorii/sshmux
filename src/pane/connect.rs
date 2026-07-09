@@ -333,6 +333,24 @@ impl ConnectPane {
 mod tests {
     use super::*;
 
+    /// The editor constants above are hand-maintained copies of the group
+    /// sizes in `KeyBindings::entries()`. If they drift, rendering the key
+    /// editor panics with an out-of-bounds `entries[idx]` — fail here instead.
+    #[test]
+    fn editor_constants_match_binding_entries() {
+        let entries = KeyBindings::default().entries();
+        let globals = entries.iter().filter(|e| e.group == "global").count();
+        let connects = entries.iter().filter(|e| e.group == "connect").count();
+        let browsers = entries.iter().filter(|e| e.group == "browser").count();
+        assert_eq!(GLOBAL_COUNT, globals, "GLOBAL_COUNT out of sync");
+        assert_eq!(CONNECT_COUNT, connects, "CONNECT_COUNT out of sync");
+        assert_eq!(
+            EDITOR_ROW_COUNT,
+            globals + connects + browsers + 3,
+            "EDITOR_ROW_COUNT out of sync (3 headers + all bindings)"
+        );
+    }
+
     #[test]
     fn editor_nav_down_skips_headers() {
         let mut ls = ListState::default();

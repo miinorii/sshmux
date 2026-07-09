@@ -1,9 +1,11 @@
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
 use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 use log::{debug, error, trace};
 use ratatui::{layout::Rect, widgets::ListState};
 
 use crate::app::{App, CONTEXT_MENU_ITEMS, ContextMenu, PaneResizeDrag, context_menu_rect};
-use crate::browser::common::Browser;
 use crate::browser::{BrowserKeyAction, DragAction, FileBrowser, SshBrowser, handle_browser_key};
 use crate::keybindings::KeyBinding;
 use crate::pane::connect::{
@@ -66,6 +68,14 @@ pub fn handle_key(
         return action;
     }
 
+    // ---- Exit overlay (exited session or browser) ----
+    // Must run before the browser dispatch: the browser key path consumes
+    // every key on a browser pane, which would make Reconnect / Close pane
+    // unreachable once its PTY has exited.
+    if handle_exit_overlay_key(app, code, last_area) {
+        return Action::Continue;
+    }
+
     // ---- Browser pane (SFTP or SCP) ----
     if let Some(action) = handle_browser_key_dispatch(app, code, ctrl, alt, shift) {
         return action;
@@ -76,16 +86,6 @@ pub fn handle_key(
     // affects sessions where we must prevent Alt+key from being forwarded
     // to the remote terminal.
     if !editor_capturing && alt && !ctrl {
-        return Action::Continue;
-    }
-
-    // ---- Session exit menu ----
-    if handle_session_exit_key(app, code, last_area) {
-        return Action::Continue;
-    }
-
-    // ---- Browser exit menu ----
-    if handle_browser_exit_key(app, code, last_area) {
         return Action::Continue;
     }
 
@@ -143,14 +143,7 @@ fn handle_global_key(
         return Some(Action::Continue);
     }
     if g.close.matches(code, ctrl, alt, shift) {
-        app.tab_mut().zoom = false;
-        let was_last_pane = app.tab().leaf_count() == 1;
-        if was_last_pane {
-            app.close_tab();
-        } else {
-            app.tab_mut().close_focused();
-            app.resize_all(last_area);
-        }
+        app.close_focused_or_tab(last_area);
         return Some(Action::Continue);
     }
     if g.new_tab.matches(code, ctrl, alt, shift) {
@@ -220,19 +213,33 @@ fn handle_session_key(
 
     match code {
         KeyCode::Char(c) if ctrl && !alt => {
-            // Convert Ctrl+<letter> to the corresponding control byte (0x01..0x1A).
-            // Some terminals report Ctrl+C as Char('\x03') with CONTROL modifier
-            // instead of Char('c') with CONTROL — handle both forms.
-            let byte = if c.is_ascii_control() {
-                c as u8
-            } else {
-                (c as u8).to_ascii_uppercase().wrapping_sub(b'@')
+            // Convert Ctrl+<key> to its control byte. Some terminals report
+            // Ctrl+C as Char('\x03') with CONTROL modifier instead of
+            // Char('c') with CONTROL — handle both forms. Keys without a
+            // control-byte meaning are dropped (never `wrapping_sub`, which
+            // produced invalid >0x7F bytes for digits and punctuation).
+            let byte = match c {
+                c if c.is_ascii_control() => Some(c as u8),
+                ' ' | '@' => Some(0x00), // Ctrl+Space / Ctrl+@ → NUL
+                'a'..='z' => Some(c as u8 - b'a' + 1),
+                'A'..='Z' => Some(c as u8 - b'A' + 1),
+                '[' => Some(0x1b),
+                '\\' => Some(0x1c),
+                ']' => Some(0x1d),
+                '^' => Some(0x1e),
+                '_' => Some(0x1f),
+                '?' => Some(0x7f),
+                _ => None,
             };
             trace!(
-                "ctrl+char: c={:?} (0x{:02X}) -> byte=0x{:02X}",
+                "ctrl+char: c={:?} (0x{:02X}) -> byte={:02X?}",
                 c, c as u32, byte
             );
-            app.send_str(&String::from_utf8_lossy(&[byte]));
+            if let Some(b) = byte {
+                // All control bytes are < 0x80, so the char cast is a
+                // single-byte UTF-8 encoding.
+                app.send_char(b as char);
+            }
         }
         KeyCode::Char(c) => app.send_char(c),
         KeyCode::Enter => app.send_str("\r"),
@@ -585,55 +592,51 @@ fn handle_browser_key_dispatch(
 }
 
 // ---------------------------------------------------------------------------
-// Session exit menu keys
+// Exit overlay keys (exited session or browser)
 // ---------------------------------------------------------------------------
 
-/// Returns true if the focused pane is an exited session and the event was handled.
-fn handle_session_exit_key(app: &mut App, code: KeyCode, last_area: Rect) -> bool {
-    let session_exited = matches!(
-        app.tab().focused_pane(),
-        Some(Pane::Session { terminal, .. }) if terminal.process_exited()
-    );
-    if !session_exited {
+/// Get the Reconnect/Close selection of the focused exited pane, if the pane
+/// shows an exit overlay.
+fn exit_selection_mut(pane: &mut Pane) -> Option<&mut u8> {
+    match pane {
+        Pane::Session { exit_selection, .. } => Some(exit_selection),
+        p => p.as_browser_mut().map(|b| &mut b.core_mut().exit_selection),
+    }
+}
+
+/// Returns true if the focused pane is an exited session/browser and the
+/// event was consumed by its Reconnect / Close overlay.
+fn handle_exit_overlay_key(app: &mut App, code: KeyCode, last_area: Rect) -> bool {
+    let exited = match app.tab().focused_pane() {
+        Some(Pane::Session { terminal, .. }) => terminal.process_exited(),
+        Some(p) => p.as_browser().is_some_and(|b| b.process_exited()),
+        None => false,
+    };
+    if !exited {
         return false;
     }
 
     match code {
         KeyCode::Left | KeyCode::Right => {
-            if let Some(Pane::Session { exit_selection, .. }) = app.tab_mut().focused_pane_mut() {
-                *exit_selection ^= 1;
+            if let Some(sel) = app
+                .tab_mut()
+                .focused_pane_mut()
+                .and_then(exit_selection_mut)
+            {
+                *sel ^= 1;
             }
         }
         KeyCode::Enter => {
-            let action =
-                if let Some(Pane::Session { exit_selection, .. }) = app.tab().focused_pane() {
-                    Some(*exit_selection)
-                } else {
-                    None
-                };
-            match action {
-                Some(0) => {
-                    // Reconnect
-                    if let Some(Pane::Session { ssh_args, .. }) = app.tab().focused_pane() {
-                        let args = ssh_args.clone();
-                        if let Err(e) = app.open_session_raw(&args, last_area) {
-                            error!("reconnect: {}", e);
-                        }
-                        app.resize_all(last_area);
-                    }
-                }
-                Some(1) => {
-                    // Close pane
-                    app.tab_mut().zoom = false;
-                    let was_last_pane = app.tab().leaf_count() == 1;
-                    if was_last_pane {
-                        app.close_tab();
-                    } else {
-                        app.tab_mut().close_focused();
-                        app.resize_all(last_area);
-                    }
-                }
-                _ => {}
+            let sel = app
+                .tab_mut()
+                .focused_pane_mut()
+                .and_then(exit_selection_mut)
+                .map(|s| *s)
+                .unwrap_or(0);
+            if sel == 0 {
+                reconnect_focused(app, last_area);
+            } else {
+                app.close_focused_or_tab(last_area);
             }
         }
         _ => {}
@@ -641,73 +644,47 @@ fn handle_session_exit_key(app: &mut App, code: KeyCode, last_area: Rect) -> boo
     true
 }
 
-/// Returns true if the focused pane is an exited browser and the event was handled.
-fn handle_browser_exit_key(app: &mut App, code: KeyCode, last_area: Rect) -> bool {
-    let browser_exited = match app.tab().focused_pane() {
-        Some(Pane::FileBrowser { browser }) => browser.process_exited(),
-        Some(Pane::SshBrowser { browser }) => browser.process_exited(),
-        _ => false,
-    };
-    if !browser_exited {
-        return false;
-    }
-
-    match code {
-        KeyCode::Left | KeyCode::Right => match app.tab_mut().focused_pane_mut() {
-            Some(Pane::FileBrowser { browser }) => {
-                browser.core.exit_selection ^= 1;
+/// Reconnect the focused exited pane, replacing it with a fresh one of the
+/// same kind (session, SFTP browser, or SCP browser).
+fn reconnect_focused(app: &mut App, last_area: Rect) {
+    match app.tab().focused_pane() {
+        Some(Pane::Session { ssh_args, .. }) => {
+            let args = ssh_args.clone();
+            if let Err(e) = app.open_session_raw(&args, last_area) {
+                error!("reconnect: {}", e);
             }
-            Some(Pane::SshBrowser { browser }) => {
-                browser.core.exit_selection ^= 1;
-            }
-            _ => {}
-        },
-        KeyCode::Enter => {
-            let (exit_selection, host) = match app.tab().focused_pane() {
-                Some(Pane::FileBrowser { browser }) => {
-                    (browser.core.exit_selection, browser.core.host.clone())
-                }
-                Some(Pane::SshBrowser { browser }) => {
-                    (browser.core.exit_selection, browser.core.host.clone())
-                }
-                _ => return true,
-            };
-            let is_sftp = matches!(app.tab().focused_pane(), Some(Pane::FileBrowser { .. }));
-            match exit_selection {
-                0 => {
-                    // Reconnect
-                    let result = if is_sftp {
-                        FileBrowser::new(&host).map(|b| Pane::FileBrowser { browser: b })
-                    } else {
-                        SshBrowser::new(&host).map(|b| Pane::SshBrowser { browser: b })
-                    };
-                    match result {
-                        Ok(new_pane) => {
-                            if let Some(pane) = app.tab_mut().focused_pane_mut() {
-                                *pane = new_pane;
-                            }
-                            app.resize_all(last_area);
-                        }
-                        Err(e) => error!("browser reconnect: {}", e),
-                    }
-                }
-                1 => {
-                    // Close pane
-                    app.tab_mut().zoom = false;
-                    let was_last = app.tab().leaf_count() == 1;
-                    if was_last {
-                        app.close_tab();
-                    } else {
-                        app.tab_mut().close_focused();
-                        app.resize_all(last_area);
-                    }
-                }
-                _ => {}
-            }
+            app.resize_all(last_area);
+        }
+        Some(Pane::FileBrowser { browser }) => {
+            let host = browser.core.host.clone();
+            replace_focused_pane(
+                app,
+                FileBrowser::new(&host).map(|b| Pane::FileBrowser { browser: b }),
+                last_area,
+            );
+        }
+        Some(Pane::SshBrowser { browser }) => {
+            let host = browser.core.host.clone();
+            replace_focused_pane(
+                app,
+                SshBrowser::new(&host).map(|b| Pane::SshBrowser { browser: b }),
+                last_area,
+            );
         }
         _ => {}
     }
-    true
+}
+
+fn replace_focused_pane(app: &mut App, result: Result<Pane>, last_area: Rect) {
+    match result {
+        Ok(new_pane) => {
+            if let Some(pane) = app.tab_mut().focused_pane_mut() {
+                *pane = new_pane;
+            }
+            app.resize_all(last_area);
+        }
+        Err(e) => error!("browser reconnect: {}", e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -762,16 +739,7 @@ fn handle_context_menu_mouse(
 fn execute_context_menu_action(app: &mut App, idx: usize, last_area: Rect) -> Action {
     match idx {
         0 => app.new_tab(),
-        1 => {
-            app.tab_mut().zoom = false;
-            let was_last = app.tab().leaf_count() == 1;
-            if was_last {
-                app.close_tab();
-            } else {
-                app.tab_mut().close_focused();
-                app.resize_all(last_area);
-            }
-        }
+        1 => app.close_focused_or_tab(last_area),
         2 => {
             app.tab_mut().zoom = false;
             app.tab_mut().split(Split::LeftRight, pane_inner(last_area));
@@ -792,11 +760,15 @@ fn execute_context_menu_action(app: &mut App, idx: usize, last_area: Rect) -> Ac
 
 /// Given the two adjacent ratios at drag start, the combined pixel span, and
 /// the cursor delta, return the new pair of ratios. Enforces a 3-pixel minimum
-/// on each side. `span` must be > 0 (caller's responsibility).
+/// on each side; spans too small to honour that minimum (< 7) are returned
+/// unchanged — clamping there would go negative and overflow the ratio math.
 pub fn compute_drag_ratios(start_ratios: (u16, u16), span: u16, delta: i32) -> (u16, u16) {
     let total = start_ratios.0 as u32 + start_ratios.1 as u32;
+    if span < 7 || total == 0 {
+        return start_ratios;
+    }
     let orig_left_px = (start_ratios.0 as u32 * span as u32 / total) as i32;
-    let new_left_px = (orig_left_px + delta).max(3).min(span as i32 - 3);
+    let new_left_px = (orig_left_px + delta).clamp(3, span as i32 - 3);
     let new_r0 = ((new_left_px as u32 * total) / span as u32).max(1) as u16;
     let new_r1 = (total as u16).saturating_sub(new_r0).max(1);
     (new_r0, new_r1)
@@ -1137,13 +1109,53 @@ fn handle_browser_mouse(
 
 pub fn handle_paste(app: &mut App, text: &str) {
     debug!("handle_paste: text={:?}", text);
+
+    // Session: forward as bracketed paste.
     if matches!(app.tab().focused_pane(), Some(Pane::Session { .. })) {
         debug!("handle_paste: forwarding to session as bracketed paste");
         let bracketed = format!("\x1b[200~{}\x1b[201~", text);
         app.send_str(&bracketed);
-    } else {
-        debug!("handle_paste: ignored (not a session pane)");
+        return;
     }
+
+    // SCP password prompt: paste the password (control chars stripped so a
+    // trailing newline doesn't auto-submit).
+    if let Some(Pane::SshBrowser { browser }) = app.tab_mut().focused_pane_mut()
+        && browser.waiting_password
+    {
+        for c in text.chars().filter(|c| !c.is_control()) {
+            browser.password_char(c);
+        }
+        return;
+    }
+
+    // Browser: feed the drag-and-drop detection buffer. Terminals that
+    // deliver file drops as bracketed paste (e.g. Windows Terminal) arrive
+    // here instead of as individual key events.
+    if let Some(browser) = app
+        .tab_mut()
+        .focused_pane_mut()
+        .and_then(|p| p.as_browser_mut())
+    {
+        let core = browser.core_mut();
+        core.paste_buf.push_str(text);
+        core.paste_deadline = Some(Instant::now() + Duration::from_millis(50));
+        debug!(
+            "handle_paste: {} chars into browser paste buffer",
+            text.len()
+        );
+        return;
+    }
+
+    // Manual-connect input overlay: append the pasted text.
+    if let Some(Pane::Connect(p)) = app.tab_mut().focused_pane_mut()
+        && let ConnectOverlay::ConnectInput(input) = &mut p.overlay
+    {
+        input.extend(text.chars().filter(|c| !c.is_control()));
+        return;
+    }
+
+    debug!("handle_paste: ignored (no paste target)");
 }
 
 // ---------------------------------------------------------------------------
@@ -1997,8 +2009,118 @@ mod tests {
     #[test]
     fn paste_ignored_on_connect_pane() {
         let mut app = make_app();
-        // Should not panic — paste on non-session pane is a no-op
+        // Should not panic — paste with no overlay open is a no-op
         handle_paste(&mut app, "hello world");
+    }
+
+    #[test]
+    fn paste_into_connect_input_appends_without_control_chars() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('c'), false, false, false); // open manual connect
+        handle_paste(&mut app, "user@host\n");
+        if let Some(Pane::Connect(ConnectPane {
+            overlay: ConnectOverlay::ConnectInput(input),
+            ..
+        })) = app.tab().focused_pane()
+        {
+            assert_eq!(input, "user@host");
+        } else {
+            panic!("expected ConnectInput");
+        }
+    }
+
+    #[test]
+    fn paste_into_browser_feeds_drop_buffer() {
+        let mut app = make_app();
+        let (fb, _h) = FileBrowser::with_mock();
+        *app.tab_mut().focused_pane_mut().unwrap() = Pane::FileBrowser { browser: fb };
+        handle_paste(&mut app, "C:/tmp/dropped file.txt");
+        let core = app
+            .tab()
+            .focused_pane()
+            .unwrap()
+            .as_browser()
+            .unwrap()
+            .core();
+        assert_eq!(core.paste_buf, "C:/tmp/dropped file.txt");
+        assert!(core.paste_deadline.is_some());
+    }
+
+    #[test]
+    fn paste_into_scp_password_prompt_fills_buffer() {
+        let mut app = make_app();
+        let (mut sb, _h) = SshBrowser::with_mock();
+        sb.waiting_password = true;
+        *app.tab_mut().focused_pane_mut().unwrap() = Pane::SshBrowser { browser: sb };
+        handle_paste(&mut app, "hunter2\n");
+        if let Some(Pane::SshBrowser { browser }) = app.tab().focused_pane() {
+            assert_eq!(browser.password_buf, "hunter2");
+        } else {
+            panic!("expected SshBrowser");
+        }
+    }
+
+    // ---- Exit overlay (H7 regression: keys must reach exited browsers) ----
+
+    #[test]
+    fn exited_browser_close_pane_via_overlay_keys() {
+        let mut app = make_app();
+        app.new_tab(); // 2 tabs, so closing the pane closes this tab
+        let (fb, h) = FileBrowser::with_mock();
+        h.set_exited(true);
+        *app.tab_mut().focused_pane_mut().unwrap() = Pane::FileBrowser { browser: fb };
+
+        // Right selects "Close pane", Enter executes it.
+        key(&mut app, KeyCode::Right, false, false, false);
+        key(&mut app, KeyCode::Enter, false, false, false);
+
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "exited browser pane should close its tab"
+        );
+    }
+
+    #[test]
+    fn exited_session_overlay_toggle_selection() {
+        // The unified handler must still serve session panes: Left/Right
+        // toggles between Reconnect and Close pane.
+        let mut app = make_app();
+        let (fb, h) = FileBrowser::with_mock();
+        h.set_exited(true);
+        *app.tab_mut().focused_pane_mut().unwrap() = Pane::FileBrowser { browser: fb };
+        key(&mut app, KeyCode::Right, false, false, false);
+        if let Some(b) = app.tab().focused_pane().unwrap().as_browser() {
+            assert_eq!(b.core().exit_selection, 1);
+        } else {
+            panic!("expected browser pane");
+        }
+        key(&mut app, KeyCode::Left, false, false, false);
+        if let Some(b) = app.tab().focused_pane().unwrap().as_browser() {
+            assert_eq!(b.core().exit_selection, 0);
+        }
+    }
+
+    #[test]
+    fn live_browser_keys_still_dispatch_after_exit_check() {
+        use crate::browser::common::BrowserFocus;
+        use crate::browser::sftp::SftpState;
+
+        let mut app = make_app();
+        let (mut fb, _h) = FileBrowser::with_mock();
+        fb.sftp_state = SftpState::Idle;
+        *app.tab_mut().focused_pane_mut().unwrap() = Pane::FileBrowser { browser: fb };
+
+        key(&mut app, KeyCode::Tab, false, false, false);
+
+        let core = app
+            .tab()
+            .focused_pane()
+            .unwrap()
+            .as_browser()
+            .unwrap()
+            .core();
+        assert_eq!(core.focus, BrowserFocus::Remote);
     }
 
     // ---- compute_drag_ratios ------------------------------------------------
@@ -2056,6 +2178,21 @@ mod tests {
         for delta in [-50i32, -10, 0, 10, 50] {
             let (r0, r1) = compute_drag_ratios((150, 50), 80, delta);
             assert_eq!(r0 + r1, 200, "total must be preserved for delta={delta}");
+        }
+    }
+
+    #[test]
+    fn drag_ratios_tiny_span_returns_start_unchanged() {
+        // Spans below 7 cannot honour the 3px minimum on both sides; the old
+        // clamp went negative and overflowed the ratio math in debug builds.
+        for span in 1..7u16 {
+            for delta in [-100i32, -1, 0, 1, 100] {
+                assert_eq!(
+                    compute_drag_ratios((100, 100), span, delta),
+                    (100, 100),
+                    "span={span} delta={delta}"
+                );
+            }
         }
     }
 }
