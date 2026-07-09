@@ -3,8 +3,6 @@ pub mod connect;
 mod session;
 pub mod tree;
 
-use std::sync::atomic::Ordering;
-
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -17,7 +15,7 @@ use crate::browser::common::Browser;
 use crate::browser::{FileBrowser, SshBrowser};
 use crate::keybindings::KeyBindings;
 use crate::ssh_config::SshHost;
-use crate::terminal::EmbeddedTerminal;
+use crate::terminal::{EmbeddedTerminal, PtyChannel};
 use connect::ConnectPane;
 
 pub use tree::{
@@ -212,7 +210,7 @@ impl Pane {
 
     pub fn take_dirty(&mut self) -> bool {
         match self {
-            Pane::Session { terminal, .. } => terminal.dirty.swap(false, Ordering::AcqRel),
+            Pane::Session { terminal, .. } => terminal.take_dirty(),
             Pane::FileBrowser { browser } => {
                 let pty_dirty = browser.sftp.take_dirty();
                 let state_dirty = browser.core.needs_redraw;

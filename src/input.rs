@@ -81,11 +81,11 @@ pub fn handle_key(
         return action;
     }
 
-    // Suppress unbound Alt+Char from reaching session passthrough.
-    // Connect and browser panes are already handled above, so this only
-    // affects sessions where we must prevent Alt+key from being forwarded
-    // to the remote terminal.
-    if !editor_capturing && alt && !ctrl {
+    // Unbound Alt+Char combos fall through to the session as an ESC prefix
+    // (Meta) so remote readline/emacs bindings (Alt+B, Alt+F, Alt+.) work —
+    // bound combos were already consumed by the global shortcut layer above.
+    // Other unbound Alt combos (Alt+Enter, Alt+arrows…) are still suppressed.
+    if !editor_capturing && alt && !ctrl && !matches!(code, KeyCode::Char(_)) {
         return Action::Continue;
     }
 
@@ -240,6 +240,11 @@ fn handle_session_key(
                 // single-byte UTF-8 encoding.
                 app.send_char(b as char);
             }
+        }
+        // Unbound Alt+char → ESC prefix (Meta). AltGr chars arrive as
+        // Ctrl+Alt and must fall through to the plain-char arm below.
+        KeyCode::Char(c) if alt && !ctrl => {
+            app.send_str(&format!("\x1b{c}"));
         }
         KeyCode::Char(c) => app.send_char(c),
         KeyCode::Enter => app.send_str("\r"),

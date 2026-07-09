@@ -977,6 +977,52 @@ quit = "Alt+X"
         assert_eq!(merged.global.quit, defaults.global.quit);
     }
 
+    /// The binding metadata is enumerated by hand in several places (struct
+    /// fields, `Raw*` config structs, `merge`, `entries`, `set_binding`).
+    /// These two roundtrips fail if any of them misses a binding, so drift
+    /// cannot land silently.
+    #[test]
+    fn set_binding_covers_every_entry() {
+        let probe = KeyBinding::parse("Ctrl+F9").unwrap();
+        let mut kb = KeyBindings::default();
+        for e in KeyBindings::default().entries() {
+            kb.set_binding(e.group, e.field, probe.clone());
+        }
+        for e in kb.entries() {
+            assert_eq!(
+                e.binding, probe,
+                "set_binding has no arm for {}.{}",
+                e.group, e.field
+            );
+        }
+    }
+
+    #[test]
+    fn merge_covers_every_entry() {
+        // Build a config overriding every field; a binding missing from a
+        // Raw* struct is silently ignored by serde and stays at its default.
+        let entries = KeyBindings::default().entries();
+        let mut toml_src = String::new();
+        let mut group = "";
+        for e in &entries {
+            if e.group != group {
+                toml_src.push_str(&format!("[{}]\n", e.group));
+                group = e.group;
+            }
+            toml_src.push_str(&format!("{} = \"Ctrl+F9\"\n", e.field));
+        }
+        let raw: RawConfig = toml::from_str(&toml_src).unwrap();
+        let merged = KeyBindings::merge(raw, &KeyBindings::default());
+        let probe = KeyBinding::parse("Ctrl+F9").unwrap();
+        for e in merged.entries() {
+            assert_eq!(
+                e.binding, probe,
+                "merge/RawConfig misses {}.{}",
+                e.group, e.field
+            );
+        }
+    }
+
     #[test]
     fn merge_invalid_key_uses_default() {
         let toml_str = r#"

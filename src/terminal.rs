@@ -101,16 +101,18 @@ pub(crate) fn vc(c: vt100::Color) -> Color {
 
 /// A single pseudo-terminal session driven by an arbitrary command.
 pub struct EmbeddedTerminal {
+    /// Public so integration tests can inspect the emulated screen; all
+    /// in-crate access goes through methods.
     pub parser: Arc<Mutex<Parser>>,
-    pub master: Arc<Mutex<pty::PtyMaster>>,
-    pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    pub dirty: Arc<AtomicBool>,
-    pub rows: u16,
-    pub cols: u16,
-    pub raw_output: Arc<Mutex<Vec<u8>>>,
-    pub exited: Arc<AtomicBool>,
-    pub child: Option<Arc<Mutex<pty::PtyChild>>>,
-    pub scroll_offset: usize,
+    master: Arc<Mutex<pty::PtyMaster>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    dirty: Arc<AtomicBool>,
+    rows: u16,
+    cols: u16,
+    raw_output: Arc<Mutex<Vec<u8>>>,
+    exited: Arc<AtomicBool>,
+    child: Option<Arc<Mutex<pty::PtyChild>>>,
+    scroll_offset: usize,
 }
 
 impl EmbeddedTerminal {
