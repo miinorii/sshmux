@@ -12,7 +12,7 @@ use crate::keybindings::KeyBindings;
 use crate::pane::{Pane, RenderCtx, pane_border_inner, pane_inner, split_areas, split_at_path_mut};
 use crate::ssh_config::{SshHost, parse_ssh_config};
 use crate::tab::Tab;
-use crate::terminal::EmbeddedTerminal;
+use crate::terminal::{EmbeddedTerminal, PtyChannel};
 
 pub const CONTEXT_MENU_ITEMS: [&str; 5] = [
     "New tab",
@@ -96,8 +96,18 @@ impl App {
         &mut self.tabs[self.selected_tab]
     }
 
+    /// Consume the dirty flags of every tab (so background output cannot leave
+    /// flags set and retrigger redraws forever) and report whether the
+    /// *selected* tab needs a repaint.
     pub fn take_dirty(&mut self) -> bool {
-        self.tabs.iter_mut().any(|t| t.root.take_dirty())
+        let mut selected_dirty = false;
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            let dirty = tab.root.take_dirty();
+            if i == self.selected_tab {
+                selected_dirty = dirty;
+            }
+        }
+        selected_dirty
     }
 
     pub fn tick_browsers(&mut self) {
@@ -237,6 +247,17 @@ impl App {
             self.selected_tab = 0;
         } else if self.selected_tab >= self.tabs.len() {
             self.selected_tab = self.tabs.len() - 1;
+        }
+    }
+
+    /// Close the focused pane; when it is the last pane, close the whole tab.
+    pub fn close_focused_or_tab(&mut self, last_area: Rect) {
+        self.tab_mut().zoom = false;
+        if self.tab().leaf_count() == 1 {
+            self.close_tab();
+        } else {
+            self.tab_mut().close_focused();
+            self.resize_all(last_area);
         }
     }
 

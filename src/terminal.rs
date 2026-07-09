@@ -19,6 +19,33 @@ use ratatui::{
 };
 use vt100::{MouseProtocolMode, Parser};
 
+/// Split a manual-connect argument string into ssh arguments, honouring
+/// single and double quotes so values like
+/// `-o "ProxyCommand=ssh -W %h:%p jump"` stay a single argument.
+/// Quote characters are stripped; there is no backslash escaping.
+pub fn split_ssh_args(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    for c in s.chars() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 /// Count the number of Device Status Report sequences (`ESC [ 6 n`) in `data`.
 pub fn count_dsr(data: &[u8]) -> usize {
     const DSR: &[u8] = b"\x1b[6n";
@@ -44,6 +71,9 @@ pub trait PtyChannel {
     fn raw_len(&self) -> usize;
     fn raw_lines(&self) -> Vec<String>;
     fn drain_raw(&self);
+    /// Drop all but the last `keep` bytes of the raw output buffer. Used to
+    /// bound memory/CPU while scraping long-running transfer output.
+    fn drain_raw_keep(&self, keep: usize);
     fn send_str(&mut self, s: &str);
     fn send_char(&mut self, c: char) {
         let mut buf = [0u8; 4];
@@ -51,6 +81,9 @@ pub trait PtyChannel {
         self.send_str(s);
     }
     fn process_exited(&self) -> bool;
+    /// Exit code of the child process, or `None` while it is still running
+    /// (or when the code cannot be determined).
+    fn exit_code(&self) -> Option<u32>;
     /// Return the last `n` bytes of the raw output buffer (or fewer if shorter).
     fn raw_tail(&self, n: usize) -> Vec<u8>;
     /// Atomically swap the dirty flag, returning the previous value.
@@ -103,6 +136,11 @@ impl EmbeddedTerminal {
 
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
+            // Carry the last few bytes of the previous chunk so a DSR probe
+            // split across two reads is still detected. Kept strictly shorter
+            // than the DSR sequence (4 bytes) so a probe counted in the
+            // previous chunk can never be counted twice.
+            let mut dsr_carry: Vec<u8> = Vec::new();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
@@ -121,8 +159,11 @@ impl EmbeddedTerminal {
                         }
                         dirty_c.store(true, Ordering::Release);
 
-                        // Reply to DSR probes
-                        let dsr_count = count_dsr(data);
+                        // Reply to DSR probes (scanning carry + chunk for splits)
+                        let mut scan = std::mem::take(&mut dsr_carry);
+                        scan.extend_from_slice(data);
+                        let dsr_count = count_dsr(&scan);
+                        dsr_carry = scan[scan.len().saturating_sub(3)..].to_vec();
                         if dsr_count > 0 {
                             let (row, col) = if let Ok(p) = parser_c.lock() {
                                 let pos = p.screen().cursor_position();
@@ -170,7 +211,7 @@ impl EmbeddedTerminal {
     pub fn ssh_raw(rows: u16, cols: u16, args: &str) -> Result<Self> {
         let mut cmd = CommandBuilder::new("ssh");
         cmd.arg("-t");
-        for arg in args.split_whitespace() {
+        for arg in split_ssh_args(args) {
             cmd.arg(arg);
         }
         cmd.env("TERM", "xterm-256color");
@@ -191,8 +232,10 @@ impl EmbeddedTerminal {
     /// Spawn an SSH shell to `host` for browsing (fixed size, parsed not rendered).
     pub fn ssh_shell(host: &str) -> Result<Self> {
         let mut cmd = CommandBuilder::new("ssh");
-        cmd.arg(host);
+        // `-t` must precede the destination: on non-permuting getopt platforms
+        // (BSD/macOS) anything after the host is treated as the remote command.
         cmd.arg("-t");
+        cmd.arg(host);
         cmd.env("TERM", "dumb");
         info!("SSH shell host={}", host);
         Self::new(200, 220, cmd, true)
@@ -207,11 +250,6 @@ impl EmbeddedTerminal {
         {
             warn!("PTY write failed ({} bytes): {}", s.len(), e);
         }
-    }
-
-    pub fn send_char(&mut self, c: char) {
-        let mut buf = [0u8; 4];
-        self.send_str(c.encode_utf8(&mut buf));
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -381,6 +419,15 @@ impl EmbeddedTerminal {
         }
     }
 
+    pub fn drain_raw_keep(&self, keep: usize) {
+        if let Ok(mut rb) = self.raw_output.lock() {
+            let len = rb.len();
+            if len > keep {
+                rb.drain(..len - keep);
+            }
+        }
+    }
+
     pub fn raw_len(&self) -> usize {
         self.raw_output.lock().map(|rb| rb.len()).unwrap_or(0)
     }
@@ -408,6 +455,17 @@ impl EmbeddedTerminal {
         let start = rb.len().saturating_sub(n);
         rb[start..].to_vec()
     }
+
+    /// Exit code of the child, if it has exited. `None` while still running.
+    pub fn exit_code(&self) -> Option<u32> {
+        if let Some(ref child) = self.child
+            && let Ok(mut c) = child.lock()
+            && let Ok(Some(status)) = c.try_wait()
+        {
+            return Some(status.code);
+        }
+        None
+    }
 }
 
 impl PtyChannel for EmbeddedTerminal {
@@ -420,14 +478,17 @@ impl PtyChannel for EmbeddedTerminal {
     fn drain_raw(&self) {
         self.drain_raw()
     }
+    fn drain_raw_keep(&self, keep: usize) {
+        self.drain_raw_keep(keep)
+    }
     fn send_str(&mut self, s: &str) {
         self.send_str(s);
     }
-    fn send_char(&mut self, c: char) {
-        self.send_char(c);
-    }
     fn process_exited(&self) -> bool {
         self.process_exited()
+    }
+    fn exit_code(&self) -> Option<u32> {
+        self.exit_code()
     }
     fn raw_tail(&self, n: usize) -> Vec<u8> {
         self.raw_tail(n)
@@ -465,6 +526,7 @@ pub struct MockPtyHandle {
     raw: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
     sent: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
     exited: std::rc::Rc<std::cell::Cell<bool>>,
+    exit_code: std::rc::Rc<std::cell::Cell<Option<u32>>>,
 }
 
 #[cfg(test)]
@@ -488,6 +550,11 @@ impl MockPtyHandle {
     pub fn set_exited(&self, v: bool) {
         self.exited.set(v);
     }
+
+    /// Set the exit code reported by `PtyChannel::exit_code`.
+    pub fn set_exit_code(&self, code: Option<u32>) {
+        self.exit_code.set(code);
+    }
 }
 
 /// Mock PTY for testing browser state machines without a real process.
@@ -496,6 +563,7 @@ pub struct MockPty {
     raw: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
     sent: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
     exited: std::rc::Rc<std::cell::Cell<bool>>,
+    exit_code: std::rc::Rc<std::cell::Cell<Option<u32>>>,
     pub dirty: bool,
 }
 
@@ -505,15 +573,18 @@ impl MockPty {
         let raw = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let exited = std::rc::Rc::new(std::cell::Cell::new(false));
+        let exit_code = std::rc::Rc::new(std::cell::Cell::new(None));
         let handle = MockPtyHandle {
             raw: raw.clone(),
             sent: sent.clone(),
             exited: exited.clone(),
+            exit_code: exit_code.clone(),
         };
         let mock = MockPty {
             raw,
             sent,
             exited,
+            exit_code,
             dirty: false,
         };
         (mock, handle)
@@ -534,11 +605,21 @@ impl PtyChannel for MockPty {
     fn drain_raw(&self) {
         self.raw.borrow_mut().clear();
     }
+    fn drain_raw_keep(&self, keep: usize) {
+        let mut rb = self.raw.borrow_mut();
+        let len = rb.len();
+        if len > keep {
+            rb.drain(..len - keep);
+        }
+    }
     fn send_str(&mut self, s: &str) {
         self.sent.borrow_mut().push(s.to_string());
     }
     fn process_exited(&self) -> bool {
         self.exited.get()
+    }
+    fn exit_code(&self) -> Option<u32> {
+        self.exit_code.get()
     }
     fn raw_tail(&self, n: usize) -> Vec<u8> {
         let rb = self.raw.borrow();
@@ -629,4 +710,45 @@ mod tests {
         assert_eq!(vc(vt100::Color::Default), Color::Reset);
     }
 
+    // ---- split_ssh_args ----
+
+    #[test]
+    fn split_args_plain() {
+        assert_eq!(split_ssh_args("user@host"), vec!["user@host"]);
+    }
+
+    #[test]
+    fn split_args_multiple() {
+        assert_eq!(
+            split_ssh_args("-o StrictHostKeyChecking=no user@host"),
+            vec!["-o", "StrictHostKeyChecking=no", "user@host"]
+        );
+    }
+
+    #[test]
+    fn split_args_double_quoted_value_stays_one_arg() {
+        assert_eq!(
+            split_ssh_args(r#"-o "ProxyCommand=ssh -W %h:%p jump" host"#),
+            vec!["-o", "ProxyCommand=ssh -W %h:%p jump", "host"]
+        );
+    }
+
+    #[test]
+    fn split_args_single_quoted() {
+        assert_eq!(
+            split_ssh_args("-o 'User=my user' host"),
+            vec!["-o", "User=my user", "host"]
+        );
+    }
+
+    #[test]
+    fn split_args_empty_and_whitespace() {
+        assert!(split_ssh_args("").is_empty());
+        assert!(split_ssh_args("   ").is_empty());
+    }
+
+    #[test]
+    fn split_args_unterminated_quote_takes_rest() {
+        assert_eq!(split_ssh_args("\"a b"), vec!["a b"]);
+    }
 }

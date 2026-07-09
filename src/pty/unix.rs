@@ -55,13 +55,17 @@ pub struct PtyChild {
 
 impl PtyChild {
     pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
-        self.inner
-            .try_wait()
-            .map(|o| o.map(|s| ExitStatus { code: s.exit_code() }))
+        self.inner.try_wait().map(|o| {
+            o.map(|s| ExitStatus {
+                code: s.exit_code(),
+            })
+        })
     }
 
     pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
-        self.inner.wait().map(|s| ExitStatus { code: s.exit_code() })
+        self.inner.wait().map(|s| ExitStatus {
+            code: s.exit_code(),
+        })
     }
 
     pub fn kill(&mut self) -> std::io::Result<()> {

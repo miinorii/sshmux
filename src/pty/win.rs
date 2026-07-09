@@ -28,10 +28,9 @@ use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOEXW;
 use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
-    EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
-    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject,
+    EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 use super::CommandBuilder;
@@ -117,10 +116,6 @@ fn create_pipe() -> Result<PipePair> {
         read: unsafe { OwnedHandle::from_raw_handle(read as _) },
         write: unsafe { OwnedHandle::from_raw_handle(write as _) },
     })
-}
-
-fn try_clone_handle(handle: &OwnedHandle) -> std::io::Result<OwnedHandle> {
-    handle.try_clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +263,7 @@ impl PtyMaster {
             .inner
             .lock()
             .map_err(|_| anyhow!("ConPTY inner mutex poisoned"))?;
-        let cloned = try_clone_handle(&inner.read_handle)?;
+        let cloned = inner.read_handle.try_clone()?;
         Ok(Box::new(PipeReader(cloned)))
     }
 
@@ -316,8 +311,7 @@ impl PtyChild {
         }
         let mut code: u32 = 0;
         // SAFETY: handle is owned and live; `code` is a writable out-pointer.
-        let ok =
-            unsafe { GetExitCodeProcess(self.process.as_raw_handle() as HANDLE, &mut code) };
+        let ok = unsafe { GetExitCodeProcess(self.process.as_raw_handle() as HANDLE, &mut code) };
         if ok == 0 {
             return Err(IoError::last_os_error());
         }
@@ -326,14 +320,12 @@ impl PtyChild {
 
     pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
         // SAFETY: see try_wait.
-        let wait =
-            unsafe { WaitForSingleObject(self.process.as_raw_handle() as HANDLE, INFINITE) };
+        let wait = unsafe { WaitForSingleObject(self.process.as_raw_handle() as HANDLE, INFINITE) };
         if wait != WAIT_OBJECT_0 {
             return Err(IoError::last_os_error());
         }
         let mut code: u32 = 0;
-        let ok =
-            unsafe { GetExitCodeProcess(self.process.as_raw_handle() as HANDLE, &mut code) };
+        let ok = unsafe { GetExitCodeProcess(self.process.as_raw_handle() as HANDLE, &mut code) };
         if ok == 0 {
             return Err(IoError::last_os_error());
         }
@@ -498,10 +490,7 @@ fn spawn(inner: &Inner, cmd: CommandBuilder) -> Result<PtyChild> {
             FALSE,
             EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
             env_w.as_mut_ptr() as *mut _,
-            cwd_w
-                .as_ref()
-                .map(|v| v.as_ptr())
-                .unwrap_or(ptr::null()),
+            cwd_w.as_ref().map(|v| v.as_ptr()).unwrap_or(ptr::null()),
             &si.StartupInfo,
             &mut pi,
         )
@@ -609,7 +598,11 @@ fn build_env_block(cmd: &CommandBuilder) -> Vec<u16> {
         block.extend(OsStr::new(v).encode_wide());
         block.push(0);
     }
-    // Final terminator. CreateProcessW requires a double-nul even if empty.
+    // CreateProcessW requires a double-nul terminator. Entries each end in
+    // one nul, so a non-empty block needs one more; an empty block needs two.
+    if block.is_empty() {
+        block.push(0);
+    }
     block.push(0);
     block
 }

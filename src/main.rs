@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
+    cursor::Show,
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event, KeyEventKind, KeyModifiers,
@@ -19,6 +20,45 @@ use sshmux::color_backend::ColorBackend;
 use sshmux::input::{self, Action};
 use sshmux::keybindings::KeyBindings;
 use sshmux::pane::pane_inner;
+
+// ---------------------------------------------------------------------------
+// Terminal restore guard
+// ---------------------------------------------------------------------------
+
+/// Restores the user's terminal (raw mode, alternate screen, mouse capture,
+/// bracketed paste, cursor) on drop, so early `?` returns and panics never
+/// leave the shell in a broken state.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn new() -> Result<Self> {
+        enable_raw_mode()?;
+        execute!(
+            std::io::stdout(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
+        Ok(TerminalGuard)
+    }
+
+    fn restore() {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            std::io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            Show
+        );
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        Self::restore();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // main
@@ -73,16 +113,15 @@ fn main() -> Result<()> {
         .ok();
     }
 
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    )?;
+    // Restore the terminal even when a panic unwinds past the guard's drop.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        TerminalGuard::restore();
+        default_hook(info);
+    }));
 
-    let backend = ColorBackend::new(stdout);
+    let _guard = TerminalGuard::new()?;
+    let backend = ColorBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
@@ -97,10 +136,15 @@ fn main() -> Result<()> {
     };
     let mut first_frame = true;
     loop {
-        // Skip sleep during paste accumulation to drain chars fast.
-        if !app.paste_accumulating() {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        // Block up to 5ms waiting for input — this is the tick cadence without
+        // a busy sleep. During paste accumulation poll with zero timeout so
+        // incoming chars drain as fast as possible.
+        let wait = if app.paste_accumulating() {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(5)
+        };
+        event::poll(wait)?;
 
         app.tick_browsers();
 
@@ -176,13 +220,6 @@ fn main() -> Result<()> {
         }
     }
 
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-        DisableBracketedPaste
-    )?;
-    terminal.show_cursor()?;
+    // TerminalGuard::drop restores the terminal.
     Ok(())
 }
