@@ -79,10 +79,14 @@ pub fn parse_pwd(lines: &[String]) -> Option<String> {
 }
 
 /// A single entry in a directory listing (local or remote).
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct FsEntry {
     pub name: String,
     pub is_dir: bool,
+    /// Symlink (remote listings only). Links are navigated like directories;
+    /// entering one that points at a file is detected after the fact and
+    /// converted into a download (see `BrowserCore::apply_link_probe`).
+    pub is_link: bool,
     pub size: String,
     pub perms: String,
     pub modified: String,
@@ -94,17 +98,13 @@ pub struct FsEntry {
 /// `read_local_dir`). Multi-select and transfer code in `browser::common`
 /// relies on "index 0 is the parent link" — keep the two listers in sync.
 ///
-/// KNOWN LIMITS: symlinks are treated as directories for navigation, so a
-/// symlink to a *file* cannot be downloaded (Enter cds into it and the next
-/// go-up recovers). Lines longer than the hidden PTY width (220 cols) wrap
+/// KNOWN LIMITS: lines longer than the hidden PTY width (220 cols) wrap
 /// and are silently dropped by the ≥9-token check.
 pub fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
     let mut entries = vec![FsEntry {
         name: "..".to_string(),
         is_dir: true,
-        size: String::new(),
-        perms: String::new(),
-        modified: String::new(),
+        ..FsEntry::default()
     }];
     for line in lines {
         let line = line.trim();
@@ -153,6 +153,7 @@ pub fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
         entries.push(FsEntry {
             name,
             is_dir: is_dir || is_link,
+            is_link,
             size: if is_dir {
                 String::new()
             } else {
@@ -244,9 +245,7 @@ pub fn read_local_dir(path: &Path) -> Vec<FsEntry> {
     let mut entries = vec![FsEntry {
         name: "..".to_string(),
         is_dir: true,
-        size: String::new(),
-        perms: String::new(),
-        modified: String::new(),
+        ..FsEntry::default()
     }];
     if let Ok(rd) = fs::read_dir(path) {
         for entry in rd.flatten() {
@@ -275,8 +274,8 @@ pub fn read_local_dir(path: &Path) -> Vec<FsEntry> {
                 name: entry.file_name().to_string_lossy().to_string(),
                 is_dir,
                 size,
-                perms: String::new(),
                 modified,
+                ..FsEntry::default()
             });
         }
     }
@@ -460,6 +459,15 @@ mod tests {
         let link = e.iter().find(|x| x.name == "mylink");
         assert!(link.is_some());
         assert!(link.unwrap().is_dir); // symlinks treated as dirs for navigation
+        assert!(link.unwrap().is_link);
+    }
+
+    #[test]
+    fn parse_ls_is_link_false_for_files_and_dirs() {
+        let e = parse_ls(&ls("drwxr-xr-x    ? u g 4096 Jan  1  2020 realdir\n\
+             -rw-r--r--    ? u g  100 Jan  1  2020 realfile"));
+        assert!(!e.iter().find(|x| x.name == "realdir").unwrap().is_link);
+        assert!(!e.iter().find(|x| x.name == "realfile").unwrap().is_link);
     }
 
     #[test]

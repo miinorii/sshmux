@@ -8,7 +8,9 @@ use log::{debug, info};
 use ratatui::{style::Color, widgets::ListState};
 
 use super::super::parse::{list_drives, read_local_dir};
-use super::{BrowserCore, BrowserFocus, PROMPT_STABLE_TICKS};
+use super::{
+    BrowserCore, BrowserFocus, LinkProbe, PROMPT_STABLE_TICKS, PendingTransfer, TransferDirection,
+};
 
 impl BrowserCore {
     pub fn toggle_focus(&mut self) {
@@ -133,6 +135,39 @@ impl BrowserCore {
         drive_sel.select_first();
         self.drive_picker = Some((drives, drive_sel));
         self.needs_redraw = true;
+    }
+
+    /// Apply the outcome of a symlink probe (`link_probe`). For `File` the
+    /// cd is reverted and a download of the link target queued — it fires via
+    /// `chain_next_queued` once the re-listing completes. For `Broken` the cd
+    /// is reverted with an error status. Returns true when the caller must
+    /// re-issue `ls` for the reverted path.
+    pub fn apply_link_probe(&mut self, link_name: &str, probe: LinkProbe) -> bool {
+        match probe {
+            LinkProbe::Dir => false,
+            LinkProbe::File => {
+                let file_path = self.remote.path.clone();
+                self.apply_cd("..");
+                info!("symlink {} points at a file, downloading", file_path);
+                self.transfer.pending.push(PendingTransfer {
+                    path: file_path,
+                    name: link_name.to_string(),
+                    is_dir: false,
+                });
+                self.transfer.pending_direction = Some(TransferDirection::Download);
+                self.status_msg = format!("{} links to a file — downloading", link_name);
+                self.status_color = Color::Cyan;
+                self.needs_redraw = true;
+                true
+            }
+            LinkProbe::Broken => {
+                self.apply_cd("..");
+                self.status_msg = format!("{} is a broken symlink", link_name);
+                self.status_color = Color::Red;
+                self.needs_redraw = true;
+                true
+            }
+        }
     }
 
     pub fn apply_cd(&mut self, name: &str) {

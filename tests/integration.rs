@@ -896,3 +896,218 @@ fn sftp_browser_delete_file() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ---------------------------------------------------------------------------
+// Symlink tests (dir link navigation, file link auto-download, broken link)
+// ---------------------------------------------------------------------------
+
+/// Create symlink fixtures under ~/linktest on the remote host (idempotent):
+/// `dirlink` → ../documents, `filelink` → target.txt, `broken` → nonexistent.
+fn ensure_remote_symlinks() {
+    let status = std::process::Command::new("ssh")
+        .args(["-o", "StrictHostKeyChecking=no"])
+        .args(["-o", "UserKnownHostsFile=/dev/null"])
+        .arg("-i")
+        .arg(test_key_path())
+        .args(["-p", SSH_PORT, &format!("{SSH_USER}@{SSH_HOST}")])
+        .arg(
+            "mkdir -p ~/linktest && cd ~/linktest && echo hello > target.txt && \
+             ln -sf target.txt filelink && ln -sfn ../documents dirlink && \
+             ln -sf nonexistent broken",
+        )
+        .status()
+        .expect("failed to run ssh for symlink setup");
+    assert!(status.success(), "remote symlink fixture setup failed");
+}
+
+/// Select the entry called `name` in the remote panel.
+fn select_remote_entry(entries: &[sshmux::browser::parse::FsEntry], name: &str) -> usize {
+    entries
+        .iter()
+        .position(|e| e.name == name)
+        .unwrap_or_else(|| panic!("'{name}' not found in remote listing"))
+}
+
+#[test]
+#[ignore]
+fn sftp_browser_symlinks() {
+    ensure_remote_symlinks();
+    let mut browser = make_sftp_browser();
+
+    let reached_idle = wait_sftp_state(&mut browser, CONNECT_TIMEOUT, |b| {
+        b.sftp_state == SftpState::Idle
+    });
+    assert!(reached_idle, "SFTP browser did not reach Idle");
+    browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
+
+    // Navigate into linktest
+    let idx = select_remote_entry(&browser.core.remote.entries, "linktest");
+    browser.core.remote.sel.select(Some(idx));
+    browser.enter();
+    assert!(
+        wait_sftp_state(&mut browser, CMD_TIMEOUT, |b| b.sftp_state
+            == SftpState::Idle),
+        "did not reach Idle in linktest"
+    );
+
+    // Dir symlink: entering lists the target's contents.
+    let idx = select_remote_entry(&browser.core.remote.entries, "dirlink");
+    browser.core.remote.sel.select(Some(idx));
+    browser.enter();
+    assert!(
+        wait_sftp_state(&mut browser, CMD_TIMEOUT, |b| b.sftp_state
+            == SftpState::Idle),
+        "did not reach Idle in dirlink"
+    );
+    assert!(
+        browser.core.remote.path.ends_with("/linktest/dirlink"),
+        "path should be inside the dir link, got {}",
+        browser.core.remote.path
+    );
+    let names: Vec<&str> = browser
+        .core
+        .remote
+        .entries
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"readme.txt"),
+        "dir link should list documents/, got: {:?}",
+        names
+    );
+
+    browser.go_up();
+    assert!(
+        wait_sftp_state(&mut browser, CMD_TIMEOUT, |b| b.sftp_state
+            == SftpState::Idle),
+        "did not reach Idle after go_up"
+    );
+
+    // File symlink: entering reverts the cd and downloads the target.
+    let tmp = std::env::temp_dir().join("sshmux_test_symlink_dl");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::create_dir_all(&tmp);
+    browser.core.local.path = tmp.clone();
+    let idx = select_remote_entry(&browser.core.remote.entries, "filelink");
+    browser.core.remote.sel.select(Some(idx));
+    browser.enter();
+    let downloaded = wait_sftp_state(&mut browser, CMD_TIMEOUT, |b| {
+        b.sftp_state == SftpState::Idle && tmp.join("filelink").exists()
+    });
+    assert!(downloaded, "file link was not auto-downloaded");
+    assert!(
+        browser.core.remote.path.ends_with("/linktest"),
+        "cd into the file link should have been reverted, got {}",
+        browser.core.remote.path
+    );
+    let content = std::fs::read_to_string(tmp.join("filelink")).unwrap();
+    assert_eq!(content.trim(), "hello");
+
+    // Broken symlink: entering reverts with an error status.
+    let idx = select_remote_entry(&browser.core.remote.entries, "broken");
+    browser.core.remote.sel.select(Some(idx));
+    browser.enter();
+    assert!(
+        wait_sftp_state(&mut browser, CMD_TIMEOUT, |b| b.sftp_state
+            == SftpState::Idle),
+        "did not recover from broken link"
+    );
+    assert!(
+        browser.core.remote.path.ends_with("/linktest"),
+        "cd into the broken link should have been reverted, got {}",
+        browser.core.remote.path
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+#[ignore]
+fn ssh_browser_symlinks() {
+    ensure_remote_symlinks();
+    let mut browser = make_ssh_browser();
+
+    let reached_idle = wait_ssh_state(&mut browser, CONNECT_TIMEOUT, |b| {
+        b.ssh_state == SshBrowserState::Idle
+    });
+    assert!(reached_idle, "SSH browser did not reach Idle");
+    browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
+
+    // Navigate into linktest
+    let idx = select_remote_entry(&browser.core.remote.entries, "linktest");
+    browser.core.remote.sel.select(Some(idx));
+    browser.enter();
+    assert!(
+        wait_ssh_state(&mut browser, CMD_TIMEOUT, |b| b.ssh_state
+            == SshBrowserState::Idle),
+        "did not reach Idle in linktest"
+    );
+
+    // Dir symlink: with the trailing-slash ls this lists the target's contents
+    // (plain `ls -l` on a link shows only the link entry).
+    let idx = select_remote_entry(&browser.core.remote.entries, "dirlink");
+    browser.core.remote.sel.select(Some(idx));
+    browser.enter();
+    assert!(
+        wait_ssh_state(&mut browser, CMD_TIMEOUT, |b| b.ssh_state
+            == SshBrowserState::Idle),
+        "did not reach Idle in dirlink"
+    );
+    let names: Vec<&str> = browser
+        .core
+        .remote
+        .entries
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"readme.txt"),
+        "dir link should list documents/, got: {:?}",
+        names
+    );
+
+    browser.go_up();
+    assert!(
+        wait_ssh_state(&mut browser, CMD_TIMEOUT, |b| b.ssh_state
+            == SshBrowserState::Idle),
+        "did not reach Idle after go_up"
+    );
+
+    // File symlink: entering reverts the cd and downloads via scp.
+    let tmp = std::env::temp_dir().join("sshmux_test_symlink_scp");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::create_dir_all(&tmp);
+    browser.core.local.path = tmp.clone();
+    let idx = select_remote_entry(&browser.core.remote.entries, "filelink");
+    browser.core.remote.sel.select(Some(idx));
+    browser.enter();
+    let downloaded = wait_ssh_state(&mut browser, CONNECT_TIMEOUT, |b| {
+        b.ssh_state == SshBrowserState::Idle && tmp.join("filelink").exists()
+    });
+    assert!(downloaded, "file link was not auto-downloaded via scp");
+    assert!(
+        browser.core.remote.path.ends_with("/linktest"),
+        "cd into the file link should have been reverted, got {}",
+        browser.core.remote.path
+    );
+    let content = std::fs::read_to_string(tmp.join("filelink")).unwrap();
+    assert_eq!(content.trim(), "hello");
+
+    // Broken symlink: entering reverts with an error status.
+    let idx = select_remote_entry(&browser.core.remote.entries, "broken");
+    browser.core.remote.sel.select(Some(idx));
+    browser.enter();
+    assert!(
+        wait_ssh_state(&mut browser, CMD_TIMEOUT, |b| b.ssh_state
+            == SshBrowserState::Idle),
+        "did not recover from broken link"
+    );
+    assert!(
+        browser.core.remote.path.ends_with("/linktest"),
+        "cd into the broken link should have been reverted, got {}",
+        browser.core.remote.path
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

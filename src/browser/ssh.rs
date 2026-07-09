@@ -12,13 +12,15 @@ use ratatui::{
 };
 
 use super::common::{
-    Browser, BrowserCore, BrowserFocus, COMMAND_TIMEOUT_SECS, DeleteLocation, PROMPT_TAIL_BYTES,
-    PendingTransfer, TransferDirection, TransferStatus,
+    Browser, BrowserCore, BrowserFocus, COMMAND_TIMEOUT_SECS, DeleteLocation, LinkProbe,
+    PROMPT_TAIL_BYTES, PendingTransfer, TransferDirection, TransferStatus,
 };
 use super::parse::{
     contains_any_error, parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote,
     strip_ansi,
 };
+use zeroize::Zeroize;
+
 use crate::keybindings::BrowserBindings;
 use crate::terminal::{EmbeddedTerminal, PtyChannel};
 
@@ -118,8 +120,7 @@ impl SshBrowser {
                         if pw_count > 1 {
                             warn!("SCP password rejected, re-prompting");
                             self.scp_pty = None;
-                            self.saved_password = None;
-                            self.password_buf.clear();
+                            self.discard_passwords();
                             self.password_prompts_seen = 0;
                             self.waiting_password = true;
                             self.core.status_msg = "Wrong password, try again".to_string();
@@ -239,8 +240,7 @@ impl SshBrowser {
                         // the counter here would re-trigger this branch on the
                         // next tick and reject a *correct* resubmission (and
                         // eventually type the password into the live shell).
-                        self.saved_password = None;
-                        self.password_buf.clear();
+                        self.discard_passwords();
                         self.waiting_password = true;
                         self.core.status_msg = "Wrong password, try again".to_string();
                         self.core.status_color = Color::Red;
@@ -307,6 +307,7 @@ impl SshBrowser {
                 _ => "Command timed out".to_string(),
             };
             self.core.cmd_start = None;
+            self.core.link_probe = None;
             self.ssh_state = SshBrowserState::Idle;
             self.core.status_color = Color::Red;
             self.core.needs_redraw = true;
@@ -362,8 +363,23 @@ impl SshBrowser {
                 if prompt_ready {
                     self.core.prompt_stable = 0;
                     let lines = self.ssh.raw_lines();
-                    if let Some(p) = parse_pwd(&lines) {
-                        self.core.remote.path = p;
+                    // Symlink probe: with the trailing-slash ls, a link to a
+                    // file errors "Not a directory", a dangling link "No such
+                    // file" (see send_ls).
+                    if let Some(link_name) = self.core.link_probe.take() {
+                        let probe = if contains_any_error(&lines, &["not a directory"]) {
+                            LinkProbe::File
+                        } else if contains_any_error(&lines, &["no such file"]) {
+                            LinkProbe::Broken
+                        } else {
+                            LinkProbe::Dir
+                        };
+                        if self.core.apply_link_probe(&link_name, probe) {
+                            self.ssh.drain_raw();
+                            self.core.prev_raw_len = 0;
+                            self.send_ls();
+                            return; // re-list the reverted path
+                        }
                     }
                     let parsed = parse_ls(&lines);
                     debug!("SSH ls done: {} entries", parsed.len());
@@ -479,6 +495,9 @@ impl SshBrowser {
                     && let Some(entry) = self.core.remote.entries.get(i).cloned()
                 {
                     if entry.is_dir {
+                        if entry.is_link {
+                            self.core.link_probe = Some(entry.name.clone());
+                        }
                         self.core.apply_cd(&entry.name);
                         self.core.status_msg = format!("Remote: {}", self.core.remote.path);
                         self.core.status_color = Color::Yellow;
@@ -517,7 +536,15 @@ impl SshBrowser {
     }
 
     fn send_ls(&mut self) {
-        let cmd = format!("ls -la {}\r\n", shell_quote(&self.core.remote.path));
+        // Trailing slash makes `ls -l` dereference the path when it is a
+        // symlink: dir links list their contents (without it, -l shows the
+        // bare link entry), file links error with "Not a directory" and
+        // broken links with "No such file" — which the link probe in
+        // WaitingLs relies on. Plain directories behave identically.
+        let cmd = format!(
+            "ls -la {}\r\n",
+            shell_quote(&format!("{}/", self.core.remote.path.trim_end_matches('/')))
+        );
         self.core.cmd_start = Some(Instant::now());
         self.ssh.send_str(&cmd);
     }
@@ -703,9 +730,18 @@ impl SshBrowser {
         }
     }
 
+    /// Wipe both password buffers (best-effort: transient copies made for
+    /// sending to the PTY are not covered).
+    fn discard_passwords(&mut self) {
+        if let Some(mut pw) = self.saved_password.take() {
+            pw.zeroize();
+        }
+        self.password_buf.zeroize();
+    }
+
     fn cancel_password(&mut self) {
         self.waiting_password = false;
-        self.password_buf.clear();
+        self.password_buf.zeroize();
         if self.ssh_state == SshBrowserState::Transferring {
             self.scp_pty = None;
             self.ssh_state = SshBrowserState::Idle;
@@ -727,7 +763,7 @@ impl SshBrowser {
     pub fn submit_password(&mut self) {
         let pw = self.password_buf.clone();
         self.saved_password = Some(pw.clone());
-        self.password_buf.clear();
+        self.password_buf.zeroize();
         self.waiting_password = false;
         self.core.status_color = Color::Yellow;
         self.core.needs_redraw = true;
@@ -949,10 +985,16 @@ impl Browser for SshBrowser {
     }
 }
 
+impl Drop for SshBrowser {
+    fn drop(&mut self) {
+        self.discard_passwords();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::common::{DeleteKind, DeleteTarget};
+    use crate::browser::common::{DeleteKind, DeleteTarget, dummy_entry};
     use crate::browser::parse::FsEntry;
 
     fn tick_until_stable(browser: &mut SshBrowser) {
@@ -1731,6 +1773,7 @@ mod tests {
             size: "4096".to_string(),
             modified: "Jan 1 12:00".to_string(),
             perms: "drwxr-xr-x".to_string(),
+            ..FsEntry::default()
         });
         sb.core.remote.sel.select(Some(0));
         h.clear_sent();
@@ -1770,6 +1813,7 @@ mod tests {
             size: "4096".to_string(),
             modified: "Jan 1 12:00".to_string(),
             perms: "drwxr-xr-x".to_string(),
+            ..FsEntry::default()
         });
         sb.core.remote.sel.select(Some(0));
         h.clear_sent();
@@ -1778,6 +1822,84 @@ mod tests {
 
         assert_eq!(sb.ssh_state, SshBrowserState::WaitingLs);
         assert!(h.sent().is_empty());
+    }
+
+    // ---- Symlink probe ----
+
+    fn ssh_with_link(name: &str) -> (SshBrowser, MockPtyHandle) {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Idle;
+        sb.core.focus = BrowserFocus::Remote;
+        sb.core.remote.path = "/home".to_string();
+        sb.core.remote.entries = vec![
+            dummy_entry("..", true),
+            FsEntry {
+                name: name.to_string(),
+                is_dir: true,
+                is_link: true,
+                ..FsEntry::default()
+            },
+        ];
+        sb.core.remote.sel.select(Some(1));
+        h.clear_sent();
+        (sb, h)
+    }
+
+    #[test]
+    fn send_ls_appends_trailing_slash() {
+        let (mut sb, h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Idle;
+        sb.core.focus = BrowserFocus::Remote;
+        sb.core.remote.path = "/home/user".to_string();
+        h.clear_sent();
+
+        sb.go_up();
+
+        assert!(
+            h.sent().iter().any(|s| s.contains("'/home/'")),
+            "ls must dereference via trailing slash, got: {:?}",
+            h.sent()
+        );
+    }
+
+    #[test]
+    fn scp_enter_file_symlink_reverts_and_queues_download() {
+        let (mut sb, h) = ssh_with_link("filelink");
+
+        sb.enter();
+        assert_eq!(sb.core.remote.path, "/home/filelink");
+
+        h.feed(b"ls: cannot access '/home/filelink/': Not a directory\nSSHMUX> ");
+        tick_until_stable(&mut sb);
+
+        assert_eq!(sb.core.remote.path, "/home");
+        assert_eq!(sb.ssh_state, SshBrowserState::WaitingLs);
+        assert_eq!(sb.core.transfer.pending.len(), 1);
+        assert_eq!(sb.core.transfer.pending[0].path, "/home/filelink");
+        // A second ls was issued for the reverted path.
+        assert!(
+            h.sent().iter().filter(|s| s.starts_with("ls ")).count() >= 2,
+            "expected re-listing, got: {:?}",
+            h.sent()
+        );
+    }
+
+    #[test]
+    fn scp_enter_broken_symlink_reverts_with_error() {
+        let (mut sb, h) = ssh_with_link("dangling");
+
+        sb.enter();
+        h.feed(b"ls: cannot access '/home/dangling/': No such file or directory\nSSHMUX> ");
+        tick_until_stable(&mut sb);
+
+        assert_eq!(sb.core.remote.path, "/home");
+        assert!(sb.core.transfer.pending.is_empty());
+        assert_eq!(sb.core.status_color, Color::Red);
+        assert!(
+            sb.core.status_msg.contains("broken"),
+            "got: {}",
+            sb.core.status_msg
+        );
     }
 
     // ---- send_connect_key ----

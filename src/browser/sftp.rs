@@ -6,8 +6,8 @@ use log::{debug, info, warn};
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
 use super::common::{
-    Browser, BrowserCore, BrowserFocus, COMMAND_TIMEOUT_SECS, DeleteLocation, PROMPT_TAIL_BYTES,
-    PendingTransfer, TransferDirection, TransferStatus,
+    Browser, BrowserCore, BrowserFocus, COMMAND_TIMEOUT_SECS, DeleteLocation, LinkProbe,
+    PROMPT_TAIL_BYTES, PendingTransfer, TransferDirection, TransferStatus,
 };
 use super::parse::{
     contains_any_error, parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote,
@@ -84,6 +84,7 @@ impl FileBrowser {
                 self.sftp_state
             );
             self.core.drop_confirm = None;
+            self.core.link_probe = None;
             self.core.transfer.pending.clear();
             self.core.delete.pending.clear();
             self.core.transfer.batch_done = 0;
@@ -105,6 +106,7 @@ impl FileBrowser {
         {
             warn!("SFTP command timed out in state {:?}", self.sftp_state);
             self.core.cmd_start = None;
+            self.core.link_probe = None;
             self.sftp_state = SftpState::Idle;
             self.core.status_msg = "Command timed out".to_string();
             self.core.status_color = Color::Red;
@@ -145,10 +147,29 @@ impl FileBrowser {
                 if prompt_ready {
                     self.core.prompt_stable = 0;
                     let lines = self.sftp.raw_lines();
-                    if let Some(p) = parse_pwd(&lines) {
-                        self.core.remote.path = p;
-                    }
                     let parsed = parse_ls(&lines);
+                    // Symlink probe: sftp `ls` of a link-to-file echoes a
+                    // single dereferenced entry named like the link itself;
+                    // a dangling link echoes its own lrwx entry.
+                    if let Some(link_name) = self.core.link_probe.take() {
+                        let probe = if parsed.len() == 2 && parsed[1].name == link_name {
+                            if parsed[1].is_link {
+                                LinkProbe::Broken
+                            } else if !parsed[1].is_dir {
+                                LinkProbe::File
+                            } else {
+                                LinkProbe::Dir
+                            }
+                        } else {
+                            LinkProbe::Dir
+                        };
+                        if self.core.apply_link_probe(&link_name, probe) {
+                            self.sftp.drain_raw();
+                            self.core.prev_raw_len = 0;
+                            self.send_ls();
+                            return; // re-list the reverted path
+                        }
+                    }
                     debug!("SFTP ls done: {} entries", parsed.len());
                     self.core.remote.entries = parsed;
                     self.core.raw_snapshot.clear();
@@ -317,6 +338,9 @@ impl FileBrowser {
                     && let Some(entry) = self.core.remote.entries.get(i).cloned()
                 {
                     if entry.is_dir {
+                        if entry.is_link {
+                            self.core.link_probe = Some(entry.name.clone());
+                        }
                         self.core.apply_cd(&entry.name);
                         self.core.status_msg = format!("Remote: {}", self.core.remote.path);
                         self.core.status_color = Color::Yellow;
@@ -744,20 +768,6 @@ mod tests {
             fb.core.raw_snapshot.is_empty(),
             "raw_snapshot should be cleared"
         );
-    }
-
-    #[test]
-    fn waiting_ls_updates_remote_path_from_pwd_line() {
-        let (mut fb, h) = make_sftp();
-        fb.sftp_state = SftpState::WaitingLs;
-        fb.core.remote.path = "/old".to_string();
-
-        h.feed(
-            b"Remote working directory: /new/path\n-rw-r--r-- 1 u u 10 Jan 1 12:00 a.txt\nsftp> ",
-        );
-        tick_until_stable(&mut fb);
-
-        assert_eq!(fb.core.remote.path, "/new/path");
     }
 
     #[test]
@@ -1353,6 +1363,7 @@ mod tests {
             size: "4096".to_string(),
             modified: "Jan 1 12:00".to_string(),
             perms: "drwxr-xr-x".to_string(),
+            ..FsEntry::default()
         });
         fb.core.remote.sel.select(Some(0));
         h.clear_sent();
@@ -1402,6 +1413,7 @@ mod tests {
             size: "4096".to_string(),
             modified: "Jan 1 12:00".to_string(),
             perms: "drwxr-xr-x".to_string(),
+            ..FsEntry::default()
         });
         fb.core.remote.sel.select(Some(0));
         h.clear_sent();
@@ -1414,6 +1426,94 @@ mod tests {
             "should not change state"
         );
         assert!(h.sent().is_empty(), "should not send any command");
+    }
+
+    // ---- Symlink probe ----
+
+    fn link_entry(name: &str) -> FsEntry {
+        FsEntry {
+            name: name.to_string(),
+            is_dir: true,
+            is_link: true,
+            ..FsEntry::default()
+        }
+    }
+
+    fn sftp_with_link(name: &str) -> (FileBrowser, MockPtyHandle) {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::Idle;
+        fb.core.focus = BrowserFocus::Remote;
+        fb.core.remote.path = "/home".to_string();
+        fb.core.remote.entries = vec![dummy_entry("..", true), link_entry(name)];
+        fb.core.remote.sel.select(Some(1));
+        h.clear_sent();
+        (fb, h)
+    }
+
+    #[test]
+    fn enter_file_symlink_reverts_and_downloads() {
+        let (mut fb, h) = sftp_with_link("filelink");
+
+        fb.enter();
+        assert_eq!(fb.sftp_state, SftpState::WaitingLs);
+        assert_eq!(fb.core.remote.path, "/home/filelink");
+
+        // sftp echoes the dereferenced single-file entry for a link-to-file.
+        h.feed(b"-rw-r--r--    ? u g 6 Jan 1 12:00 /home/filelink\nsftp> ");
+        tick_until_stable(&mut fb);
+
+        // Probe: cd reverted, download queued, re-listing in flight.
+        assert_eq!(fb.core.remote.path, "/home");
+        assert_eq!(fb.sftp_state, SftpState::WaitingLs);
+        assert_eq!(fb.core.transfer.pending.len(), 1);
+        assert_eq!(fb.core.transfer.pending[0].path, "/home/filelink");
+
+        // Re-listing completes → chain fires the download.
+        h.feed(b"drwxr-xr-x ? u g 4096 Jan 1 12:00 sub\nsftp> ");
+        tick_until_stable(&mut fb);
+        assert_eq!(fb.sftp_state, SftpState::Transferring);
+        assert!(
+            h.sent()
+                .iter()
+                .any(|s| s.starts_with("get ") && s.contains("/home/filelink")),
+            "should download the link target, got: {:?}",
+            h.sent()
+        );
+    }
+
+    #[test]
+    fn enter_broken_symlink_reverts_with_error() {
+        let (mut fb, h) = sftp_with_link("dangling");
+
+        fb.enter();
+        // sftp lstat echo of the dangling link itself (lrwx, no arrow).
+        h.feed(b"lrwxrwxrwx    ? u g 11 Jan 1 12:00 /home/dangling\nsftp> ");
+        tick_until_stable(&mut fb);
+
+        assert_eq!(fb.core.remote.path, "/home");
+        assert!(fb.core.transfer.pending.is_empty());
+        assert_eq!(fb.core.status_color, Color::Red);
+        assert!(
+            fb.core.status_msg.contains("broken"),
+            "got: {}",
+            fb.core.status_msg
+        );
+    }
+
+    #[test]
+    fn enter_dir_symlink_lists_contents() {
+        let (mut fb, h) = sftp_with_link("dirlink");
+
+        fb.enter();
+        h.feed(
+            b"drwxr-xr-x ? u g 4096 Jan 1 12:00 sub\n-rw-r--r-- ? u g 5 Jan 1 12:00 notes.txt\nsftp> ",
+        );
+        tick_until_stable(&mut fb);
+
+        assert_eq!(fb.sftp_state, SftpState::Idle);
+        assert_eq!(fb.core.remote.path, "/home/dirlink");
+        assert!(fb.core.remote.entries.iter().any(|e| e.name == "notes.txt"));
+        assert!(fb.core.transfer.pending.is_empty());
     }
 
     // ---- send_connect_key ----

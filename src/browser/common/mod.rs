@@ -198,6 +198,18 @@ pub enum DragAction {
     RemoteToLocal,
 }
 
+/// Outcome of entering a symlink, classified per-browser from the `ls`
+/// response that follows (see `BrowserCore::apply_link_probe`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkProbe {
+    /// The link points at a directory — the listing is valid as-is.
+    Dir,
+    /// The link points at a file — revert the cd and download it instead.
+    File,
+    /// The link target does not exist.
+    Broken,
+}
+
 /// State tracked during a left-button drag gesture in a browser pane.
 pub struct DragState {
     pub origin: BrowserFocus,
@@ -279,6 +291,10 @@ pub struct BrowserCore {
     pub drag: Option<DragState>,
     // ---- exit overlay ----
     pub exit_selection: u8, // 0 = Reconnect, 1 = Close pane
+    // ---- symlink probe ----
+    /// Name of the symlink just entered; consumed when its `ls` completes to
+    /// detect links that point at files (see `apply_link_probe`).
+    pub link_probe: Option<String>,
 }
 
 impl BrowserCore {
@@ -326,6 +342,7 @@ impl BrowserCore {
             last_inner: Rect::default(),
             drag: None,
             exit_selection: 0,
+            link_probe: None,
         }
     }
 }
@@ -342,6 +359,7 @@ pub(super) fn dummy_entry(name: &str, is_dir: bool) -> FsEntry {
         size: "0".to_string(),
         perms: "drwxr-xr-x".to_string(),
         modified: "2025-01-01".to_string(),
+        ..FsEntry::default()
     }
 }
 
