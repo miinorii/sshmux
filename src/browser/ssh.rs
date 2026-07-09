@@ -13,7 +13,7 @@ use ratatui::{
 
 use super::common::{
     Browser, BrowserCore, BrowserFocus, COMMAND_TIMEOUT_SECS, DeleteLocation, PROMPT_TAIL_BYTES,
-    TransferDirection, TransferStatus,
+    PendingTransfer, TransferDirection, TransferStatus,
 };
 use super::parse::{
     contains_any_error, parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote,
@@ -71,34 +71,32 @@ fn count_password_prompts(lines: &[String]) -> usize {
 }
 
 impl SshBrowser {
-    pub fn new(host: &str) -> Result<Self> {
-        let ssh = EmbeddedTerminal::ssh_shell(host)?;
-        Ok(SshBrowser {
-            core: BrowserCore::new(host),
-            ssh: Box::new(ssh),
+    fn with_pty(host: &str, ssh: Box<dyn PtyChannel>) -> Self {
+        let mut core = BrowserCore::new(host);
+        // Start the connect timer: Connecting/SettingPrompt time out too (M6),
+        // so an undetectable shell prompt cannot hang the pane forever.
+        core.cmd_start = Some(Instant::now());
+        SshBrowser {
+            core,
+            ssh,
             scp_pty: None,
             ssh_state: SshBrowserState::Connecting,
             saved_password: None,
             password_buf: String::new(),
             waiting_password: false,
             password_prompts_seen: 0,
-        })
+        }
+    }
+
+    pub fn new(host: &str) -> Result<Self> {
+        let ssh = EmbeddedTerminal::ssh_shell(host)?;
+        Ok(Self::with_pty(host, Box::new(ssh)))
     }
 
     #[cfg(test)]
     pub fn with_mock() -> (Self, MockPtyHandle) {
         let (mock, handle) = MockPty::new();
-        let browser = SshBrowser {
-            core: BrowserCore::new("test-host"),
-            ssh: Box::new(mock),
-            scp_pty: None,
-            ssh_state: SshBrowserState::Connecting,
-            saved_password: None,
-            password_buf: String::new(),
-            waiting_password: false,
-            password_prompts_seen: 0,
-        };
-        (browser, handle)
+        (Self::with_pty("test-host", Box::new(mock)), handle)
     }
 
     pub fn tick(&mut self) {
@@ -161,25 +159,41 @@ impl SshBrowser {
                     self.core.needs_redraw = true;
                 }
 
+                // Progress rewrites accumulate without bound on long
+                // transfers. Once data is flowing (auth is done, so the
+                // password-prompt count above can no longer change), keep
+                // only a tail of the buffer.
+                if pct.unwrap_or(0) > 0 && scp.raw_len() > 16 * 1024 {
+                    scp.drain_raw_keep(1024);
+                }
+
                 if exited {
-                    info!("SCP transfer done (process exited)");
+                    // scp exits non-zero on any failure (auth, permissions,
+                    // missing file) — check before declaring success.
+                    let failed = scp.exit_code().is_some_and(|c| c != 0);
+                    info!("SCP transfer done (process exited, failed={})", failed);
                     let completion_msg = self.core.transfer.last.as_mut().map(|t| {
                         t.done = true;
                         t.progress = 100;
-                        let verb = match t.direction {
-                            TransferDirection::Download => "Downloaded",
-                            TransferDirection::Upload => "Uploaded",
+                        let verb = match (failed, t.direction) {
+                            (true, _) => "Transfer failed",
+                            (false, TransferDirection::Download) => "Downloaded",
+                            (false, TransferDirection::Upload) => "Uploaded",
                         };
                         format!("{}: {}", verb, t.filename)
                     });
                     if let Some(msg) = completion_msg {
                         self.core.status_msg = msg;
-                        self.core.status_color = Color::Green;
+                        self.core.status_color = if failed { Color::Red } else { Color::Green };
+                    }
+                    if failed {
+                        warn!("SCP transfer failed, cancelling batch");
+                        self.core.transfer.pending.clear();
                     }
                     self.scp_pty = None;
+                    self.core.transfer.current = None;
                     self.core.transfer.batch_done += 1;
                     self.core.local.entries = read_local_dir(&self.core.local.path);
-                    info!("SCP transfer complete");
                     self.ssh.drain_raw();
                     self.core.prev_raw_len = 0;
                     self.core.prompt_stable = 0;
@@ -199,6 +213,7 @@ impl SshBrowser {
                 self.core.drop_confirm = None;
                 self.core.transfer.pending.clear();
                 self.core.delete.pending.clear();
+                self.core.transfer.current = None;
                 self.core.transfer.batch_done = 0;
                 self.core.transfer.batch_total = 0;
                 self.core.transfer.start = None;
@@ -213,24 +228,26 @@ impl SshBrowser {
         // --- SSH connection password detection ---
         if self.ssh_state == SshBrowserState::Connecting && !self.waiting_password {
             let lines = self.ssh.raw_lines();
-            let pw_count = lines
-                .iter()
-                .filter(|l| l.trim().to_lowercase().ends_with("password:"))
-                .count();
+            let pw_count = count_password_prompts(&lines);
             if pw_count > self.password_prompts_seen {
                 self.password_prompts_seen = pw_count;
                 if let Some(ref pw) = self.saved_password {
                     if pw_count > 1 {
                         warn!("SSH password rejected, re-prompting");
+                        // Keep `password_prompts_seen` at `pw_count`: the raw
+                        // buffer is not drained during Connecting, so resetting
+                        // the counter here would re-trigger this branch on the
+                        // next tick and reject a *correct* resubmission (and
+                        // eventually type the password into the live shell).
                         self.saved_password = None;
                         self.password_buf.clear();
-                        self.password_prompts_seen = 0;
                         self.waiting_password = true;
                         self.core.status_msg = "Wrong password, try again".to_string();
                         self.core.status_color = Color::Red;
                     } else {
                         debug!("SSH auto-sending saved password");
                         self.ssh.send_str(&format!("{}\r\n", pw));
+                        self.core.cmd_start = Some(Instant::now());
                         self.core.status_msg = "Authenticating...".to_string();
                         self.core.status_color = Color::Yellow;
                     }
@@ -267,18 +284,30 @@ impl SshBrowser {
         }
 
         // Command timeout: waiting states that should not stall indefinitely.
+        // Connecting/SettingPrompt are included so an undetectable shell
+        // prompt (e.g. starship's ❯) surfaces an error instead of hanging;
+        // the timer is refreshed on every connect-phase keystroke and
+        // password submission so interactive auth never times out mid-typing.
         if matches!(
             self.ssh_state,
-            SshBrowserState::WaitingPwd
+            SshBrowserState::Connecting
+                | SshBrowserState::SettingPrompt
+                | SshBrowserState::WaitingPwd
                 | SshBrowserState::WaitingLs
                 | SshBrowserState::WaitingDelete
         ) && let Some(start) = self.core.cmd_start
             && start.elapsed().as_secs() >= COMMAND_TIMEOUT_SECS
         {
             warn!("SCP command timed out in state {:?}", self.ssh_state);
+            self.core.status_msg = match self.ssh_state {
+                SshBrowserState::Connecting | SshBrowserState::SettingPrompt => {
+                    "No shell prompt detected (SCP browser needs a POSIX shell with a $/#/% prompt)"
+                        .to_string()
+                }
+                _ => "Command timed out".to_string(),
+            };
             self.core.cmd_start = None;
             self.ssh_state = SshBrowserState::Idle;
-            self.core.status_msg = "Command timed out".to_string();
             self.core.status_color = Color::Red;
             self.core.needs_redraw = true;
             return;
@@ -293,6 +322,7 @@ impl SshBrowser {
                     self.ssh
                         .send_str("PS1='SSHMUX> '; PS2=''; unset PROMPT_COMMAND 2>/dev/null\r\n");
                     self.ssh_state = SshBrowserState::SettingPrompt;
+                    self.core.cmd_start = Some(Instant::now());
                     self.password_prompts_seen = 0;
                     self.core.status_msg = format!("Setting prompt on {}", self.core.host);
                     self.core.status_color = Color::Yellow;
@@ -537,6 +567,11 @@ impl SshBrowser {
                     self.core.transfer.batch_total = self.core.transfer.pending.len() + 1;
                 }
                 self.core.transfer.start = Some(Instant::now());
+                self.core.transfer.current = Some(PendingTransfer {
+                    path: remote_file.clone(),
+                    name: name.clone(),
+                    is_dir,
+                });
                 self.core.transfer.last = Some(TransferStatus {
                     filename: name.clone(),
                     direction: TransferDirection::Download,
@@ -612,6 +647,11 @@ impl SshBrowser {
                     self.core.transfer.batch_total = self.core.transfer.pending.len() + 1;
                 }
                 self.core.transfer.start = Some(Instant::now());
+                self.core.transfer.current = Some(PendingTransfer {
+                    path: local_str.clone(),
+                    name: name.clone(),
+                    is_dir,
+                });
                 self.core.transfer.last = Some(TransferStatus {
                     filename: name.clone(),
                     direction: TransferDirection::Upload,
@@ -669,6 +709,13 @@ impl SshBrowser {
         if self.ssh_state == SshBrowserState::Transferring {
             self.scp_pty = None;
             self.ssh_state = SshBrowserState::Idle;
+            // Clear the whole batch — otherwise the progress overlay (keyed on
+            // transfer.start) would stay up and queued items would fire later.
+            self.core.transfer.current = None;
+            self.core.transfer.pending.clear();
+            self.core.transfer.start = None;
+            self.core.transfer.batch_done = 0;
+            self.core.transfer.batch_total = 0;
             self.core.status_msg = "Transfer cancelled".to_string();
         } else {
             self.core.status_msg = "Password cancelled".to_string();
@@ -679,9 +726,16 @@ impl SshBrowser {
 
     pub fn submit_password(&mut self) {
         let pw = self.password_buf.clone();
+        self.saved_password = Some(pw.clone());
+        self.password_buf.clear();
+        self.waiting_password = false;
+        self.core.status_color = Color::Yellow;
+        self.core.needs_redraw = true;
+
         if self.ssh_state == SshBrowserState::Connecting {
             debug!("SSH sending user password ({} chars)", pw.len());
             self.ssh.send_str(&format!("{}\r\n", pw));
+            self.core.cmd_start = Some(Instant::now());
             self.core.status_msg = "Authenticating...".to_string();
         } else if let Some(ref mut scp) = self.scp_pty {
             debug!("SCP sending user password ({} chars)", pw.len());
@@ -693,12 +747,36 @@ impl SshBrowser {
                 };
                 self.core.status_msg = format!("{}...", verb);
             }
+        } else if self.ssh_state == SshBrowserState::Transferring {
+            // The transfer PTY was dropped after a rejected password. Restart
+            // the in-flight transfer with the new password instead of letting
+            // the no-PTY recovery mark it (and the queued batch) as failed.
+            if let Some(direction) = self.requeue_current_transfer() {
+                match direction {
+                    TransferDirection::Upload => self.upload(),
+                    TransferDirection::Download => self.download(),
+                }
+            }
         }
-        self.saved_password = Some(pw);
-        self.password_buf.clear();
-        self.waiting_password = false;
-        self.core.status_color = Color::Yellow;
-        self.core.needs_redraw = true;
+    }
+
+    /// Push the in-flight transfer back onto the front of the pending queue
+    /// and return to `Idle`, ready for a restart. Returns the direction to
+    /// restart with, or `None` when nothing was in flight.
+    fn requeue_current_transfer(&mut self) -> Option<TransferDirection> {
+        let cur = self.core.transfer.current.take()?;
+        let direction = self
+            .core
+            .transfer
+            .last
+            .as_ref()
+            .map(|t| t.direction)
+            .unwrap_or(TransferDirection::Upload);
+        info!("SCP re-queueing {} after password retry", cur.name);
+        self.core.transfer.pending.insert(0, cur);
+        self.core.transfer.pending_direction = Some(direction);
+        self.ssh_state = SshBrowserState::Idle;
+        Some(direction)
     }
 
     // ---- delete ------------------------------------------------------------
@@ -856,6 +934,9 @@ impl Browser for SshBrowser {
         )
     }
     fn send_connect_key(&mut self, code: KeyCode) {
+        // The user is interacting (host-key prompt, keyboard-interactive
+        // auth…) — keep the connect timeout from firing mid-conversation.
+        self.core.cmd_start = Some(Instant::now());
         match code {
             KeyCode::Char(c) => self.ssh.send_char(c),
             KeyCode::Enter => self.ssh.send_str("\r\n"),
@@ -1018,6 +1099,71 @@ mod tests {
             SshBrowserState::Connecting,
             "should not progress while waiting for password"
         );
+    }
+
+    #[test]
+    fn correct_password_after_rejection_is_not_rejected() {
+        let (mut sb, h) = make_ssh();
+        // First prompt → user is asked for a password.
+        h.feed(b"user@host's password:");
+        sb.tick();
+        assert!(sb.waiting_password);
+
+        // User submits a wrong password.
+        sb.password_buf = "wrong".to_string();
+        sb.submit_password();
+
+        // Server rejects and prompts again.
+        h.feed(b"\nPermission denied, please try again.\nuser@host's password:");
+        sb.tick();
+        assert!(sb.waiting_password, "rejection should re-prompt");
+        assert!(sb.core.status_msg.contains("Wrong password"));
+
+        // User submits the correct password. The raw buffer still holds two
+        // old "password:" lines — that must NOT re-trigger the rejection.
+        sb.password_buf = "correct".to_string();
+        sb.submit_password();
+        sb.tick();
+        assert!(
+            !sb.waiting_password,
+            "a correct resubmission must not be re-rejected"
+        );
+        assert!(
+            !sb.core.status_msg.contains("Wrong password"),
+            "status must not claim wrong password, got: {}",
+            sb.core.status_msg
+        );
+
+        // Auth succeeds, shell prompt arrives → connection proceeds normally.
+        h.feed(b"\nWelcome!\nuser@host:~$ ");
+        tick_until_stable(&mut sb);
+        assert_eq!(sb.ssh_state, SshBrowserState::SettingPrompt);
+    }
+
+    #[test]
+    fn connecting_times_out_with_prompt_hint() {
+        let (mut sb, _h) = make_ssh();
+        sb.core.cmd_start =
+            Some(Instant::now() - std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS + 1));
+        sb.tick();
+        assert_eq!(sb.ssh_state, SshBrowserState::Idle);
+        assert_eq!(sb.core.status_color, Color::Red);
+        assert!(
+            sb.core.status_msg.contains("shell prompt"),
+            "connect timeout should explain the prompt requirement, got: {}",
+            sb.core.status_msg
+        );
+    }
+
+    #[test]
+    fn connect_keystrokes_refresh_connect_timeout() {
+        let (mut sb, _h) = make_ssh();
+        sb.core.cmd_start =
+            Some(Instant::now() - std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS + 1));
+        // A host-key-prompt answer refreshes the timer before the next tick.
+        sb.send_connect_key(KeyCode::Char('y'));
+        sb.tick();
+        assert_eq!(sb.ssh_state, SshBrowserState::Connecting, "no timeout");
     }
 
     // ---- Password input methods ----
@@ -1332,6 +1478,78 @@ mod tests {
             sb.scp_pty.is_none(),
             "scp_pty should be dropped on rejection"
         );
+    }
+
+    #[test]
+    fn scp_nonzero_exit_reports_failure_and_cancels_batch() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Transferring;
+        sb.core.transfer.last = Some(TransferStatus {
+            filename: "secret.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+        sb.core.transfer.pending.push(PendingTransfer {
+            path: "/remote/next.txt".to_string(),
+            name: "next.txt".to_string(),
+            is_dir: false,
+        });
+        let scp_h = attach_scp_pty(&mut sb);
+
+        scp_h.set_exited(true);
+        scp_h.set_exit_code(Some(1));
+        sb.tick();
+
+        assert_eq!(sb.core.status_color, Color::Red);
+        assert!(
+            sb.core.status_msg.contains("Transfer failed"),
+            "expected failure status, got: {}",
+            sb.core.status_msg
+        );
+        assert!(
+            sb.core.transfer.pending.is_empty(),
+            "a failed transfer must cancel the rest of the batch"
+        );
+        assert_eq!(sb.ssh_state, SshBrowserState::WaitingLs);
+    }
+
+    #[test]
+    fn requeue_current_transfer_restores_pending_front() {
+        let (mut sb, _h) = make_ssh();
+        sb.ssh_state = SshBrowserState::Transferring;
+        sb.scp_pty = None; // dropped after a rejected password
+        sb.core.transfer.current = Some(PendingTransfer {
+            path: "/remote/file.txt".to_string(),
+            name: "file.txt".to_string(),
+            is_dir: false,
+        });
+        sb.core.transfer.last = Some(TransferStatus {
+            filename: "file.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+        sb.core.transfer.pending.push(PendingTransfer {
+            path: "/remote/rest.txt".to_string(),
+            name: "rest.txt".to_string(),
+            is_dir: false,
+        });
+
+        let direction = sb.requeue_current_transfer();
+
+        assert_eq!(direction, Some(TransferDirection::Download));
+        assert_eq!(sb.ssh_state, SshBrowserState::Idle);
+        assert_eq!(sb.core.transfer.pending.len(), 2);
+        assert_eq!(
+            sb.core.transfer.pending[0].name, "file.txt",
+            "in-flight transfer must be re-queued at the front"
+        );
+        assert!(sb.core.transfer.current.is_none());
     }
 
     #[test]

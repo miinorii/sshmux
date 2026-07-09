@@ -89,6 +89,15 @@ pub struct FsEntry {
 }
 
 /// Parse the output of `ls -la` into a `Vec<FsEntry>`.
+///
+/// INVARIANT: a synthetic `..` entry is always inserted at index 0 (same as
+/// `read_local_dir`). Multi-select and transfer code in `browser::common`
+/// relies on "index 0 is the parent link" — keep the two listers in sync.
+///
+/// KNOWN LIMITS: symlinks are treated as directories for navigation, so a
+/// symlink to a *file* cannot be downloaded (Enter cds into it and the next
+/// go-up recovers). Lines longer than the hidden PTY width (220 cols) wrap
+/// and are silently dropped by the ≥9-token check.
 pub fn parse_ls(lines: &[String]) -> Vec<FsEntry> {
     let mut entries = vec![FsEntry {
         name: "..".to_string(),
@@ -227,6 +236,10 @@ pub fn list_drives() -> Vec<PathBuf> {
     }
 }
 
+/// Read a local directory listing.
+///
+/// INVARIANT: a synthetic `..` entry is always inserted at index 0 (same as
+/// `parse_ls`) — see the note there.
 pub fn read_local_dir(path: &Path) -> Vec<FsEntry> {
     let mut entries = vec![FsEntry {
         name: "..".to_string(),
@@ -293,6 +306,12 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
+/// POSIX single-quote an argument for a remote shell.
+///
+/// CAVEAT: the `'\''` idiom used to escape embedded single quotes is *shell*
+/// syntax. sftp's own tokenizer (SFTP browser commands) understands plain
+/// quoting but not this idiom, so filenames containing a single quote work in
+/// the SCP browser (real shell) but fail in the SFTP browser.
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }

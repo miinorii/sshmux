@@ -6,7 +6,7 @@ use crossterm::event::KeyCode;
 use log::debug;
 use ratatui::style::Color;
 
-use super::{BrowserCore, BrowserFocus, BrowserKeyAction, PendingTransfer};
+use super::{BrowserCore, BrowserFocus, BrowserKeyAction, PendingTransfer, TransferDirection};
 use crate::keybindings::{BrowserBindings, KeyBinding};
 
 /// Handle a key event for a browser in idle mode (not connecting, not waiting
@@ -67,6 +67,7 @@ pub fn handle_browser_key(
                             is_dir: p.is_dir(),
                         })
                         .collect();
+                    core.transfer.pending_direction = Some(TransferDirection::Upload);
                     core.drop_scroll_x = 0;
                     core.drop_scroll_y = 0;
                 }

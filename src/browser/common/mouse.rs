@@ -130,11 +130,6 @@ impl BrowserCore {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.drag = None;
-                let indices = self.selected_indices();
-                if indices.len() > 1 {
-                    self.queue_transfers_from_indices(&indices);
-                    self.clear_selection();
-                }
                 self.handle_drag_release(col, pane_area, leaf_count)
             }
             _ => None,
@@ -154,18 +149,74 @@ impl BrowserCore {
         };
         let layout = browser_layout(outer_inner);
         let in_remote = col >= layout.remote_panel.x;
-        let drag_from = self.focus;
+        let action = match (self.focus, in_remote) {
+            (BrowserFocus::Local, true) => Some(DragAction::LocalToRemote),
+            (BrowserFocus::Remote, false) => Some(DragAction::RemoteToLocal),
+            _ => None,
+        };
+        // Queue the multi-selection only when the release actually crossed
+        // panels — and do it before the focus flip, so the entries come from
+        // the origin panel. A same-panel release must leave the queue empty,
+        // otherwise the entries would fire later via chain_next_queued().
+        if action.is_some() {
+            let indices = self.selected_indices();
+            if indices.len() > 1 {
+                self.queue_transfers_from_indices(&indices);
+                self.clear_selection();
+            }
+        }
         self.focus = if in_remote {
             BrowserFocus::Remote
         } else {
             BrowserFocus::Local
         };
-        if in_remote && drag_from == BrowserFocus::Local {
-            Some(DragAction::LocalToRemote)
-        } else if !in_remote && drag_from == BrowserFocus::Remote {
-            Some(DragAction::RemoteToLocal)
-        } else {
-            None
-        }
+        action
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{BrowserFocus, TransferDirection, core_with_remote_entries};
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    fn area() -> Rect {
+        // leaf_count 1 → local panel x 0..50, remote panel x 50..100
+        Rect::new(0, 0, 100, 40)
+    }
+
+    #[test]
+    fn same_panel_release_with_multiselect_queues_nothing() {
+        let mut core =
+            core_with_remote_entries(&[("..", true), ("a.txt", false), ("b.txt", false)]);
+        core.focus = BrowserFocus::Remote;
+        core.selected.insert(1);
+        core.selected.insert(2);
+
+        // Release inside the remote panel (same side the selection lives on).
+        let action = core.handle_mouse(MouseEventKind::Up(MouseButton::Left), 60, 5, area(), 1);
+
+        assert!(action.is_none());
+        assert!(
+            core.transfer.pending.is_empty(),
+            "same-panel release must not queue transfers"
+        );
+    }
+
+    #[test]
+    fn cross_panel_release_queues_with_download_direction() {
+        let mut core =
+            core_with_remote_entries(&[("..", true), ("a.txt", false), ("b.txt", false)]);
+        core.focus = BrowserFocus::Remote;
+        core.selected.insert(1);
+        core.selected.insert(2);
+
+        // Release over the local panel → remote-to-local transfer.
+        let action = core.handle_mouse(MouseEventKind::Up(MouseButton::Left), 10, 5, area(), 1);
+
+        assert!(action.is_some());
+        assert_eq!(core.transfer.pending.len(), 2);
+        assert_eq!(core.pending_direction(), TransferDirection::Download);
+        assert!(core.selected.is_empty(), "selection cleared after queueing");
     }
 }

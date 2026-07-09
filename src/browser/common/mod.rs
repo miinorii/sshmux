@@ -75,6 +75,12 @@ impl<P> Panel<P> {
 pub struct TransferState {
     pub last: Option<TransferStatus>,
     pub pending: Vec<PendingTransfer>,
+    /// Direction of everything in `pending`, set when the queue is filled.
+    /// Kept explicit so chaining never has to infer it from past transfers.
+    pub pending_direction: Option<TransferDirection>,
+    /// The transfer currently in flight (source path + name). Used to restart
+    /// after a rejected SCP password drops the transfer PTY.
+    pub current: Option<PendingTransfer>,
     pub start: Option<Instant>,
     pub batch_total: usize,
     pub batch_done: usize,
@@ -222,7 +228,7 @@ pub trait Browser {
     /// control to `Idle`. Returns true if an action was chained.
     fn chain_next_queued(&mut self) -> bool {
         if !self.core().transfer.pending.is_empty() {
-            match self.core().last_transfer_direction() {
+            match self.core().pending_direction() {
                 TransferDirection::Upload => self.upload(),
                 TransferDirection::Download => self.download(),
             }

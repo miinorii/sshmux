@@ -32,6 +32,9 @@ impl BrowserCore {
 
     /// Returns the indices to operate on: the multi-select set if non-empty,
     /// otherwise the single focused index (excluding `..` at index 0).
+    ///
+    /// Index 0 being `..` is an invariant upheld by both listers
+    /// (`parse_ls` / `read_local_dir` always insert a synthetic parent link).
     pub fn selected_indices(&self) -> Vec<usize> {
         if !self.selected.is_empty() {
             self.selected.iter().copied().collect()

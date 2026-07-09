@@ -7,7 +7,7 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
 use super::common::{
     Browser, BrowserCore, BrowserFocus, COMMAND_TIMEOUT_SECS, DeleteLocation, PROMPT_TAIL_BYTES,
-    TransferDirection, TransferStatus,
+    PendingTransfer, TransferDirection, TransferStatus,
 };
 use super::parse::{
     contains_any_error, parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote,
@@ -174,23 +174,38 @@ impl FileBrowser {
             SftpState::Transferring => {
                 if prompt_ready {
                     self.core.prompt_stable = 0;
+                    // sftp prints errors ("Couldn't ...", "... Permission denied")
+                    // and still returns to the prompt — check before declaring
+                    // success.
+                    let lines = self.sftp.raw_lines();
+                    let failed = contains_any_error(
+                        &lines,
+                        &["permission denied", "no such file", "couldn't"],
+                    );
                     let completion_msg = self.core.transfer.last.as_mut().map(|t| {
                         t.done = true;
                         t.progress = 100;
-                        let verb = match t.direction {
-                            TransferDirection::Download => "Downloaded",
-                            TransferDirection::Upload => "Uploaded",
+                        let verb = match (failed, t.direction) {
+                            (true, _) => "Transfer failed",
+                            (false, TransferDirection::Download) => "Downloaded",
+                            (false, TransferDirection::Upload) => "Uploaded",
                         };
                         format!("{}: {}", verb, t.filename)
                     });
                     if let Some(msg) = completion_msg {
                         self.core.status_msg = msg;
-                        self.core.status_color = Color::Green;
+                        self.core.status_color = if failed { Color::Red } else { Color::Green };
                     }
+                    if failed {
+                        warn!("SFTP transfer failed, cancelling batch");
+                        self.core.transfer.pending.clear();
+                    }
+                    self.core.transfer.current = None;
                     self.core.transfer.batch_done += 1;
                     self.core.local.entries = read_local_dir(&self.core.local.path);
                     info!(
-                        "SFTP transfer complete, pending_transfers={}",
+                        "SFTP transfer complete (failed={}), pending_transfers={}",
+                        failed,
                         self.core.transfer.pending.len(),
                     );
                     self.sftp.drain_raw();
@@ -200,7 +215,7 @@ impl FileBrowser {
                     // existing entries are still valid for chaining.
                     if !self.core.transfer.pending.is_empty() {
                         self.sftp_state = SftpState::Idle;
-                        match self.core.last_transfer_direction() {
+                        match self.core.pending_direction() {
                             TransferDirection::Upload => self.upload(),
                             TransferDirection::Download => self.download(),
                         }
@@ -224,9 +239,18 @@ impl FileBrowser {
                                 t.file_count = count;
                                 self.core.needs_redraw = true;
                             }
-                        } else if let Some(pct) = scrape_transfer_progress(&lines) {
-                            t.progress = pct;
-                            self.core.needs_redraw = true;
+                        } else {
+                            if let Some(pct) = scrape_transfer_progress(&lines) {
+                                t.progress = pct;
+                                self.core.needs_redraw = true;
+                            }
+                            // Single-file progress rewrites accumulate without
+                            // bound on long transfers; keep only a tail (which
+                            // still contains the newest progress, any error
+                            // text, and the prompt when it arrives).
+                            if self.sftp.raw_len() > 16 * 1024 {
+                                self.sftp.drain_raw_keep(1024);
+                            }
                         }
                     }
                 }
@@ -363,16 +387,23 @@ impl FileBrowser {
         };
         let local_dest = self.core.local.path.to_string_lossy().replace('\\', "/");
         let flag = if is_dir { "-r " } else { "" };
+        // Quote the local destination too — Windows home paths often contain
+        // spaces and would otherwise split into two sftp arguments.
         let cmd = format!(
-            "get {}{} {}/\r\n",
+            "get {}{} {}\r\n",
             flag,
             shell_quote(&remote_file),
-            local_dest
+            shell_quote(&format!("{}/", local_dest))
         );
         if self.core.transfer.batch_done == 0 {
             self.core.transfer.batch_total = self.core.transfer.pending.len() + 1;
         }
         self.core.transfer.start = Some(Instant::now());
+        self.core.transfer.current = Some(PendingTransfer {
+            path: remote_file.clone(),
+            name: name.clone(),
+            is_dir,
+        });
         self.core.transfer.last = Some(TransferStatus {
             filename: name.clone(),
             direction: TransferDirection::Download,
@@ -415,15 +446,20 @@ impl FileBrowser {
         };
         let flag = if is_dir { "-r " } else { "" };
         let cmd = format!(
-            "put {}{} {}/\r\n",
+            "put {}{} {}\r\n",
             flag,
             shell_quote(&local_str),
-            shell_quote(&self.core.remote.path)
+            shell_quote(&format!("{}/", self.core.remote.path.trim_end_matches('/')))
         );
         if self.core.transfer.batch_done == 0 {
             self.core.transfer.batch_total = self.core.transfer.pending.len() + 1;
         }
         self.core.transfer.start = Some(Instant::now());
+        self.core.transfer.current = Some(PendingTransfer {
+            path: local_str.clone(),
+            name: name.clone(),
+            is_dir,
+        });
         self.core.transfer.last = Some(TransferStatus {
             filename: name.clone(),
             direction: TransferDirection::Upload,
@@ -585,7 +621,7 @@ impl Browser for FileBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::common::{DeleteKind, DeleteTarget, PendingTransfer};
+    use crate::browser::common::{DeleteKind, DeleteTarget, dummy_entry};
     use crate::browser::parse::FsEntry;
 
     /// Run tick() enough times for prompt stability to trigger a transition.
@@ -979,6 +1015,62 @@ mod tests {
         assert_eq!(fb.core.transfer.batch_done, 0);
         assert_eq!(fb.core.transfer.batch_total, 0);
         assert!(fb.core.transfer.start.is_none());
+    }
+
+    #[test]
+    fn download_quotes_local_destination_with_spaces() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::Idle;
+        fb.core.focus = BrowserFocus::Remote;
+        fb.core.remote.path = "/home".to_string();
+        fb.core.local.path = std::path::PathBuf::from("C:/Users/First Last/Downloads");
+        fb.core.remote.entries = vec![dummy_entry("..", true), dummy_entry("file.txt", false)];
+        fb.core.remote.sel.select(Some(1));
+        h.clear_sent();
+
+        fb.download();
+
+        let sent = h.sent();
+        let get_cmd = sent.iter().find(|s| s.starts_with("get ")).unwrap();
+        assert!(
+            get_cmd.contains("'C:/Users/First Last/Downloads/'"),
+            "local destination must be quoted, got: {}",
+            get_cmd
+        );
+    }
+
+    #[test]
+    fn transferring_error_output_reports_failure() {
+        let (mut fb, h) = make_sftp();
+        fb.sftp_state = SftpState::Transferring;
+        fb.core.transfer.last = Some(TransferStatus {
+            filename: "secret.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 0,
+            file_count: 0,
+        });
+        fb.core.transfer.pending.push(PendingTransfer {
+            path: "/remote/next.txt".to_string(),
+            name: "next.txt".to_string(),
+            is_dir: false,
+        });
+
+        h.feed(b"Fetching /remote/secret.txt to secret.txt\nremote open(\"/remote/secret.txt\"): Permission denied\nsftp> ");
+        tick_until_stable(&mut fb);
+
+        assert_eq!(fb.core.status_color, Color::Red);
+        assert!(
+            fb.core.status_msg.contains("Transfer failed"),
+            "expected failure status, got: {}",
+            fb.core.status_msg
+        );
+        assert!(
+            fb.core.transfer.pending.is_empty(),
+            "a failed transfer must cancel the rest of the batch"
+        );
+        assert_eq!(fb.sftp_state, SftpState::WaitingLs);
     }
 
     // ---- WaitingDelete state ----
