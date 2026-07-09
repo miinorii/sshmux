@@ -209,6 +209,8 @@ fn main() -> Result<()> {
             terminal.draw(|f| {
                 last_area = f.area();
                 if needs_draw {
+                    // Keeps multi-pane row counts correct (2252888); cheap
+                    // because same-size PTY resizes early-return.
                     app.resize_all(last_area);
                 }
                 app.render(last_area, f.buffer_mut());

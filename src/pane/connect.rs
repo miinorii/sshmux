@@ -86,8 +86,92 @@ pub fn editor_nav_up(list_state: &mut ListState) {
 pub enum ConnectOverlay {
     None,
     BrowserMenu(ListState),
-    ConnectInput(String),
+    ConnectInput(InputField),
     KeyEditor(KeyEditorState),
+}
+
+// ---------------------------------------------------------------------------
+// InputField — single-line text input with a movable cursor
+// ---------------------------------------------------------------------------
+
+/// Single-line editable text with a cursor (char index, may sit one past the
+/// last char). Rendering uses [`InputField::view`] to horizontally scroll the
+/// text so the cursor is always visible.
+#[derive(Default)]
+pub struct InputField {
+    pub text: String,
+    cursor: usize,
+}
+
+impl InputField {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Byte offset of the cursor's char index.
+    fn byte_at(&self, char_idx: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(char_idx)
+            .map(|(b, _)| b)
+            .unwrap_or(self.text.len())
+    }
+
+    fn char_len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    pub fn insert(&mut self, c: char) {
+        let at = self.byte_at(self.cursor);
+        self.text.insert(at, c);
+        self.cursor += 1;
+    }
+
+    /// Delete the char before the cursor.
+    pub fn backspace(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            let at = self.byte_at(self.cursor);
+            self.text.remove(at);
+        }
+    }
+
+    /// Delete the char at the cursor.
+    pub fn delete(&mut self) {
+        if self.cursor < self.char_len() {
+            let at = self.byte_at(self.cursor);
+            self.text.remove(at);
+        }
+    }
+
+    pub fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn move_right(&mut self) {
+        self.cursor = (self.cursor + 1).min(self.char_len());
+    }
+
+    pub fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn move_end(&mut self) {
+        self.cursor = self.char_len();
+    }
+
+    /// Return the visible window of the text for a field `width` chars wide,
+    /// padded to `width`, plus the cursor's column inside that window. The
+    /// window scrolls so the cursor is always visible.
+    pub fn view(&self, width: usize) -> (String, usize) {
+        if width == 0 {
+            return (String::new(), 0);
+        }
+        let scroll = self.cursor.saturating_sub(width - 1);
+        let visible: String = self.text.chars().skip(scroll).take(width).collect();
+        let padded = format!("{:<width$}", visible, width = width);
+        (padded, self.cursor - scroll)
+    }
 }
 
 pub struct KeyEditorState {
@@ -304,7 +388,8 @@ impl ConnectPane {
                     width: input_w,
                     height: input_h,
                 };
-                let display = format!("{}_", input);
+                let text_w = input_w.saturating_sub(2) as usize;
+                let (display, cursor_col) = input.view(text_w);
                 let paragraph = Paragraph::new(vec![
                     Line::from(Span::raw(display).style(Style::default().fg(Color::White))),
                     Line::from(
@@ -319,6 +404,13 @@ impl ConnectPane {
                         .title(" ssh "),
                 );
                 paragraph.render(input_area, buf);
+                // Block cursor: reverse the cell at the cursor column.
+                let cur_x = input_area.x + 1 + cursor_col as u16;
+                let cur_y = input_area.y + 1;
+                if cur_x < input_area.x + input_w.saturating_sub(1) {
+                    let style = buf[(cur_x, cur_y)].style().add_modifier(Modifier::REVERSED);
+                    buf[(cur_x, cur_y)].set_style(style);
+                }
             }
             ConnectOverlay::None => {}
         }
@@ -349,6 +441,115 @@ mod tests {
             globals + connects + browsers + 3,
             "EDITOR_ROW_COUNT out of sync (3 headers + all bindings)"
         );
+    }
+
+    // ---- InputField ----
+
+    fn field_with(text: &str) -> InputField {
+        let mut f = InputField::new();
+        for c in text.chars() {
+            f.insert(c);
+        }
+        f
+    }
+
+    #[test]
+    fn input_field_insert_and_backspace_at_end() {
+        let mut f = field_with("ab");
+        f.backspace();
+        assert_eq!(f.text, "a");
+    }
+
+    #[test]
+    fn input_field_cursor_movement_and_mid_insert() {
+        let mut f = field_with("host");
+        f.move_left();
+        f.move_left();
+        f.insert('X');
+        assert_eq!(f.text, "hoXst");
+        f.move_home();
+        f.insert('>');
+        assert_eq!(f.text, ">hoXst");
+        f.move_end();
+        f.insert('!');
+        assert_eq!(f.text, ">hoXst!");
+    }
+
+    #[test]
+    fn input_field_delete_at_cursor() {
+        let mut f = field_with("abc");
+        f.move_home();
+        f.delete();
+        assert_eq!(f.text, "bc");
+        f.delete();
+        f.delete();
+        f.delete(); // extra delete on empty is a no-op
+        assert_eq!(f.text, "");
+    }
+
+    #[test]
+    fn input_field_backspace_mid_text() {
+        let mut f = field_with("abcd");
+        f.move_left(); // cursor between c and d
+        f.backspace(); // removes c
+        assert_eq!(f.text, "abd");
+        f.insert('C');
+        assert_eq!(f.text, "abCd");
+    }
+
+    #[test]
+    fn input_field_left_saturates_right_clamps() {
+        let mut f = field_with("ab");
+        f.move_home();
+        f.move_left(); // no-op at 0
+        f.insert('<');
+        assert_eq!(f.text, "<ab");
+        f.move_end();
+        f.move_right(); // no-op at end
+        f.insert('>');
+        assert_eq!(f.text, "<ab>");
+    }
+
+    #[test]
+    fn input_field_utf8_editing() {
+        let mut f = field_with("héllo");
+        f.move_left();
+        f.move_left();
+        f.backspace(); // removes the second l
+        assert_eq!(f.text, "hélo");
+    }
+
+    #[test]
+    fn input_field_view_fits_without_scroll() {
+        let f = field_with("abc");
+        let (view, col) = f.view(10);
+        assert_eq!(view, "abc       ");
+        assert_eq!(col, 3, "cursor sits after the text");
+    }
+
+    #[test]
+    fn input_field_view_scrolls_to_keep_cursor_visible() {
+        // 10 chars in a 5-wide field, cursor at the end: window shows the
+        // tail and the cursor stays on the last column.
+        let f = field_with("0123456789");
+        let (view, col) = f.view(5);
+        assert_eq!(view, "6789 ");
+        assert_eq!(col, 4);
+    }
+
+    #[test]
+    fn input_field_view_follows_cursor_back_left() {
+        let mut f = field_with("0123456789");
+        f.move_home();
+        let (view, col) = f.view(5);
+        assert_eq!(view, "01234");
+        assert_eq!(col, 0, "window snaps back to the start");
+    }
+
+    #[test]
+    fn input_field_view_zero_width() {
+        let f = field_with("abc");
+        assert_eq!(f.view(0), (String::new(), 0));
     }
 
     #[test]

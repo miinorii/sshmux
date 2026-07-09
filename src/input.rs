@@ -9,7 +9,7 @@ use crate::app::{App, CONTEXT_MENU_ITEMS, ContextMenu, PaneResizeDrag, context_m
 use crate::browser::{BrowserKeyAction, DragAction, FileBrowser, SshBrowser, handle_browser_key};
 use crate::keybindings::KeyBinding;
 use crate::pane::connect::{
-    ConnectOverlay, ConnectPane, KeyEditorState, editor_binding_index, editor_nav_down,
+    ConnectOverlay, ConnectPane, InputField, KeyEditorState, editor_binding_index, editor_nav_down,
     editor_nav_up,
 };
 use crate::pane::{
@@ -390,25 +390,31 @@ fn handle_connect_key(
             ..
         }))
     ) {
+        // Helper: get &mut InputField of the open ConnectInput overlay.
+        macro_rules! input_mut {
+            () => {
+                match &mut connect_mut!().overlay {
+                    ConnectOverlay::ConnectInput(input) => input,
+                    _ => return Some(Action::Continue),
+                }
+            };
+        }
         match code {
             // Accept plain chars and AltGr chars (reported as Ctrl+Alt on
             // Windows/Linux, e.g. `@` on AZERTY/QWERTZ). Reject Ctrl-only
             // combos so shortcuts like Ctrl+A aren't typed into the field.
-            KeyCode::Char(c) if !ctrl || alt => {
-                if let ConnectOverlay::ConnectInput(input) = &mut connect_mut!().overlay {
-                    input.push(c);
-                }
-            }
-            KeyCode::Backspace => {
-                if let ConnectOverlay::ConnectInput(input) = &mut connect_mut!().overlay {
-                    input.pop();
-                }
-            }
+            KeyCode::Char(c) if !ctrl || alt => input_mut!().insert(c),
+            KeyCode::Backspace => input_mut!().backspace(),
+            KeyCode::Delete => input_mut!().delete(),
+            KeyCode::Left => input_mut!().move_left(),
+            KeyCode::Right => input_mut!().move_right(),
+            KeyCode::Home => input_mut!().move_home(),
+            KeyCode::End => input_mut!().move_end(),
             KeyCode::Enter => {
                 let args = if let Some(Pane::Connect(p)) = app.tab().focused_pane()
                     && let ConnectOverlay::ConnectInput(input) = &p.overlay
                 {
-                    let trimmed = input.trim().to_string();
+                    let trimmed = input.text.trim().to_string();
                     if trimmed.is_empty() {
                         None
                     } else {
@@ -508,7 +514,7 @@ fn handle_connect_key(
         ms.select(Some(0));
         connect_mut!().overlay = ConnectOverlay::BrowserMenu(ms);
     } else if cb.manual_connect.matches(code, ctrl, alt, shift) {
-        connect_mut!().overlay = ConnectOverlay::ConnectInput(String::new());
+        connect_mut!().overlay = ConnectOverlay::ConnectInput(InputField::new());
     } else if cb.help.matches(code, ctrl, alt, shift) {
         let pane = connect_mut!();
         pane.overlay = if matches!(pane.overlay, ConnectOverlay::KeyEditor(_)) {
@@ -544,11 +550,13 @@ fn handle_browser_key_dispatch(
         return Some(Action::Continue);
     }
 
-    let browser_bindings = app.keybindings.browser.clone();
-
-    // Get a trait-object reference to whichever browser is focused.
+    // Borrow the bindings and the focused browser from disjoint App fields
+    // (field access, not accessor methods, so the borrows can coexist).
+    let browser_bindings = &app.keybindings.browser;
+    let selected_tab = app.selected_tab;
     let browser = app
-        .tab_mut()
+        .tabs
+        .get_mut(selected_tab)?
         .focused_pane_mut()
         .and_then(|p| p.as_browser_mut())?;
 
@@ -576,14 +584,7 @@ fn handle_browser_key_dispatch(
         return Some(Action::Continue);
     }
 
-    match handle_browser_key(
-        browser.core_mut(),
-        code,
-        ctrl,
-        alt,
-        shift,
-        &browser_bindings,
-    ) {
+    match handle_browser_key(browser.core_mut(), code, ctrl, alt, shift, browser_bindings) {
         BrowserKeyAction::Enter => browser.enter(),
         BrowserKeyAction::GoUp => browser.go_up(),
         BrowserKeyAction::Download => browser.download(),
@@ -1152,11 +1153,13 @@ pub fn handle_paste(app: &mut App, text: &str) {
         return;
     }
 
-    // Manual-connect input overlay: append the pasted text.
+    // Manual-connect input overlay: insert the pasted text at the cursor.
     if let Some(Pane::Connect(p)) = app.tab_mut().focused_pane_mut()
         && let ConnectOverlay::ConnectInput(input) = &mut p.overlay
     {
-        input.extend(text.chars().filter(|c| !c.is_control()));
+        for c in text.chars().filter(|c| !c.is_control()) {
+            input.insert(c);
+        }
         return;
     }
 
@@ -1654,7 +1657,7 @@ mod tests {
             ..
         })) = app.tab().focused_pane()
         {
-            assert_eq!(input, "host");
+            assert_eq!(input.text, "host");
         } else {
             panic!("expected ConnectInput");
         }
@@ -1672,7 +1675,32 @@ mod tests {
             ..
         })) = app.tab().focused_pane()
         {
-            assert_eq!(input, "a");
+            assert_eq!(input.text, "a");
+        } else {
+            panic!("expected ConnectInput");
+        }
+    }
+
+    #[test]
+    fn connect_input_arrows_edit_mid_text() {
+        let mut app = make_app();
+        key(&mut app, KeyCode::Char('c'), false, false, false); // open input
+        for ch in "host".chars() {
+            key(&mut app, KeyCode::Char(ch), false, false, false);
+        }
+        key(&mut app, KeyCode::Left, false, false, false);
+        key(&mut app, KeyCode::Left, false, false, false);
+        key(&mut app, KeyCode::Char('X'), false, false, false); // hoXst
+        key(&mut app, KeyCode::Home, false, false, false);
+        key(&mut app, KeyCode::Delete, false, false, false); // drop leading h
+        key(&mut app, KeyCode::End, false, false, false);
+        key(&mut app, KeyCode::Char('!'), false, false, false);
+        if let Some(Pane::Connect(ConnectPane {
+            overlay: ConnectOverlay::ConnectInput(input),
+            ..
+        })) = app.tab().focused_pane()
+        {
+            assert_eq!(input.text, "oXst!");
         } else {
             panic!("expected ConnectInput");
         }
@@ -1718,7 +1746,7 @@ mod tests {
             ..
         })) = app.tab().focused_pane()
         {
-            assert_eq!(input, "");
+            assert_eq!(input.text, "");
         } else {
             panic!("expected ConnectInput");
         }
@@ -1739,7 +1767,7 @@ mod tests {
             ..
         })) = app.tab().focused_pane()
         {
-            assert_eq!(input, "u@h");
+            assert_eq!(input.text, "u@h");
         } else {
             panic!("expected ConnectInput");
         }
@@ -2028,7 +2056,7 @@ mod tests {
             ..
         })) = app.tab().focused_pane()
         {
-            assert_eq!(input, "user@host");
+            assert_eq!(input.text, "user@host");
         } else {
             panic!("expected ConnectInput");
         }
