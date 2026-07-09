@@ -61,7 +61,7 @@ Interactive sessions have 1000-line scrollback via `vt100::Parser`. Mouse scroll
 
 Both browsers (`FileBrowser` in browser/sftp.rs, `SshBrowser` in browser/ssh.rs) implement the `Browser` trait (browser/common.rs) and hold a `BrowserCore` field that provides shared state, dual-panel rendering, local navigation, mouse handling, and the common key dispatch via `handle_browser_key()`. Browser-specific logic (SFTP commands, SCP process spawning, password prompts) stays on the outer struct. `Pane::as_browser_mut()` returns `&mut dyn Browser` to avoid duplicated match arms.
 
-Both use prompt-stability detection: raw PTY buffer byte count unchanged for N ticks + expected prompt string present. They share parsing utilities from `browser/parse.rs` (ANSI stripping, `ls -la` parsing, transfer progress scraping).
+Both detect command completion with `ResponseWatch` (browser/common): the reader thread bumps `PtyChannel::raw_seq` on every raw-buffer mutation (appends *and* drains); a response is ready when the expected prompt sits at the buffer tail for `PROMPT_STABLE_TICKS` consecutive quiet ticks. The prompt scan runs at most once per data change (cached while quiet), and because drains bump the sequence, consuming a response needs no manual reset bookkeeping. Prompt detectors are free functions over `&dyn PtyChannel` (`sftp_prompt_at_tail`, `sshmux_prompt_at_tail`, `shell_prompt_at_tail`). They share parsing utilities from `browser/parse.rs` (ANSI stripping, `ls -la` parsing, transfer progress scraping).
 
 **SFTP**: Detects `sftp>` prompt. Commands (`cd`, `get`, `put`, `rm`) run inside the SFTP session. Transfer completion checks output for error text before reporting success.
 

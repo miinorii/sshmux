@@ -178,8 +178,49 @@ pub const PROMPT_TAIL_BYTES: usize = 64;
 /// Seconds before a waiting command (ls, pwd, delete) is considered timed out.
 pub const COMMAND_TIMEOUT_SECS: u64 = 30;
 
-/// Consecutive stable ticks required before a prompt is considered ready.
+/// Consecutive quiet ticks required before a prompt is considered ready.
 pub const PROMPT_STABLE_TICKS: u8 = 2;
+
+// ---------------------------------------------------------------------------
+// ResponseWatch — event-informed command-response detection
+// ---------------------------------------------------------------------------
+
+/// Decides when a command's PTY output is complete: the expected prompt sits
+/// at the buffer tail for [`PROMPT_STABLE_TICKS`] consecutive ticks with no
+/// new data. "New data" comes from [`PtyChannel::raw_seq`], which the reader
+/// thread bumps on every buffer mutation — so the (comparatively costly)
+/// prompt scan runs at most once per data change and its result is cached
+/// while the buffer is quiet. Draining the buffer also bumps the sequence,
+/// which resets this watch automatically: state arms need no manual reset
+/// bookkeeping after consuming a response.
+///
+/// [`PtyChannel::raw_seq`]: crate::terminal::PtyChannel::raw_seq
+#[derive(Default)]
+pub struct ResponseWatch {
+    last_seq: u64,
+    quiet_ticks: u8,
+    has_prompt: Option<bool>,
+}
+
+impl ResponseWatch {
+    /// Observe one tick. `detect` scans the buffer tail for the prompt and is
+    /// only invoked when the buffer changed since it last ran.
+    pub fn ready(&mut self, seq: u64, detect: impl FnOnce() -> bool) -> bool {
+        if seq != self.last_seq {
+            self.last_seq = seq;
+            self.quiet_ticks = 0;
+            self.has_prompt = None;
+            return false;
+        }
+        let has_prompt = *self.has_prompt.get_or_insert_with(detect);
+        if has_prompt {
+            self.quiet_ticks = self.quiet_ticks.saturating_add(1);
+        } else {
+            self.quiet_ticks = 0;
+        }
+        self.quiet_ticks >= PROMPT_STABLE_TICKS
+    }
+}
 
 /// Action returned by `handle_browser_key` for browser-specific operations.
 pub enum BrowserKeyAction {
@@ -272,8 +313,8 @@ pub struct BrowserCore {
     pub status_color: Color,
     pub cmd_start: Option<Instant>,
     pub last_duration: Option<Duration>,
-    pub prompt_stable: u8,
-    pub prev_raw_len: usize,
+    /// Detects when a command's response is complete (prompt quiet at tail).
+    pub response: ResponseWatch,
     // ---- multi-select ----
     pub selected: BTreeSet<usize>,
     pub select_anchor: Option<usize>,
@@ -328,8 +369,7 @@ impl BrowserCore {
             status_color: Color::Yellow,
             cmd_start: None,
             last_duration: None,
-            prompt_stable: 0,
-            prev_raw_len: 0,
+            response: ResponseWatch::default(),
             selected: BTreeSet::new(),
             select_anchor: None,
             transfer: TransferState::default(),
@@ -386,8 +426,58 @@ mod tests {
         assert!(core.drive_picker.is_none());
         assert_eq!(core.local.scroll_x, 0);
         assert_eq!(core.remote.scroll_x, 0);
-        assert_eq!(core.prompt_stable, 0);
         assert_eq!(core.status_msg, "Connecting…");
+    }
+
+    // ---- ResponseWatch ----
+
+    #[test]
+    fn response_watch_resets_on_new_data() {
+        let mut w = ResponseWatch::default();
+        assert!(!w.ready(1, || true)); // seq changed → reset, no detect
+        assert!(!w.ready(1, || true)); // quiet tick 1
+        assert!(!w.ready(2, || true)); // new data → reset again
+        assert!(!w.ready(2, || true)); // quiet tick 1
+        assert!(w.ready(2, || true)); // quiet tick 2 → ready
+    }
+
+    #[test]
+    fn response_watch_requires_prompt() {
+        let mut w = ResponseWatch::default();
+        assert!(!w.ready(1, || false));
+        assert!(!w.ready(1, || false));
+        assert!(!w.ready(1, || false), "never ready without a prompt");
+    }
+
+    #[test]
+    fn response_watch_scans_once_per_data_change() {
+        let mut w = ResponseWatch::default();
+        let scans = std::cell::Cell::new(0);
+        let tick = |w: &mut ResponseWatch, seq| {
+            w.ready(seq, || {
+                scans.set(scans.get() + 1);
+                true
+            })
+        };
+        tick(&mut w, 1); // reset — detect skipped
+        tick(&mut w, 1); // detect runs
+        tick(&mut w, 1); // cached
+        tick(&mut w, 1); // cached
+        assert_eq!(scans.get(), 1, "prompt scan must be cached while quiet");
+        tick(&mut w, 2); // new data — reset, detect skipped
+        tick(&mut w, 2); // detect runs again
+        assert_eq!(scans.get(), 2);
+    }
+
+    #[test]
+    fn response_watch_prompt_appearing_without_data_change_is_impossible_but_cached() {
+        // The cache means detect's result is trusted while the buffer is
+        // quiet — a prompt cannot appear without the buffer changing.
+        let mut w = ResponseWatch::default();
+        assert!(!w.ready(1, || false)); // reset
+        assert!(!w.ready(1, || false)); // scans: no prompt
+        assert!(!w.ready(1, || true)); // ignored — cached false
+        assert!(!w.ready(1, || true));
     }
 
     #[test]

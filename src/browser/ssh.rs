@@ -72,6 +72,40 @@ fn count_password_prompts(lines: &[String]) -> usize {
         .count()
 }
 
+/// True when the last non-empty output line is the `SSHMUX> ` prompt.
+fn sshmux_prompt_at_tail(pty: &dyn PtyChannel) -> bool {
+    let tail_bytes = pty.raw_tail(PROMPT_TAIL_BYTES);
+    if tail_bytes.is_empty() {
+        return false;
+    }
+    let tail = strip_ansi(&tail_bytes);
+    tail.lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| {
+            let t = l.trim();
+            t == "SSHMUX>" || t == "SSHMUX> "
+        })
+        .unwrap_or(false)
+}
+
+/// True when the last non-empty output line looks like a POSIX shell prompt.
+fn shell_prompt_at_tail(pty: &dyn PtyChannel) -> bool {
+    let tail_bytes = pty.raw_tail(PROMPT_TAIL_BYTES_LONG);
+    if tail_bytes.is_empty() {
+        return false;
+    }
+    let tail = strip_ansi(&tail_bytes);
+    tail.lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| {
+            let t = l.trim_end();
+            t.ends_with('$') || t.ends_with('#') || t.ends_with('%')
+        })
+        .unwrap_or(false)
+}
+
 impl SshBrowser {
     fn with_pty(host: &str, ssh: Box<dyn PtyChannel>) -> Self {
         let mut core = BrowserCore::new(host);
@@ -196,8 +230,6 @@ impl SshBrowser {
                     self.core.transfer.batch_done += 1;
                     self.core.local.entries = read_local_dir(&self.core.local.path);
                     self.ssh.drain_raw();
-                    self.core.prev_raw_len = 0;
-                    self.core.prompt_stable = 0;
                     // Batch complete — reset counters before the final ls refresh.
                     if self.core.transfer.pending.is_empty() {
                         self.core.transfer.start = None;
@@ -267,14 +299,15 @@ impl SshBrowser {
             return;
         }
 
-        // --- SSH prompt stability ---
-        let has_prompt = match self.ssh_state {
-            SshBrowserState::Connecting => self.shell_prompt_detected(),
-            _ => self.prompt_ends_with_sshmux(),
-        };
+        // --- SSH prompt detection (scanned at most once per data change) ---
+        let state = self.ssh_state;
         let prompt_ready = self
             .core
-            .update_prompt_stability(self.ssh.raw_len(), has_prompt);
+            .response
+            .ready(self.ssh.raw_seq(), || match state {
+                SshBrowserState::Connecting => shell_prompt_at_tail(self.ssh.as_ref()),
+                _ => sshmux_prompt_at_tail(self.ssh.as_ref()),
+            });
 
         if matches!(
             self.ssh_state,
@@ -317,9 +350,7 @@ impl SshBrowser {
         match self.ssh_state {
             SshBrowserState::Connecting => {
                 if prompt_ready {
-                    self.core.prompt_stable = 0;
                     self.ssh.drain_raw();
-                    self.core.prev_raw_len = 0;
                     self.ssh
                         .send_str("PS1='SSHMUX> '; PS2=''; unset PROMPT_COMMAND 2>/dev/null\r\n");
                     self.ssh_state = SshBrowserState::SettingPrompt;
@@ -333,9 +364,7 @@ impl SshBrowser {
             }
             SshBrowserState::SettingPrompt => {
                 if prompt_ready {
-                    self.core.prompt_stable = 0;
                     self.ssh.drain_raw();
-                    self.core.prev_raw_len = 0;
                     self.core.cmd_start = Some(Instant::now());
                     self.ssh.send_str("pwd\r\n");
                     self.ssh_state = SshBrowserState::WaitingPwd;
@@ -347,13 +376,11 @@ impl SshBrowser {
             }
             SshBrowserState::WaitingPwd => {
                 if prompt_ready {
-                    self.core.prompt_stable = 0;
                     let lines = self.ssh.raw_lines();
                     self.core.remote.path =
                         parse_pwd(&lines).unwrap_or_else(|| self.core.remote.path.clone());
                     debug!("SSH pwd => {}, sending ls -la", self.core.remote.path);
                     self.ssh.drain_raw();
-                    self.core.prev_raw_len = 0;
                     self.send_ls();
                     self.ssh_state = SshBrowserState::WaitingLs;
                     self.core.needs_redraw = true;
@@ -361,7 +388,6 @@ impl SshBrowser {
             }
             SshBrowserState::WaitingLs => {
                 if prompt_ready {
-                    self.core.prompt_stable = 0;
                     let lines = self.ssh.raw_lines();
                     // Symlink probe: with the trailing-slash ls, a link to a
                     // file errors "Not a directory", a dangling link "No such
@@ -376,7 +402,6 @@ impl SshBrowser {
                         };
                         if self.core.apply_link_probe(&link_name, probe) {
                             self.ssh.drain_raw();
-                            self.core.prev_raw_len = 0;
                             self.send_ls();
                             return; // re-list the reverted path
                         }
@@ -389,7 +414,6 @@ impl SshBrowser {
                     let cur = self.core.remote.sel.selected().unwrap_or(0);
                     self.core.remote.sel.select(Some(cur.min(max)));
                     self.ssh.drain_raw();
-                    self.core.prev_raw_len = 0;
                     self.ssh_state = SshBrowserState::Idle;
                     self.core.stop_timer();
                     if self.core.status_color == Color::Yellow {
@@ -401,7 +425,6 @@ impl SshBrowser {
             }
             SshBrowserState::WaitingDelete => {
                 if prompt_ready {
-                    self.core.prompt_stable = 0;
                     let lines = self.ssh.raw_lines();
                     for (i, line) in lines.iter().enumerate() {
                         debug!("SSH delete line[{}]: {:?}", i, line);
@@ -433,7 +456,6 @@ impl SshBrowser {
                         }
                     }
                     self.ssh.drain_raw();
-                    self.core.prev_raw_len = 0;
                     // Skip the ls round-trip when more deletes are queued —
                     // chain directly to the next delete instead.
                     if !has_error && self.core.pop_pending_delete() {
@@ -448,38 +470,6 @@ impl SshBrowser {
             SshBrowserState::Transferring => {} // handled above
             SshBrowserState::Idle => {}
         }
-    }
-
-    fn prompt_ends_with_sshmux(&self) -> bool {
-        let tail_bytes = self.ssh.raw_tail(PROMPT_TAIL_BYTES);
-        if tail_bytes.is_empty() {
-            return false;
-        }
-        let tail = strip_ansi(&tail_bytes);
-        tail.lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .map(|l| {
-                let t = l.trim();
-                t == "SSHMUX>" || t == "SSHMUX> "
-            })
-            .unwrap_or(false)
-    }
-
-    fn shell_prompt_detected(&self) -> bool {
-        let tail_bytes = self.ssh.raw_tail(PROMPT_TAIL_BYTES_LONG);
-        if tail_bytes.is_empty() {
-            return false;
-        }
-        let tail = strip_ansi(&tail_bytes);
-        tail.lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .map(|l| {
-                let t = l.trim_end();
-                t.ends_with('$') || t.ends_with('#') || t.ends_with('%')
-            })
-            .unwrap_or(false)
     }
 
     // ---- navigation (delegates to core for local, handles remote) ----------
@@ -502,8 +492,6 @@ impl SshBrowser {
                         self.core.status_msg = format!("Remote: {}", self.core.remote.path);
                         self.core.status_color = Color::Yellow;
                         self.ssh.drain_raw();
-                        self.core.prev_raw_len = 0;
-                        self.core.prompt_stable = 0;
                         self.send_ls();
                         self.ssh_state = SshBrowserState::WaitingLs;
                         debug!("SSH ls {}", self.core.remote.path);
@@ -526,8 +514,6 @@ impl SshBrowser {
                 self.core.status_msg = format!("Remote: {}", self.core.remote.path);
                 self.core.status_color = Color::Yellow;
                 self.ssh.drain_raw();
-                self.core.prev_raw_len = 0;
-                self.core.prompt_stable = 0;
                 self.send_ls();
                 self.ssh_state = SshBrowserState::WaitingLs;
                 debug!("SSH ls {}", self.core.remote.path);
@@ -861,8 +847,6 @@ impl SshBrowser {
             self.core.status_color = Color::Yellow;
             self.core.delete.pending_name = Some(target.path);
             self.ssh.drain_raw();
-            self.core.prev_raw_len = 0;
-            self.core.prompt_stable = 0;
             self.core.needs_redraw = true;
         }
     }

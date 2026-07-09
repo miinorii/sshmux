@@ -2,7 +2,7 @@ use std::{
     io::Write,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
 };
@@ -70,6 +70,10 @@ pub fn count_dsr(data: &[u8]) -> usize {
 pub trait PtyChannel {
     fn raw_len(&self) -> usize;
     fn raw_lines(&self) -> Vec<String>;
+    /// Monotonic sequence number, bumped on every raw-buffer mutation
+    /// (reader-thread appends and drains). Lets consumers detect "new data
+    /// since I last looked" without hashing or re-scanning the buffer.
+    fn raw_seq(&self) -> u64;
     fn drain_raw(&self);
     /// Drop all but the last `keep` bytes of the raw output buffer. Used to
     /// bound memory/CPU while scraping long-running transfer output.
@@ -110,6 +114,8 @@ pub struct EmbeddedTerminal {
     rows: u16,
     cols: u16,
     raw_output: Arc<Mutex<Vec<u8>>>,
+    /// Bumped on every `raw_output` mutation; see `PtyChannel::raw_seq`.
+    raw_seq: Arc<AtomicU64>,
     exited: Arc<AtomicBool>,
     child: Option<Arc<Mutex<pty::PtyChild>>>,
     scroll_offset: usize,
@@ -128,12 +134,14 @@ impl EmbeddedTerminal {
         let parser = Arc::new(Mutex::new(Parser::new(rows, cols, 1000)));
         let dirty = Arc::new(AtomicBool::new(false));
         let raw_output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let raw_seq = Arc::new(AtomicU64::new(0));
         let exited = Arc::new(AtomicBool::new(false));
 
         let parser_c = Arc::clone(&parser);
         let writer_c = Arc::clone(&writer);
         let dirty_c = Arc::clone(&dirty);
         let raw_output_c = Arc::clone(&raw_output);
+        let raw_seq_c = Arc::clone(&raw_seq);
         let exited_c = Arc::clone(&exited);
 
         thread::spawn(move || {
@@ -158,6 +166,7 @@ impl EmbeddedTerminal {
                         }
                         if capture_raw && let Ok(mut rb) = raw_output_c.lock() {
                             rb.extend_from_slice(data);
+                            raw_seq_c.fetch_add(1, Ordering::Release);
                         }
                         dirty_c.store(true, Ordering::Release);
 
@@ -202,6 +211,7 @@ impl EmbeddedTerminal {
             rows,
             cols,
             raw_output,
+            raw_seq,
             exited,
             child: Some(Arc::new(Mutex::new(child_handle))),
             scroll_offset: 0,
@@ -418,6 +428,7 @@ impl EmbeddedTerminal {
     pub fn drain_raw(&self) {
         if let Ok(mut rb) = self.raw_output.lock() {
             rb.clear();
+            self.raw_seq.fetch_add(1, Ordering::Release);
         }
     }
 
@@ -426,12 +437,17 @@ impl EmbeddedTerminal {
             let len = rb.len();
             if len > keep {
                 rb.drain(..len - keep);
+                self.raw_seq.fetch_add(1, Ordering::Release);
             }
         }
     }
 
     pub fn raw_len(&self) -> usize {
         self.raw_output.lock().map(|rb| rb.len()).unwrap_or(0)
+    }
+
+    pub fn raw_seq(&self) -> u64 {
+        self.raw_seq.load(Ordering::Acquire)
     }
 
     /// Non-blocking check whether the child process has exited.
@@ -476,6 +492,9 @@ impl PtyChannel for EmbeddedTerminal {
     }
     fn raw_lines(&self) -> Vec<String> {
         self.raw_lines()
+    }
+    fn raw_seq(&self) -> u64 {
+        self.raw_seq()
     }
     fn drain_raw(&self) {
         self.drain_raw()
@@ -526,6 +545,7 @@ impl Drop for EmbeddedTerminal {
 #[derive(Clone)]
 pub struct MockPtyHandle {
     raw: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+    raw_seq: std::rc::Rc<std::cell::Cell<u64>>,
     sent: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
     exited: std::rc::Rc<std::cell::Cell<bool>>,
     exit_code: std::rc::Rc<std::cell::Cell<Option<u32>>>,
@@ -536,6 +556,7 @@ impl MockPtyHandle {
     /// Append data to the mock's raw buffer (simulates PTY output arriving).
     pub fn feed(&self, data: &[u8]) {
         self.raw.borrow_mut().extend_from_slice(data);
+        self.raw_seq.set(self.raw_seq.get() + 1);
     }
 
     /// Return a snapshot of all commands sent to the PTY so far.
@@ -563,6 +584,7 @@ impl MockPtyHandle {
 #[cfg(test)]
 pub struct MockPty {
     raw: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+    raw_seq: std::rc::Rc<std::cell::Cell<u64>>,
     sent: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
     exited: std::rc::Rc<std::cell::Cell<bool>>,
     exit_code: std::rc::Rc<std::cell::Cell<Option<u32>>>,
@@ -573,17 +595,20 @@ pub struct MockPty {
 impl MockPty {
     pub fn new() -> (Self, MockPtyHandle) {
         let raw = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let raw_seq = std::rc::Rc::new(std::cell::Cell::new(0));
         let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let exited = std::rc::Rc::new(std::cell::Cell::new(false));
         let exit_code = std::rc::Rc::new(std::cell::Cell::new(None));
         let handle = MockPtyHandle {
             raw: raw.clone(),
+            raw_seq: raw_seq.clone(),
             sent: sent.clone(),
             exited: exited.clone(),
             exit_code: exit_code.clone(),
         };
         let mock = MockPty {
             raw,
+            raw_seq,
             sent,
             exited,
             exit_code,
@@ -604,14 +629,19 @@ impl PtyChannel for MockPty {
             .map(|l| l.trim_end().to_string())
             .collect()
     }
+    fn raw_seq(&self) -> u64 {
+        self.raw_seq.get()
+    }
     fn drain_raw(&self) {
         self.raw.borrow_mut().clear();
+        self.raw_seq.set(self.raw_seq.get() + 1);
     }
     fn drain_raw_keep(&self, keep: usize) {
         let mut rb = self.raw.borrow_mut();
         let len = rb.len();
         if len > keep {
             rb.drain(..len - keep);
+            self.raw_seq.set(self.raw_seq.get() + 1);
         }
     }
     fn send_str(&mut self, s: &str) {

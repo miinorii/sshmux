@@ -8,9 +8,7 @@ use log::{debug, info};
 use ratatui::{style::Color, widgets::ListState};
 
 use super::super::parse::{list_drives, read_local_dir};
-use super::{
-    BrowserCore, BrowserFocus, LinkProbe, PROMPT_STABLE_TICKS, PendingTransfer, TransferDirection,
-};
+use super::{BrowserCore, BrowserFocus, LinkProbe, PendingTransfer, TransferDirection};
 
 impl BrowserCore {
     pub fn toggle_focus(&mut self) {
@@ -183,21 +181,6 @@ impl BrowserCore {
             let base = self.remote.path.trim_end_matches('/');
             self.remote.path = format!("{}/{}", base, name);
         }
-    }
-
-    /// Update prompt-stability tracking for a tick. Returns true once the
-    /// raw PTY byte count has been unchanged AND the expected prompt was
-    /// detected for `PROMPT_STABLE_TICKS` consecutive ticks.
-    pub fn update_prompt_stability(&mut self, cur_len: usize, has_prompt: bool) -> bool {
-        if cur_len != self.prev_raw_len {
-            self.prompt_stable = 0;
-            self.prev_raw_len = cur_len;
-        } else if has_prompt {
-            self.prompt_stable = self.prompt_stable.saturating_add(1);
-        } else {
-            self.prompt_stable = 0;
-        }
-        self.prompt_stable >= PROMPT_STABLE_TICKS
     }
 
     pub fn stop_timer(&mut self) {
@@ -541,34 +524,5 @@ mod tests {
         core.needs_redraw = false;
         core.dismiss_drive_picker();
         assert!(!core.needs_redraw);
-    }
-
-    #[test]
-    fn update_prompt_stability_resets_on_byte_change() {
-        let mut core = BrowserCore::new("host");
-        core.prompt_stable = 5;
-        core.prev_raw_len = 10;
-        assert!(!core.update_prompt_stability(20, true));
-        assert_eq!(core.prompt_stable, 0);
-        assert_eq!(core.prev_raw_len, 20);
-    }
-
-    #[test]
-    fn update_prompt_stability_counts_up_when_stable_with_prompt() {
-        let mut core = BrowserCore::new("host");
-        core.prev_raw_len = 10;
-        assert!(!core.update_prompt_stability(10, true));
-        assert_eq!(core.prompt_stable, 1);
-        assert!(core.update_prompt_stability(10, true));
-        assert_eq!(core.prompt_stable, 2);
-    }
-
-    #[test]
-    fn update_prompt_stability_resets_when_stable_without_prompt() {
-        let mut core = BrowserCore::new("host");
-        core.prev_raw_len = 10;
-        core.prompt_stable = 1;
-        assert!(!core.update_prompt_stability(10, false));
-        assert_eq!(core.prompt_stable, 0);
     }
 }

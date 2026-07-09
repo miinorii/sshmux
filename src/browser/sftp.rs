@@ -34,6 +34,24 @@ pub enum SftpState {
 }
 
 // ---------------------------------------------------------------------------
+// Prompt detection
+// ---------------------------------------------------------------------------
+
+/// True when the last non-empty output line contains the `sftp>` prompt.
+fn sftp_prompt_at_tail(pty: &dyn PtyChannel) -> bool {
+    let tail_bytes = pty.raw_tail(PROMPT_TAIL_BYTES);
+    if tail_bytes.is_empty() {
+        return false;
+    }
+    let tail = strip_ansi(&tail_bytes);
+    tail.lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.contains("sftp>"))
+        .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
 // FileBrowser
 // ---------------------------------------------------------------------------
 
@@ -66,9 +84,9 @@ impl FileBrowser {
 
     pub fn tick(&mut self) {
         self.core.check_paste_deadline();
-        let prompt_ready = self
-            .core
-            .update_prompt_stability(self.sftp.raw_len(), self.prompt_raw_ends_with_prompt());
+        let prompt_ready = self.core.response.ready(self.sftp.raw_seq(), || {
+            sftp_prompt_at_tail(self.sftp.as_ref())
+        });
 
         if matches!(self.sftp_state, SftpState::Connecting) {
             self.core.raw_snapshot = self.sftp.raw_lines();
@@ -117,9 +135,7 @@ impl FileBrowser {
         match self.sftp_state {
             SftpState::Connecting => {
                 if prompt_ready {
-                    self.core.prompt_stable = 0;
                     self.sftp.drain_raw();
-                    self.core.prev_raw_len = 0;
                     self.core.cmd_start = Some(Instant::now());
                     self.sftp.send_str("pwd\r\n");
                     self.sftp_state = SftpState::WaitingPwd;
@@ -131,13 +147,11 @@ impl FileBrowser {
             }
             SftpState::WaitingPwd => {
                 if prompt_ready {
-                    self.core.prompt_stable = 0;
                     let lines = self.sftp.raw_lines();
                     self.core.remote.path =
                         parse_pwd(&lines).unwrap_or_else(|| self.core.remote.path.clone());
                     debug!("SFTP pwd => {}, sending ls -la", self.core.remote.path);
                     self.sftp.drain_raw();
-                    self.core.prev_raw_len = 0;
                     self.send_ls();
                     self.sftp_state = SftpState::WaitingLs;
                     self.core.needs_redraw = true;
@@ -145,7 +159,6 @@ impl FileBrowser {
             }
             SftpState::WaitingLs => {
                 if prompt_ready {
-                    self.core.prompt_stable = 0;
                     let lines = self.sftp.raw_lines();
                     let parsed = parse_ls(&lines);
                     // Symlink probe: sftp `ls` of a link-to-file echoes a
@@ -165,7 +178,6 @@ impl FileBrowser {
                         };
                         if self.core.apply_link_probe(&link_name, probe) {
                             self.sftp.drain_raw();
-                            self.core.prev_raw_len = 0;
                             self.send_ls();
                             return; // re-list the reverted path
                         }
@@ -177,7 +189,6 @@ impl FileBrowser {
                     let cur = self.core.remote.sel.selected().unwrap_or(0);
                     self.core.remote.sel.select(Some(cur.min(max)));
                     self.sftp.drain_raw();
-                    self.core.prev_raw_len = 0;
                     self.sftp_state = SftpState::Idle;
                     self.core.stop_timer();
                     if self.core.status_color == Color::Yellow {
@@ -194,7 +205,6 @@ impl FileBrowser {
             }
             SftpState::Transferring => {
                 if prompt_ready {
-                    self.core.prompt_stable = 0;
                     // sftp prints errors ("Couldn't ...", "... Permission denied")
                     // and still returns to the prompt — check before declaring
                     // success.
@@ -230,7 +240,6 @@ impl FileBrowser {
                         self.core.transfer.pending.len(),
                     );
                     self.sftp.drain_raw();
-                    self.core.prev_raw_len = 0;
                     // Skip the ls round-trip when more transfers are queued.
                     // sftp get/put does not remove the source file, so the
                     // existing entries are still valid for chaining.
@@ -278,7 +287,6 @@ impl FileBrowser {
             }
             SftpState::WaitingDelete => {
                 if prompt_ready {
-                    self.core.prompt_stable = 0;
                     let lines = self.sftp.raw_lines();
                     let has_error = contains_any_error(
                         &lines,
@@ -296,7 +304,6 @@ impl FileBrowser {
                         }
                     }
                     self.sftp.drain_raw();
-                    self.core.prev_raw_len = 0;
                     // Skip the ls round-trip when more deletes are queued —
                     // chain directly to the next delete instead.
                     if !has_error && self.core.pop_pending_delete() {
@@ -310,19 +317,6 @@ impl FileBrowser {
             }
             SftpState::Idle => {}
         }
-    }
-
-    fn prompt_raw_ends_with_prompt(&self) -> bool {
-        let tail_bytes = self.sftp.raw_tail(PROMPT_TAIL_BYTES);
-        if tail_bytes.is_empty() {
-            return false;
-        }
-        let tail = strip_ansi(&tail_bytes);
-        tail.lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .map(|l| l.contains("sftp>"))
-            .unwrap_or(false)
     }
 
     // ---- navigation (delegates to core for local, handles remote) ----------
@@ -345,8 +339,6 @@ impl FileBrowser {
                         self.core.status_msg = format!("Remote: {}", self.core.remote.path);
                         self.core.status_color = Color::Yellow;
                         self.sftp.drain_raw();
-                        self.core.prev_raw_len = 0;
-                        self.core.prompt_stable = 0;
                         self.send_ls();
                         self.sftp_state = SftpState::WaitingLs;
                         debug!("SFTP ls {}", self.core.remote.path);
@@ -369,8 +361,6 @@ impl FileBrowser {
                 self.core.status_msg = format!("Remote: {}", self.core.remote.path);
                 self.core.status_color = Color::Yellow;
                 self.sftp.drain_raw();
-                self.core.prev_raw_len = 0;
-                self.core.prompt_stable = 0;
                 self.send_ls();
                 self.sftp_state = SftpState::WaitingLs;
                 debug!("SFTP ls {}", self.core.remote.path);
@@ -538,8 +528,6 @@ impl FileBrowser {
                 format!("rm {}\r\n", shell_quote(&target.path))
             };
             self.sftp.drain_raw();
-            self.core.prev_raw_len = 0;
-            self.core.prompt_stable = 0;
             self.sftp.send_str(&cmd);
             self.sftp_state = SftpState::WaitingDelete;
             self.core.status_msg = format!("Deleting {}...", target.path);
@@ -648,16 +636,13 @@ mod tests {
     use crate::browser::common::{DeleteKind, DeleteTarget, dummy_entry};
     use crate::browser::parse::FsEntry;
 
-    /// Run tick() enough times for prompt stability to trigger a transition.
-    /// The prompt-stability counter requires 2 consecutive ticks where:
-    /// - raw_len hasn't changed (compared to prev_raw_len)
-    /// - prompt_raw_ends_with_prompt() returns true
-    ///
-    /// So we need 3 ticks total: first sets prev_raw_len, next two increment stable.
+    /// Run tick() enough times for the response watch to trigger a transition:
+    /// the first tick observes the new raw_seq (reset), the next two are quiet
+    /// ticks with the prompt at the tail (PROMPT_STABLE_TICKS = 2).
     fn tick_until_stable(browser: &mut FileBrowser) {
-        browser.tick(); // sets prev_raw_len, prompt_stable = 0
-        browser.tick(); // raw_len same + prompt → prompt_stable = 1
-        browser.tick(); // raw_len same + prompt → prompt_stable = 2 → transition
+        browser.tick(); // seq changed → reset
+        browser.tick(); // quiet + prompt → 1
+        browser.tick(); // quiet + prompt → 2 → transition
     }
 
     fn make_sftp() -> (FileBrowser, MockPtyHandle) {
@@ -1315,7 +1300,7 @@ mod tests {
         let (mut fb, h) = make_sftp();
         h.feed(b"sftp> ");
 
-        // Only 2 ticks — prompt_stable reaches 1 but not 2
+        // Only 2 ticks — one quiet tick with the prompt, not two
         fb.tick();
         fb.tick();
 
@@ -1326,11 +1311,11 @@ mod tests {
     fn changing_raw_len_resets_stability() {
         let (mut fb, h) = make_sftp();
         h.feed(b"sftp> ");
-        fb.tick(); // prev_raw_len set
-        fb.tick(); // stable = 1
+        fb.tick(); // seq observed
+        fb.tick(); // quiet tick 1
 
         h.feed(b" ");
-        fb.tick(); // raw_len changed → stable reset to 0
+        fb.tick(); // new data → watch reset
 
         assert_eq!(fb.sftp_state, SftpState::Connecting);
     }
