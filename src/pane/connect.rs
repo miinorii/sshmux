@@ -23,8 +23,8 @@ pub const HEADER_GLOBAL: usize = 0;
 pub const HEADER_CONNECT: usize = GLOBAL_COUNT + 1; // 13
 pub const HEADER_BROWSER: usize = GLOBAL_COUNT + 1 + CONNECT_COUNT + 1; // 20
 
-/// Total rows in the editor list (3 headers + 27 bindings).
-pub const EDITOR_ROW_COUNT: usize = 30;
+/// Total rows in the editor list (3 headers + 28 bindings).
+pub const EDITOR_ROW_COUNT: usize = 31;
 
 /// Returns true if the given index is a section header row.
 pub fn is_editor_header(idx: usize) -> bool {

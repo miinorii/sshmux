@@ -153,16 +153,17 @@ pub fn handle_browser_key(
     } else if m(&bindings.go_up) {
         core.clear_selection();
         BrowserKeyAction::GoUp
-    } else if m(&bindings.transfer) {
-        let indices = core.selected_indices();
-        if indices.len() > 1 {
-            core.queue_transfers_from_indices(&indices);
+    } else if m(&bindings.enter_or_transfer) {
+        // Context-aware action (Space by default): enter directories (and
+        // symlinks, navigated like directories), transfer files.
+        if core.focused_entry().is_some_and(|e| e.is_dir) {
             core.clear_selection();
+            BrowserKeyAction::Enter
+        } else {
+            transfer_action(core)
         }
-        match core.focus {
-            BrowserFocus::Remote => BrowserKeyAction::Download,
-            BrowserFocus::Local => BrowserKeyAction::Upload,
-        }
+    } else if m(&bindings.transfer) {
+        transfer_action(core)
     } else if m(&bindings.delete) {
         BrowserKeyAction::Delete
     } else if let KeyCode::Char(c) = code {
@@ -177,14 +178,96 @@ pub fn handle_browser_key(
     }
 }
 
+/// Start a transfer in the focused panel's direction, queueing the
+/// multi-selection first when more than one entry is selected.
+fn transfer_action(core: &mut BrowserCore) -> BrowserKeyAction {
+    let indices = core.selected_indices();
+    if indices.len() > 1 {
+        core.queue_transfers_from_indices(&indices);
+        core.clear_selection();
+    }
+    match core.focus {
+        BrowserFocus::Remote => BrowserKeyAction::Download,
+        BrowserFocus::Local => BrowserKeyAction::Upload,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{
         BrowserCore, BrowserFocus, BrowserKeyAction, DeleteKind, DeleteLocation, DeleteTarget,
+        TransferDirection, core_with_remote_entries, dummy_entry,
     };
     use super::handle_browser_key;
     use crate::keybindings::BrowserBindings;
     use crossterm::event::KeyCode;
+
+    fn space(core: &mut BrowserCore) -> BrowserKeyAction {
+        handle_browser_key(
+            core,
+            KeyCode::Char(' '),
+            false,
+            false,
+            false,
+            &BrowserBindings::default(),
+        )
+    }
+
+    #[test]
+    fn key_space_on_remote_dir_returns_enter() {
+        let mut core =
+            core_with_remote_entries(&[("..", true), ("subdir", true), ("f.txt", false)]);
+        core.focus = BrowserFocus::Remote;
+        core.remote.sel.select(Some(1));
+        assert!(matches!(space(&mut core), BrowserKeyAction::Enter));
+    }
+
+    #[test]
+    fn key_space_on_dotdot_returns_enter() {
+        let mut core = core_with_remote_entries(&[("..", true), ("f.txt", false)]);
+        core.focus = BrowserFocus::Remote;
+        core.remote.sel.select(Some(0));
+        assert!(matches!(space(&mut core), BrowserKeyAction::Enter));
+    }
+
+    #[test]
+    fn key_space_on_remote_file_returns_download() {
+        let mut core = core_with_remote_entries(&[("..", true), ("f.txt", false)]);
+        core.focus = BrowserFocus::Remote;
+        core.remote.sel.select(Some(1));
+        assert!(matches!(space(&mut core), BrowserKeyAction::Download));
+    }
+
+    #[test]
+    fn key_space_on_local_file_returns_upload() {
+        let mut core = BrowserCore::new("host");
+        core.focus = BrowserFocus::Local;
+        core.local.entries = vec![dummy_entry("..", true), dummy_entry("up.txt", false)];
+        core.local.sel.select(Some(1));
+        assert!(matches!(space(&mut core), BrowserKeyAction::Upload));
+    }
+
+    #[test]
+    fn key_space_on_local_dir_returns_enter() {
+        let mut core = BrowserCore::new("host");
+        core.focus = BrowserFocus::Local;
+        core.local.entries = vec![dummy_entry("..", true), dummy_entry("subdir", true)];
+        core.local.sel.select(Some(1));
+        assert!(matches!(space(&mut core), BrowserKeyAction::Enter));
+    }
+
+    #[test]
+    fn key_space_multiselect_files_queues_like_transfer() {
+        let mut core =
+            core_with_remote_entries(&[("..", true), ("a.txt", false), ("b.txt", false)]);
+        core.focus = BrowserFocus::Remote;
+        core.remote.sel.select(Some(2));
+        core.selected.insert(1);
+        core.selected.insert(2);
+        assert!(matches!(space(&mut core), BrowserKeyAction::Download));
+        assert_eq!(core.transfer.pending.len(), 2);
+        assert_eq!(core.pending_direction(), TransferDirection::Download);
+    }
 
     #[test]
     fn key_tab_toggles_focus() {

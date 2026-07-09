@@ -272,6 +272,8 @@ pub struct BrowserBindings {
     pub scroll_left: KeyBinding,
     pub scroll_right: KeyBinding,
     pub enter: KeyBinding,
+    /// Context-aware action: enter directories, transfer files.
+    pub enter_or_transfer: KeyBinding,
     pub go_up: KeyBinding,
     pub transfer: KeyBinding,
     pub delete: KeyBinding,
@@ -286,6 +288,7 @@ impl Default for BrowserBindings {
             scroll_left: KeyBinding::new(KeyCode::Left, false, false, false),
             scroll_right: KeyBinding::new(KeyCode::Right, false, false, false),
             enter: KeyBinding::new(KeyCode::Enter, false, false, false),
+            enter_or_transfer: KeyBinding::new(KeyCode::Char(' '), false, false, false),
             go_up: KeyBinding::new(KeyCode::Backspace, false, false, false),
             transfer: KeyBinding::new(KeyCode::Char('t'), false, false, false),
             delete: KeyBinding::new(KeyCode::Delete, false, false, false),
@@ -349,6 +352,7 @@ struct RawBrowser {
     scroll_left: Option<String>,
     scroll_right: Option<String>,
     enter: Option<String>,
+    enter_or_transfer: Option<String>,
     go_up: Option<String>,
     transfer: Option<String>,
     delete: Option<String>,
@@ -382,13 +386,14 @@ fn log_bindings(kb: &KeyBindings) {
         c.select_prev, c.select_next, c.connect, c.browser_menu, c.manual_connect, c.help
     );
     info!(
-        "config: browser: focus={}, up={}, down={}, left={}, right={}, enter={}, go_up={}, transfer={}, delete={}",
+        "config: browser: focus={}, up={}, down={}, left={}, right={}, enter={}, enter_or_transfer={}, go_up={}, transfer={}, delete={}",
         b.toggle_focus,
         b.navigate_up,
         b.navigate_down,
         b.scroll_left,
         b.scroll_right,
         b.enter,
+        b.enter_or_transfer,
         b.go_up,
         b.transfer,
         b.delete
@@ -531,6 +536,11 @@ impl KeyBindings {
                     &db.scroll_right,
                 ),
                 enter: parse_or_default("browser.enter", &rb.enter, &db.enter),
+                enter_or_transfer: parse_or_default(
+                    "browser.enter_or_transfer",
+                    &rb.enter_or_transfer,
+                    &db.enter_or_transfer,
+                ),
                 go_up: parse_or_default("browser.go_up", &rb.go_up, &db.go_up),
                 transfer: parse_or_default("browser.transfer", &rb.transfer, &db.transfer),
                 delete: parse_or_default("browser.delete", &rb.delete, &db.delete),
@@ -573,7 +583,7 @@ pub struct BindingEntry {
 }
 
 impl KeyBindings {
-    /// Returns all 27 bindings in display order, grouped by section.
+    /// Returns all 28 bindings in display order, grouped by section.
     /// The key-editor constants in `pane::connect` are derived from these
     /// group sizes — a consistency test there guards against drift.
     pub fn entries(&self) -> Vec<BindingEntry> {
@@ -730,6 +740,12 @@ impl KeyBindings {
             },
             BindingEntry {
                 group: "browser",
+                field: "enter_or_transfer",
+                description: "enter dir / transfer file",
+                binding: b.enter_or_transfer.clone(),
+            },
+            BindingEntry {
+                group: "browser",
                 field: "go_up",
                 description: "go up",
                 binding: b.go_up.clone(),
@@ -776,6 +792,7 @@ impl KeyBindings {
             ("browser", "scroll_left") => self.browser.scroll_left = kb,
             ("browser", "scroll_right") => self.browser.scroll_right = kb,
             ("browser", "enter") => self.browser.enter = kb,
+            ("browser", "enter_or_transfer") => self.browser.enter_or_transfer = kb,
             ("browser", "go_up") => self.browser.go_up = kb,
             ("browser", "transfer") => self.browser.transfer = kb,
             ("browser", "delete") => self.browser.delete = kb,

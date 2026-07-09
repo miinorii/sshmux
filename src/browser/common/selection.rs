@@ -1,5 +1,6 @@
 //! Multi-selection state on `BrowserCore`: anchor, index set, and range update.
 
+use super::super::parse::FsEntry;
 use super::{BrowserCore, BrowserFocus};
 
 impl BrowserCore {
@@ -28,6 +29,15 @@ impl BrowserCore {
             BrowserFocus::Local => self.local.sel.selected(),
             BrowserFocus::Remote => self.remote.sel.selected(),
         }
+    }
+
+    /// Returns the entry under the cursor in the active panel.
+    pub fn focused_entry(&self) -> Option<&FsEntry> {
+        let entries = match self.focus {
+            BrowserFocus::Local => &self.local.entries,
+            BrowserFocus::Remote => &self.remote.entries,
+        };
+        self.focused_index().and_then(|i| entries.get(i))
     }
 
     /// Returns the indices to operate on: the multi-select set if non-empty,
