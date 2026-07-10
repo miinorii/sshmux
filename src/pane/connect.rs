@@ -6,7 +6,6 @@ use ratatui::{
     widgets::{Block, Borders, List, ListState, Paragraph, StatefulWidget, Widget},
 };
 
-use super::render_pane_border;
 use crate::keybindings::{GROUP_SIZES, KeyBindings};
 use crate::ssh_config::SshHost;
 
@@ -227,15 +226,11 @@ impl ConnectPane {
 
     pub fn render(
         &mut self,
-        area: Rect,
+        inner: Rect,
         buf: &mut Buffer,
-        is_focus: bool,
         hosts: &[SshHost],
-        leaf_count: usize,
         keybindings: &KeyBindings,
     ) {
-        let inner = render_pane_border(area, buf, is_focus, leaf_count, "connect");
-
         let list_area = Rect {
             x: inner.x,
             y: inner.y,

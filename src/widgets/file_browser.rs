@@ -11,20 +11,11 @@ use ratatui::{
 use crate::browser::browser_layout;
 use crate::browser::common::{BrowserCore, BrowserFocus, TransferDirection};
 use crate::keybindings::BrowserBindings;
-use crate::pane::{pane_border_inner, render_pane_border};
 
 impl BrowserCore {
-    /// Render pane border + both panels. Returns the status bar area.
-    fn render_panels(
-        &mut self,
-        area: Rect,
-        buf: &mut Buffer,
-        is_focus: bool,
-        leaf_count: usize,
-        title: &str,
-    ) -> Rect {
-        let inner = render_pane_border(area, buf, is_focus, leaf_count, title);
-        let layout = browser_layout(inner);
+    /// Render both panels. Returns the status bar area.
+    fn render_panels(&mut self, area: Rect, buf: &mut Buffer, is_focus: bool) -> Rect {
+        let layout = browser_layout(area);
         self.render_panel(layout.local_panel, buf, BrowserFocus::Local, is_focus);
         self.render_panel(layout.remote_panel, buf, BrowserFocus::Remote, is_focus);
         layout.status
@@ -491,17 +482,12 @@ impl BrowserCore {
     }
 
     /// Render directional arrows on the panel border during a cross-panel drag.
-    fn render_drag_arrow(&self, area: Rect, buf: &mut Buffer, leaf_count: usize) {
+    fn render_drag_arrow(&self, area: Rect, buf: &mut Buffer) {
         let drag = match self.drag {
             Some(ref d) => d,
             None => return,
         };
-        let inner = if leaf_count > 1 {
-            pane_border_inner(area)
-        } else {
-            area
-        };
-        let layout = browser_layout(inner);
+        let layout = browser_layout(area);
         // Arrows always show: direction is based on drag origin panel.
         let chars: [char; 2] = match drag.origin {
             BrowserFocus::Local => ['>', '>'],
@@ -614,12 +600,11 @@ pub enum StatusKind<'a> {
 
 /// Dual-panel file browser: local + remote listings, a status row, and the
 /// overlays driven by `BrowserCore` state (delete confirm, drop-upload
-/// confirm, transfer progress, drag feedback). The per-browser decisions
-/// (title, status badge, password mode) arrive precomputed as config.
+/// confirm, transfer progress, drag feedback). Renders into the pane's inner
+/// area (the title bar is drawn by `PaneTreeView`); per-browser decisions
+/// (status badge, password mode) arrive precomputed as config.
 pub struct FileBrowserView<'a> {
-    pub title: &'a str,
     pub is_focus: bool,
-    pub leaf_count: usize,
     pub bindings: &'a BrowserBindings,
     pub status: StatusKind<'a>,
     /// Show the transfer-progress overlay (a transfer is running).
@@ -630,7 +615,7 @@ impl StatefulWidget for FileBrowserView<'_> {
     type State = BrowserCore;
 
     fn render(self, area: Rect, buf: &mut Buffer, core: &mut BrowserCore) {
-        let status_area = core.render_panels(area, buf, self.is_focus, self.leaf_count, self.title);
+        let status_area = core.render_panels(area, buf, self.is_focus);
         if !core.render_confirm_delete(status_area, buf) {
             match self.status {
                 StatusKind::Password { masked_len } => {
@@ -652,7 +637,7 @@ impl StatefulWidget for FileBrowserView<'_> {
         }
         core.render_upload_confirm(area, buf);
         core.render_transfer_progress(area, buf, self.transferring);
-        core.render_drag_arrow(area, buf, self.leaf_count);
+        core.render_drag_arrow(area, buf);
         core.render_drag_ghost(buf);
     }
 }

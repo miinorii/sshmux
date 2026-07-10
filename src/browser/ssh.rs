@@ -855,10 +855,8 @@ impl SshBrowser {
         area: Rect,
         buf: &mut Buffer,
         is_focus: bool,
-        leaf_count: usize,
         bindings: &BrowserBindings,
     ) {
-        let title = format!(" scp: {} ", self.core.host);
         let progress = self.progress_suffix();
         let status = if self.waiting_password {
             StatusKind::Password {
@@ -873,9 +871,7 @@ impl SshBrowser {
             }
         };
         FileBrowserView {
-            title: &title,
             is_focus,
-            leaf_count,
             bindings,
             status,
             transferring: self.core.transfer.start.is_some(),

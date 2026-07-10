@@ -113,35 +113,47 @@ impl Pane {
         }
     }
 
-    pub fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &mut RenderCtx<'_>) {
-        let is_focus = ctx.my_idx == ctx.focus_idx;
-        ctx.my_idx += 1;
-        let leaf_count = ctx.leaf_count;
+    /// Title shown in this pane's top border (multi-pane mode).
+    pub fn title(&self) -> String {
+        match self {
+            Pane::Connect(_) => "connect".to_string(),
+            Pane::Session { ssh_args, .. } => ssh_args
+                .split_whitespace()
+                .last()
+                .unwrap_or("ssh")
+                .to_string(),
+            Pane::FileBrowser { browser } => format!(" sftp: {} ", browser.core.host),
+            Pane::SshBrowser { browser } => format!(" scp: {} ", browser.core.host),
+        }
+    }
+
+    /// Render this leaf's content into its inner area (title bars are drawn
+    /// by `PaneTreeView`).
+    pub fn render(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        is_focus: bool,
+        hosts: &[SshHost],
+        keybindings: &KeyBindings,
+    ) {
         match self {
             Pane::Connect(pane) => {
-                pane.render(area, buf, is_focus, ctx.hosts, leaf_count, ctx.keybindings);
+                pane.render(area, buf, hosts, keybindings);
             }
             Pane::Session {
                 terminal,
                 exit_selection,
-                ssh_args,
+                ..
             } => {
-                session::render_session(
-                    area,
-                    buf,
-                    terminal,
-                    ssh_args,
-                    *exit_selection,
-                    is_focus,
-                    leaf_count,
-                );
+                session::render_session(area, buf, terminal, *exit_selection);
             }
             Pane::FileBrowser { browser } => {
-                browser.render(area, buf, is_focus, leaf_count, &ctx.keybindings.browser);
+                browser.render(area, buf, is_focus, &keybindings.browser);
                 browser::render_browser_exit_overlay(browser, area, buf);
             }
             Pane::SshBrowser { browser } => {
-                browser.render(area, buf, is_focus, leaf_count, &ctx.keybindings.browser);
+                browser.render(area, buf, is_focus, &keybindings.browser);
                 browser::render_browser_exit_overlay(browser, area, buf);
             }
         }
@@ -173,97 +185,6 @@ impl SplitTree<Pane> {
             pane.resize_all(a, multi_pane);
         }
     }
-
-    /// Recursive render: separators + junction glyphs for splits, leaf
-    /// content via `Pane::render`.
-    pub fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &mut RenderCtx<'_>) {
-        render_node(&mut self.root, area, buf, ctx);
-    }
-}
-
-fn render_node(node: &mut Node<Pane>, area: Rect, buf: &mut Buffer, ctx: &mut RenderCtx<'_>) {
-    match node {
-        Node::Leaf(pane) => pane.render(area, buf, ctx),
-        Node::Split {
-            kind,
-            children,
-            ratios,
-        } => {
-            let areas = split_areas(area, *kind, ratios);
-            match kind {
-                Split::LeftRight => {
-                    let sep_style = Style::default().fg(Color::DarkGray);
-                    for pair in areas.windows(2) {
-                        let x = pair[0].right();
-                        if area.height > 0 {
-                            let top_sym = if area.y > 0 {
-                                buf[(x, area.y - 1)].symbol()
-                            } else {
-                                ""
-                            };
-                            let top_connects = matches!(top_sym, "│" | "┬" | "├" | "┤" | "┼");
-                            let junction = if top_connects { '┼' } else { '┬' };
-                            buf[(x, area.y)].set_char(junction).set_style(sep_style);
-                        }
-                        for y in (area.y + 1)..(area.y + area.height) {
-                            buf[(x, y)].set_char('│').set_style(sep_style);
-                        }
-                    }
-                    for (child, a) in children.iter_mut().zip(areas.iter()) {
-                        render_node(child, *a, buf, ctx);
-                    }
-                }
-                Split::TopBottom => {
-                    for (i, (child, a)) in children.iter_mut().zip(areas.iter()).enumerate() {
-                        render_node(child, *a, buf, ctx);
-                        if i > 0 {
-                            let ty = a.y;
-                            let buf_right = buf.area().x + buf.area().width;
-                            if a.x > 0 {
-                                let lx = a.x - 1;
-                                let s = buf[(lx, ty)].style();
-                                match buf[(lx, ty)].symbol() {
-                                    "│" => {
-                                        buf[(lx, ty)].set_char('├').set_style(s);
-                                    }
-                                    "┬" => {
-                                        buf[(lx, ty)].set_char('┼').set_style(s);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            let rx = a.x + a.width;
-                            if rx < buf_right {
-                                let s = buf[(rx, ty)].style();
-                                match buf[(rx, ty)].symbol() {
-                                    "│" => {
-                                        buf[(rx, ty)].set_char('┤').set_style(s);
-                                    }
-                                    "┬" => {
-                                        buf[(rx, ty)].set_char('┼').set_style(s);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// RenderCtx — read-only context threaded through the recursive render pass
-// ---------------------------------------------------------------------------
-
-pub struct RenderCtx<'a> {
-    pub hosts: &'a [SshHost],
-    pub focus_idx: usize,
-    pub leaf_count: usize,
-    /// Running DFS leaf index — incremented by each leaf variant during render.
-    pub my_idx: usize,
-    pub keybindings: &'a KeyBindings,
 }
 
 // ---------------------------------------------------------------------------
@@ -329,52 +250,6 @@ pub(crate) fn render_exit_overlay(area: Rect, buf: &mut Buffer, exit_selection: 
     paragraph.render(menu_area, buf);
 }
 
-/// Render a pane title in the top-border line when in multi-pane mode and return the
-/// content area below it. In single-pane mode returns the full area unchanged.
-pub fn render_pane_border(
-    area: Rect,
-    buf: &mut Buffer,
-    is_focus: bool,
-    leaf_count: usize,
-    title: &str,
-) -> Rect {
-    if leaf_count > 1 {
-        let border_style = Style::default().fg(Color::DarkGray);
-        let name_style = if is_focus {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        let block = Block::default()
-            .borders(Borders::TOP)
-            .border_style(border_style)
-            .title(Line::from(vec![
-                Span::styled("── ", border_style),
-                Span::styled(title, name_style),
-                Span::styled(" ", border_style),
-            ]));
-        let inner = block.inner(area);
-        block.render(area, buf);
-        // Post-process title-bar row: replace ─ with ┴ where a vertical separator
-        // from a sibling above ends at this pane's top edge.
-        if area.y > 0 {
-            let ty = area.y;
-            for x in area.x..area.x + area.width {
-                if buf[(x, ty)].symbol() == "─" {
-                    let above = buf[(x, ty - 1)].symbol();
-                    if matches!(above, "│" | "┬" | "├" | "┤" | "┼") {
-                        let s = buf[(x, ty)].style();
-                        buf[(x, ty)].set_char('┴').set_style(s);
-                    }
-                }
-            }
-        }
-        inner
-    } else {
-        area
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -382,7 +257,6 @@ pub fn render_pane_border(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keybindings::KeyBindings;
     use ratatui::{buffer::Buffer, layout::Rect};
 
     fn r(w: u16, h: u16) -> Rect {
@@ -393,18 +267,6 @@ mod tests {
             height: h,
         }
     }
-    fn connect() -> Node<Pane> {
-        Node::Leaf(Pane::new_connect())
-    }
-    fn split(kind: Split, children: Vec<Node<Pane>>) -> Node<Pane> {
-        let ratios = vec![100; children.len()];
-        Node::Split {
-            kind,
-            children,
-            ratios,
-        }
-    }
-
     // ---- pane_inner --------------------------------------------------------
 
     #[test]
@@ -425,124 +287,6 @@ mod tests {
             height: 1,
         });
         assert_eq!(inner.height, 0);
-    }
-
-    // ---- junction rendering ------------------------------------------------
-
-    fn render_to_buf(tree: &mut SplitTree<Pane>, area: Rect) -> Buffer {
-        let mut buf = Buffer::empty(area);
-        let leaf_count = tree.leaf_count();
-        let kb = KeyBindings::default();
-        let mut ctx = RenderCtx {
-            hosts: &[],
-            focus_idx: 0,
-            leaf_count,
-            my_idx: 0,
-            keybindings: &kb,
-        };
-        tree.render(area, &mut buf, &mut ctx);
-        buf
-    }
-
-    #[test]
-    fn junction_lr_separator_is_tee_down_at_top() {
-        let area = r(21, 5);
-        let mut tree = SplitTree {
-            root: split(Split::LeftRight, vec![connect(), connect()]),
-        };
-        let buf = render_to_buf(&mut tree, area);
-        assert_eq!(
-            buf[(10u16, 0u16)].symbol(),
-            "┬",
-            "top of separator should be ┬"
-        );
-        for y in 1..5u16 {
-            assert_eq!(
-                buf[(10u16, y)].symbol(),
-                "│",
-                "separator body at y={y} should be │"
-            );
-        }
-    }
-
-    #[test]
-    fn junction_title_bar_below_lr_separator_gets_tee_up() {
-        let area = r(41, 10);
-        let mut tree = SplitTree {
-            root: split(
-                Split::TopBottom,
-                vec![
-                    split(Split::LeftRight, vec![connect(), connect()]),
-                    connect(),
-                ],
-            ),
-        };
-        let buf = render_to_buf(&mut tree, area);
-        assert_eq!(
-            buf[(20u16, 0u16)].symbol(),
-            "┬",
-            "separator top should be ┬"
-        );
-        for y in 1..5u16 {
-            assert_eq!(
-                buf[(20u16, y)].symbol(),
-                "│",
-                "separator body at y={y} should be │"
-            );
-        }
-        assert_eq!(
-            buf[(20u16, 5u16)].symbol(),
-            "┴",
-            "title bar below separator should be ┴"
-        );
-    }
-
-    #[test]
-    fn junction_lr_separator_left_of_inner_tb_becomes_tee_right() {
-        let area = r(21, 10);
-        let mut tree = SplitTree {
-            root: split(
-                Split::LeftRight,
-                vec![
-                    connect(),
-                    split(Split::TopBottom, vec![connect(), connect()]),
-                ],
-            ),
-        };
-        let buf = render_to_buf(&mut tree, area);
-        assert_eq!(buf[(10u16, 5u16)].symbol(), "├");
-    }
-
-    #[test]
-    fn junction_lr_separator_right_of_inner_tb_becomes_tee_left() {
-        let area = r(21, 10);
-        let mut tree = SplitTree {
-            root: split(
-                Split::LeftRight,
-                vec![
-                    split(Split::TopBottom, vec![connect(), connect()]),
-                    connect(),
-                ],
-            ),
-        };
-        let buf = render_to_buf(&mut tree, area);
-        assert_eq!(buf[(10u16, 5u16)].symbol(), "┤");
-    }
-
-    #[test]
-    fn junction_stacked_lr_separators_at_same_column_produce_cross() {
-        let area = r(41, 10);
-        let mut tree = SplitTree {
-            root: split(
-                Split::TopBottom,
-                vec![
-                    split(Split::LeftRight, vec![connect(), connect()]),
-                    split(Split::LeftRight, vec![connect(), connect()]),
-                ],
-            ),
-        };
-        let buf = render_to_buf(&mut tree, area);
-        assert_eq!(buf[(20u16, 5u16)].symbol(), "┼");
     }
 
     // ---- Golden frames (behavior freeze for the widget refactor) ----------

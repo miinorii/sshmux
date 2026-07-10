@@ -9,11 +9,12 @@ use ratatui::{
 
 use crate::browser::{FileBrowser, SshBrowser};
 use crate::keybindings::KeyBindings;
-use crate::pane::{Node, Pane, RenderCtx, pane_border_inner, pane_inner, split_areas};
+use crate::pane::{Node, Pane, pane_border_inner, pane_inner, split_areas};
 use crate::ssh_config::{SshHost, parse_ssh_config};
 use crate::tab::Tab;
 use crate::terminal::{EmbeddedTerminal, PtyChannel};
 use crate::widgets::bottom_bar::BottomBar;
+use crate::widgets::pane_tree::PaneTreeView;
 
 pub const CONTEXT_MENU_ITEMS: [&str; 5] = [
     "New tab",
@@ -282,17 +283,12 @@ impl App {
 
         let focus_idx = self.tabs[self.selected_tab].focus_idx;
         let leaf_count = self.tabs[self.selected_tab].root.leaf_count();
+        let hosts = &self.hosts;
+        let keybindings = &self.keybindings;
 
         if self.tabs[self.selected_tab].zoom && leaf_count > 1 {
             if let Some(pane) = self.tabs[self.selected_tab].root.leaf_mut(focus_idx) {
-                let mut ctx = RenderCtx {
-                    hosts: &self.hosts,
-                    focus_idx: 0,
-                    leaf_count: 1,
-                    my_idx: 0,
-                    keybindings: &self.keybindings,
-                };
-                pane.render(content, buf, &mut ctx);
+                pane.render(content, buf, true, hosts, keybindings);
             }
             // [ZOOM] indicator in the top-right corner
             let indicator = format!(" [ZOOM] {}/{} ", focus_idx + 1, leaf_count);
@@ -307,16 +303,19 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             );
         } else {
-            let mut ctx = RenderCtx {
-                hosts: &self.hosts,
+            let title_for = |p: &Pane| p.title();
+            PaneTreeView {
                 focus_idx,
-                leaf_count,
-                my_idx: 0,
-                keybindings: &self.keybindings,
-            };
-            self.tabs[self.selected_tab]
-                .root
-                .render(content, buf, &mut ctx);
+                title_for: &title_for,
+            }
+            .render_with(
+                &mut self.tabs[self.selected_tab].root,
+                content,
+                buf,
+                |_, pane, inner, buf, is_focus| {
+                    pane.render(inner, buf, is_focus, hosts, keybindings)
+                },
+            );
         }
 
         // Active resize drag: highlight the separator being dragged in Yellow.

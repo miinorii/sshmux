@@ -546,16 +546,12 @@ impl FileBrowser {
         area: Rect,
         buf: &mut Buffer,
         is_focus: bool,
-        leaf_count: usize,
         bindings: &BrowserBindings,
     ) {
-        let title = format!(" sftp: {} ", self.core.host);
         let (label, color) = self.state_label();
         let progress = self.progress_suffix();
         FileBrowserView {
-            title: &title,
             is_focus,
-            leaf_count,
             bindings,
             status: StatusKind::Normal {
                 label,
@@ -1617,7 +1613,7 @@ mod tests {
     fn render_golden(fb: &mut FileBrowser) -> ratatui::buffer::Buffer {
         let area = Rect::new(0, 0, 56, 9);
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        fb.render(area, &mut buf, true, 1, &BrowserBindings::default());
+        fb.render(area, &mut buf, true, &BrowserBindings::default());
         buf
     }
 
