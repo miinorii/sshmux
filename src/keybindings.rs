@@ -203,201 +203,166 @@ impl<'de> Deserialize<'de> for KeyBinding {
 }
 
 // ---------------------------------------------------------------------------
-// Binding groups
+// Binding table — the single source of truth
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
-pub struct GlobalBindings {
-    pub quit: KeyBinding,
-    pub prev_tab: KeyBinding,
-    pub next_tab: KeyBinding,
-    pub close: KeyBinding,
-    pub new_tab: KeyBinding,
-    pub split_horizontal: KeyBinding,
-    pub split_vertical: KeyBinding,
-    pub focus_left: KeyBinding,
-    pub focus_right: KeyBinding,
-    pub focus_up: KeyBinding,
-    pub focus_down: KeyBinding,
-    pub zoom: KeyBinding,
-}
+/// One row per binding: field name, key-editor description, default combo
+/// `(code, ctrl, alt, shift)`. From this table the macro generates the group
+/// structs and their `Default`s, the `Raw*` config structs, `KeyBindings`,
+/// `RawConfig`, `merge`, `entries`, `set_binding`, and [`GROUP_SIZES`] (used
+/// by the key-editor layout in `pane::connect`). Row order is the key
+/// editor's display order. Adding a binding is adding one row.
+macro_rules! define_bindings {
+    (
+        $(
+            $group:ident / $GroupStruct:ident / $RawStruct:ident {
+                $( $field:ident : $desc:literal =>
+                    ($code:expr, $ctrl:literal, $alt:literal, $shift:literal) ),* $(,)?
+            }
+        )*
+    ) => {
+        $(
+            #[derive(Clone, Debug)]
+            pub struct $GroupStruct {
+                $( pub $field: KeyBinding, )*
+            }
 
-impl Default for GlobalBindings {
-    fn default() -> Self {
-        Self {
-            quit: KeyBinding::new(KeyCode::Char('q'), false, true, false),
-            prev_tab: KeyBinding::new(KeyCode::Char('j'), false, true, false),
-            next_tab: KeyBinding::new(KeyCode::Char('k'), false, true, false),
-            close: KeyBinding::new(KeyCode::Char('w'), false, true, false),
-            new_tab: KeyBinding::new(KeyCode::Char('t'), false, true, false),
-            split_horizontal: KeyBinding::new(KeyCode::Char('-'), false, true, false),
-            split_vertical: KeyBinding::new(KeyCode::Char('+'), false, true, false),
-            focus_left: KeyBinding::new(KeyCode::Left, false, true, false),
-            focus_right: KeyBinding::new(KeyCode::Right, false, true, false),
-            focus_up: KeyBinding::new(KeyCode::Up, false, true, false),
-            focus_down: KeyBinding::new(KeyCode::Down, false, true, false),
-            zoom: KeyBinding::new(KeyCode::Char('z'), false, true, false),
+            impl Default for $GroupStruct {
+                fn default() -> Self {
+                    Self {
+                        $( $field: KeyBinding::new($code, $ctrl, $alt, $shift), )*
+                    }
+                }
+            }
+
+            #[derive(Deserialize, Default)]
+            struct $RawStruct {
+                $( $field: Option<String>, )*
+            }
+        )*
+
+        #[derive(Clone, Debug, Default)]
+        pub struct KeyBindings {
+            $( pub $group: $GroupStruct, )*
         }
-    }
-}
 
-#[derive(Clone, Debug)]
-pub struct ConnectBindings {
-    pub select_prev: KeyBinding,
-    pub select_next: KeyBinding,
-    pub connect: KeyBinding,
-    pub browser_menu: KeyBinding,
-    pub manual_connect: KeyBinding,
-    pub help: KeyBinding,
-}
-
-impl Default for ConnectBindings {
-    fn default() -> Self {
-        Self {
-            select_prev: KeyBinding::new(KeyCode::Up, false, false, false),
-            select_next: KeyBinding::new(KeyCode::Down, false, false, false),
-            connect: KeyBinding::new(KeyCode::Enter, false, false, false),
-            browser_menu: KeyBinding::new(KeyCode::Char('b'), false, false, false),
-            manual_connect: KeyBinding::new(KeyCode::Char('c'), false, false, false),
-            help: KeyBinding::new(KeyCode::Char('h'), false, false, false),
+        /// Raw config-file shape: every group and field optional, so partial
+        /// configs merge over the defaults.
+        #[derive(Deserialize, Default)]
+        struct RawConfig {
+            $( $group: Option<$RawStruct>, )*
         }
-    }
-}
 
-#[derive(Clone, Debug)]
-pub struct BrowserBindings {
-    pub toggle_focus: KeyBinding,
-    pub navigate_up: KeyBinding,
-    pub navigate_down: KeyBinding,
-    pub scroll_left: KeyBinding,
-    pub scroll_right: KeyBinding,
-    pub enter: KeyBinding,
-    /// Context-aware action: enter directories, transfer files.
-    pub enter_or_transfer: KeyBinding,
-    pub go_up: KeyBinding,
-    pub transfer: KeyBinding,
-    pub delete: KeyBinding,
-}
+        /// Number of bindings per group, in declaration order.
+        pub const GROUP_SIZES: &[usize] = &[
+            $( [ $( stringify!($field) ),* ].len() ),*
+        ];
 
-impl Default for BrowserBindings {
-    fn default() -> Self {
-        Self {
-            toggle_focus: KeyBinding::new(KeyCode::Tab, false, false, false),
-            navigate_up: KeyBinding::new(KeyCode::Up, false, false, false),
-            navigate_down: KeyBinding::new(KeyCode::Down, false, false, false),
-            scroll_left: KeyBinding::new(KeyCode::Left, false, false, false),
-            scroll_right: KeyBinding::new(KeyCode::Right, false, false, false),
-            enter: KeyBinding::new(KeyCode::Enter, false, false, false),
-            enter_or_transfer: KeyBinding::new(KeyCode::Char(' '), false, false, false),
-            go_up: KeyBinding::new(KeyCode::Backspace, false, false, false),
-            transfer: KeyBinding::new(KeyCode::Char('t'), false, false, false),
-            delete: KeyBinding::new(KeyCode::Delete, false, false, false),
+        impl KeyBindings {
+            fn merge(raw: RawConfig, defaults: &Self) -> Self {
+                Self {
+                    $(
+                        $group: {
+                            let r = raw.$group.unwrap_or_default();
+                            $GroupStruct {
+                                $(
+                                    $field: parse_or_default(
+                                        concat!(stringify!($group), ".", stringify!($field)),
+                                        &r.$field,
+                                        &defaults.$group.$field,
+                                    ),
+                                )*
+                            }
+                        },
+                    )*
+                }
+            }
+
+            /// All bindings in table order — the key editor's display order.
+            pub fn entries(&self) -> Vec<BindingEntry<'_>> {
+                vec![
+                    $($(
+                        BindingEntry {
+                            group: stringify!($group),
+                            field: stringify!($field),
+                            description: $desc,
+                            binding: &self.$group.$field,
+                        },
+                    )*)*
+                ]
+            }
+
+            /// Update a single binding by group and field name.
+            pub fn set_binding(&mut self, group: &str, field: &str, kb: KeyBinding) {
+                match (group, field) {
+                    $($(
+                        (stringify!($group), stringify!($field)) => self.$group.$field = kb,
+                    )*)*
+                    _ => warn!("config: unknown binding {group}.{field}"),
+                }
+            }
         }
+    };
+}
+
+define_bindings! {
+    global / GlobalBindings / RawGlobal {
+        quit: "quit" => (KeyCode::Char('q'), false, true, false),
+        new_tab: "new tab" => (KeyCode::Char('t'), false, true, false),
+        close: "close pane / tab" => (KeyCode::Char('w'), false, true, false),
+        split_horizontal: "split top/bottom" => (KeyCode::Char('-'), false, true, false),
+        split_vertical: "split left/right" => (KeyCode::Char('+'), false, true, false),
+        focus_left: "focus pane left" => (KeyCode::Left, false, true, false),
+        focus_right: "focus pane right" => (KeyCode::Right, false, true, false),
+        focus_up: "focus pane above" => (KeyCode::Up, false, true, false),
+        focus_down: "focus pane below" => (KeyCode::Down, false, true, false),
+        zoom: "zoom focused pane" => (KeyCode::Char('z'), false, true, false),
+        prev_tab: "previous tab" => (KeyCode::Char('j'), false, true, false),
+        next_tab: "next tab" => (KeyCode::Char('k'), false, true, false),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Top-level KeyBindings
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Debug, Default)]
-pub struct KeyBindings {
-    pub global: GlobalBindings,
-    pub connect: ConnectBindings,
-    pub browser: BrowserBindings,
-}
-
-// ---------------------------------------------------------------------------
-// Raw deserialization structs (all fields Option for partial configs)
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize, Default)]
-struct RawConfig {
-    global: Option<RawGlobal>,
-    connect: Option<RawConnect>,
-    browser: Option<RawBrowser>,
-}
-
-#[derive(Deserialize, Default)]
-struct RawGlobal {
-    quit: Option<String>,
-    prev_tab: Option<String>,
-    next_tab: Option<String>,
-    close: Option<String>,
-    new_tab: Option<String>,
-    split_horizontal: Option<String>,
-    split_vertical: Option<String>,
-    focus_left: Option<String>,
-    focus_right: Option<String>,
-    focus_up: Option<String>,
-    focus_down: Option<String>,
-    zoom: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-struct RawConnect {
-    select_prev: Option<String>,
-    select_next: Option<String>,
-    connect: Option<String>,
-    browser_menu: Option<String>,
-    manual_connect: Option<String>,
-    help: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-struct RawBrowser {
-    toggle_focus: Option<String>,
-    navigate_up: Option<String>,
-    navigate_down: Option<String>,
-    scroll_left: Option<String>,
-    scroll_right: Option<String>,
-    enter: Option<String>,
-    enter_or_transfer: Option<String>,
-    go_up: Option<String>,
-    transfer: Option<String>,
-    delete: Option<String>,
+    connect / ConnectBindings / RawConnect {
+        select_prev: "previous host" => (KeyCode::Up, false, false, false),
+        select_next: "next host" => (KeyCode::Down, false, false, false),
+        connect: "connect" => (KeyCode::Enter, false, false, false),
+        browser_menu: "file browser" => (KeyCode::Char('b'), false, false, false),
+        manual_connect: "manual connect" => (KeyCode::Char('c'), false, false, false),
+        help: "keybindings" => (KeyCode::Char('h'), false, false, false),
+    }
+    browser / BrowserBindings / RawBrowser {
+        toggle_focus: "toggle focus" => (KeyCode::Tab, false, false, false),
+        navigate_up: "navigate up" => (KeyCode::Up, false, false, false),
+        navigate_down: "navigate down" => (KeyCode::Down, false, false, false),
+        scroll_left: "scroll left" => (KeyCode::Left, false, false, false),
+        scroll_right: "scroll right" => (KeyCode::Right, false, false, false),
+        enter: "enter / open" => (KeyCode::Enter, false, false, false),
+        enter_or_transfer: "enter dir / transfer file" => (KeyCode::Char(' '), false, false, false),
+        go_up: "go up" => (KeyCode::Backspace, false, false, false),
+        transfer: "transfer" => (KeyCode::Char('t'), false, false, false),
+        delete: "delete" => (KeyCode::Delete, false, false, false),
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Config loading
 // ---------------------------------------------------------------------------
 
+/// Log one line per group with every binding, derived from the table.
 fn log_bindings(kb: &KeyBindings) {
-    let g = &kb.global;
-    let c = &kb.connect;
-    let b = &kb.browser;
-    info!(
-        "config: global: quit={}, new_tab={}, close={}, split_h={}, split_v={}, prev_tab={}, next_tab={}, focus_left={}, focus_right={}, focus_up={}, focus_down={}, zoom={}",
-        g.quit,
-        g.new_tab,
-        g.close,
-        g.split_horizontal,
-        g.split_vertical,
-        g.prev_tab,
-        g.next_tab,
-        g.focus_left,
-        g.focus_right,
-        g.focus_up,
-        g.focus_down,
-        g.zoom,
-    );
-    info!(
-        "config: connect: prev={}, next={}, connect={}, browser={}, manual={}, help={}",
-        c.select_prev, c.select_next, c.connect, c.browser_menu, c.manual_connect, c.help
-    );
-    info!(
-        "config: browser: focus={}, up={}, down={}, left={}, right={}, enter={}, enter_or_transfer={}, go_up={}, transfer={}, delete={}",
-        b.toggle_focus,
-        b.navigate_up,
-        b.navigate_down,
-        b.scroll_left,
-        b.scroll_right,
-        b.enter,
-        b.enter_or_transfer,
-        b.go_up,
-        b.transfer,
-        b.delete
-    );
+    let mut line = String::new();
+    let mut group = "";
+    for e in kb.entries() {
+        if e.group != group {
+            if !line.is_empty() {
+                info!("{line}");
+            }
+            line = format!("config: {}:", e.group);
+            group = e.group;
+        }
+        line.push_str(&format!(" {}={}", e.field, e.binding));
+    }
+    if !line.is_empty() {
+        info!("{line}");
+    }
 }
 
 /// Try to parse a key string, logging a warning on failure and returning the default.
@@ -448,105 +413,6 @@ impl KeyBindings {
         log_bindings(&result);
         result
     }
-
-    fn merge(raw: RawConfig, defaults: &Self) -> Self {
-        let dg = &defaults.global;
-        let dc = &defaults.connect;
-        let db = &defaults.browser;
-
-        let rg = raw.global.unwrap_or_default();
-        let rc = raw.connect.unwrap_or_default();
-        let rb = raw.browser.unwrap_or_default();
-
-        Self {
-            global: GlobalBindings {
-                quit: parse_or_default("global.quit", &rg.quit, &dg.quit),
-                prev_tab: parse_or_default("global.prev_tab", &rg.prev_tab, &dg.prev_tab),
-                next_tab: parse_or_default("global.next_tab", &rg.next_tab, &dg.next_tab),
-                close: parse_or_default("global.close", &rg.close, &dg.close),
-                new_tab: parse_or_default("global.new_tab", &rg.new_tab, &dg.new_tab),
-                split_horizontal: parse_or_default(
-                    "global.split_horizontal",
-                    &rg.split_horizontal,
-                    &dg.split_horizontal,
-                ),
-                split_vertical: parse_or_default(
-                    "global.split_vertical",
-                    &rg.split_vertical,
-                    &dg.split_vertical,
-                ),
-                focus_left: parse_or_default("global.focus_left", &rg.focus_left, &dg.focus_left),
-                focus_right: parse_or_default(
-                    "global.focus_right",
-                    &rg.focus_right,
-                    &dg.focus_right,
-                ),
-                focus_up: parse_or_default("global.focus_up", &rg.focus_up, &dg.focus_up),
-                focus_down: parse_or_default("global.focus_down", &rg.focus_down, &dg.focus_down),
-                zoom: parse_or_default("global.zoom", &rg.zoom, &dg.zoom),
-            },
-            connect: ConnectBindings {
-                select_prev: parse_or_default(
-                    "connect.select_prev",
-                    &rc.select_prev,
-                    &dc.select_prev,
-                ),
-                select_next: parse_or_default(
-                    "connect.select_next",
-                    &rc.select_next,
-                    &dc.select_next,
-                ),
-                connect: parse_or_default("connect.connect", &rc.connect, &dc.connect),
-                browser_menu: parse_or_default(
-                    "connect.browser_menu",
-                    &rc.browser_menu,
-                    &dc.browser_menu,
-                ),
-                manual_connect: parse_or_default(
-                    "connect.manual_connect",
-                    &rc.manual_connect,
-                    &dc.manual_connect,
-                ),
-                help: parse_or_default("connect.help", &rc.help, &dc.help),
-            },
-            browser: BrowserBindings {
-                toggle_focus: parse_or_default(
-                    "browser.toggle_focus",
-                    &rb.toggle_focus,
-                    &db.toggle_focus,
-                ),
-                navigate_up: parse_or_default(
-                    "browser.navigate_up",
-                    &rb.navigate_up,
-                    &db.navigate_up,
-                ),
-                navigate_down: parse_or_default(
-                    "browser.navigate_down",
-                    &rb.navigate_down,
-                    &db.navigate_down,
-                ),
-                scroll_left: parse_or_default(
-                    "browser.scroll_left",
-                    &rb.scroll_left,
-                    &db.scroll_left,
-                ),
-                scroll_right: parse_or_default(
-                    "browser.scroll_right",
-                    &rb.scroll_right,
-                    &db.scroll_right,
-                ),
-                enter: parse_or_default("browser.enter", &rb.enter, &db.enter),
-                enter_or_transfer: parse_or_default(
-                    "browser.enter_or_transfer",
-                    &rb.enter_or_transfer,
-                    &db.enter_or_transfer,
-                ),
-                go_up: parse_or_default("browser.go_up", &rb.go_up, &db.go_up),
-                transfer: parse_or_default("browser.transfer", &rb.transfer, &db.transfer),
-                delete: parse_or_default("browser.delete", &rb.delete, &db.delete),
-            },
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -575,231 +441,16 @@ impl KeyBinding {
 // Binding enumeration (for the keybinding editor overlay)
 // ---------------------------------------------------------------------------
 
-pub struct BindingEntry {
+/// One row of the binding table, as shown in the key editor. `binding`
+/// borrows from the `KeyBindings` it was enumerated from.
+pub struct BindingEntry<'a> {
     pub group: &'static str,
     pub field: &'static str,
     pub description: &'static str,
-    pub binding: KeyBinding,
+    pub binding: &'a KeyBinding,
 }
 
 impl KeyBindings {
-    /// Returns all 28 bindings in display order, grouped by section.
-    /// The key-editor constants in `pane::connect` are derived from these
-    /// group sizes — a consistency test there guards against drift.
-    pub fn entries(&self) -> Vec<BindingEntry> {
-        let g = &self.global;
-        let c = &self.connect;
-        let b = &self.browser;
-        vec![
-            // Global
-            BindingEntry {
-                group: "global",
-                field: "quit",
-                description: "quit",
-                binding: g.quit.clone(),
-            },
-            BindingEntry {
-                group: "global",
-                field: "new_tab",
-                description: "new tab",
-                binding: g.new_tab.clone(),
-            },
-            BindingEntry {
-                group: "global",
-                field: "close",
-                description: "close pane / tab",
-                binding: g.close.clone(),
-            },
-            BindingEntry {
-                group: "global",
-                field: "split_horizontal",
-                description: "split top/bottom",
-                binding: g.split_horizontal.clone(),
-            },
-            BindingEntry {
-                group: "global",
-                field: "split_vertical",
-                description: "split left/right",
-                binding: g.split_vertical.clone(),
-            },
-            BindingEntry {
-                group: "global",
-                field: "focus_left",
-                description: "focus pane left",
-                binding: g.focus_left.clone(),
-            },
-            BindingEntry {
-                group: "global",
-                field: "focus_right",
-                description: "focus pane right",
-                binding: g.focus_right.clone(),
-            },
-            BindingEntry {
-                group: "global",
-                field: "focus_up",
-                description: "focus pane above",
-                binding: g.focus_up.clone(),
-            },
-            BindingEntry {
-                group: "global",
-                field: "focus_down",
-                description: "focus pane below",
-                binding: g.focus_down.clone(),
-            },
-            BindingEntry {
-                group: "global",
-                field: "zoom",
-                description: "zoom focused pane",
-                binding: g.zoom.clone(),
-            },
-            BindingEntry {
-                group: "global",
-                field: "prev_tab",
-                description: "previous tab",
-                binding: g.prev_tab.clone(),
-            },
-            BindingEntry {
-                group: "global",
-                field: "next_tab",
-                description: "next tab",
-                binding: g.next_tab.clone(),
-            },
-            // Connect
-            BindingEntry {
-                group: "connect",
-                field: "select_prev",
-                description: "previous host",
-                binding: c.select_prev.clone(),
-            },
-            BindingEntry {
-                group: "connect",
-                field: "select_next",
-                description: "next host",
-                binding: c.select_next.clone(),
-            },
-            BindingEntry {
-                group: "connect",
-                field: "connect",
-                description: "connect",
-                binding: c.connect.clone(),
-            },
-            BindingEntry {
-                group: "connect",
-                field: "browser_menu",
-                description: "file browser",
-                binding: c.browser_menu.clone(),
-            },
-            BindingEntry {
-                group: "connect",
-                field: "manual_connect",
-                description: "manual connect",
-                binding: c.manual_connect.clone(),
-            },
-            BindingEntry {
-                group: "connect",
-                field: "help",
-                description: "keybindings",
-                binding: c.help.clone(),
-            },
-            // Browser
-            BindingEntry {
-                group: "browser",
-                field: "toggle_focus",
-                description: "toggle focus",
-                binding: b.toggle_focus.clone(),
-            },
-            BindingEntry {
-                group: "browser",
-                field: "navigate_up",
-                description: "navigate up",
-                binding: b.navigate_up.clone(),
-            },
-            BindingEntry {
-                group: "browser",
-                field: "navigate_down",
-                description: "navigate down",
-                binding: b.navigate_down.clone(),
-            },
-            BindingEntry {
-                group: "browser",
-                field: "scroll_left",
-                description: "scroll left",
-                binding: b.scroll_left.clone(),
-            },
-            BindingEntry {
-                group: "browser",
-                field: "scroll_right",
-                description: "scroll right",
-                binding: b.scroll_right.clone(),
-            },
-            BindingEntry {
-                group: "browser",
-                field: "enter",
-                description: "enter / open",
-                binding: b.enter.clone(),
-            },
-            BindingEntry {
-                group: "browser",
-                field: "enter_or_transfer",
-                description: "enter dir / transfer file",
-                binding: b.enter_or_transfer.clone(),
-            },
-            BindingEntry {
-                group: "browser",
-                field: "go_up",
-                description: "go up",
-                binding: b.go_up.clone(),
-            },
-            BindingEntry {
-                group: "browser",
-                field: "transfer",
-                description: "transfer",
-                binding: b.transfer.clone(),
-            },
-            BindingEntry {
-                group: "browser",
-                field: "delete",
-                description: "delete",
-                binding: b.delete.clone(),
-            },
-        ]
-    }
-
-    /// Update a single binding by group and field name.
-    pub fn set_binding(&mut self, group: &str, field: &str, kb: KeyBinding) {
-        match (group, field) {
-            ("global", "quit") => self.global.quit = kb,
-            ("global", "new_tab") => self.global.new_tab = kb,
-            ("global", "close") => self.global.close = kb,
-            ("global", "split_horizontal") => self.global.split_horizontal = kb,
-            ("global", "split_vertical") => self.global.split_vertical = kb,
-            ("global", "prev_tab") => self.global.prev_tab = kb,
-            ("global", "next_tab") => self.global.next_tab = kb,
-            ("global", "focus_left") => self.global.focus_left = kb,
-            ("global", "focus_right") => self.global.focus_right = kb,
-            ("global", "focus_up") => self.global.focus_up = kb,
-            ("global", "focus_down") => self.global.focus_down = kb,
-            ("global", "zoom") => self.global.zoom = kb,
-            ("connect", "select_prev") => self.connect.select_prev = kb,
-            ("connect", "select_next") => self.connect.select_next = kb,
-            ("connect", "connect") => self.connect.connect = kb,
-            ("connect", "browser_menu") => self.connect.browser_menu = kb,
-            ("connect", "manual_connect") => self.connect.manual_connect = kb,
-            ("connect", "help") => self.connect.help = kb,
-            ("browser", "toggle_focus") => self.browser.toggle_focus = kb,
-            ("browser", "navigate_up") => self.browser.navigate_up = kb,
-            ("browser", "navigate_down") => self.browser.navigate_down = kb,
-            ("browser", "scroll_left") => self.browser.scroll_left = kb,
-            ("browser", "scroll_right") => self.browser.scroll_right = kb,
-            ("browser", "enter") => self.browser.enter = kb,
-            ("browser", "enter_or_transfer") => self.browser.enter_or_transfer = kb,
-            ("browser", "go_up") => self.browser.go_up = kb,
-            ("browser", "transfer") => self.browser.transfer = kb,
-            ("browser", "delete") => self.browser.delete = kb,
-            _ => warn!("config: unknown binding {group}.{field}"),
-        }
-    }
-
     /// Save all keybindings to the config file.
     pub fn save(&self) -> Result<(), String> {
         let Some(config_dir) = dirs::config_dir() else {
@@ -1007,7 +658,7 @@ quit = "Alt+X"
         }
         for e in kb.entries() {
             assert_eq!(
-                e.binding, probe,
+                e.binding, &probe,
                 "set_binding has no arm for {}.{}",
                 e.group, e.field
             );
@@ -1018,7 +669,8 @@ quit = "Alt+X"
     fn merge_covers_every_entry() {
         // Build a config overriding every field; a binding missing from a
         // Raw* struct is silently ignored by serde and stays at its default.
-        let entries = KeyBindings::default().entries();
+        let defaults = KeyBindings::default();
+        let entries = defaults.entries();
         let mut toml_src = String::new();
         let mut group = "";
         for e in &entries {
@@ -1033,7 +685,7 @@ quit = "Alt+X"
         let probe = KeyBinding::parse("Ctrl+F9").unwrap();
         for e in merged.entries() {
             assert_eq!(
-                e.binding, probe,
+                e.binding, &probe,
                 "merge/RawConfig misses {}.{}",
                 e.group, e.field
             );

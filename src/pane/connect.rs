@@ -7,31 +7,33 @@ use ratatui::{
 };
 
 use super::render_pane_border;
-use crate::keybindings::KeyBindings;
+use crate::keybindings::{GROUP_SIZES, KeyBindings};
 use crate::ssh_config::SshHost;
 
 // ---------------------------------------------------------------------------
 // Key editor constants & navigation
 // ---------------------------------------------------------------------------
 
-/// Number of bindings per group (for header index calculation).
-const GLOBAL_COUNT: usize = 12;
-const CONNECT_COUNT: usize = 6;
+/// Number of bindings per group, derived from the binding table
+/// (`define_bindings!` in keybindings.rs).
+const GLOBAL_COUNT: usize = GROUP_SIZES[0];
+const CONNECT_COUNT: usize = GROUP_SIZES[1];
+const BROWSER_COUNT: usize = GROUP_SIZES[2];
 
 /// Header indices in the flat display list.
 pub const HEADER_GLOBAL: usize = 0;
-pub const HEADER_CONNECT: usize = GLOBAL_COUNT + 1; // 13
-pub const HEADER_BROWSER: usize = GLOBAL_COUNT + 1 + CONNECT_COUNT + 1; // 20
+pub const HEADER_CONNECT: usize = GLOBAL_COUNT + 1;
+pub const HEADER_BROWSER: usize = GLOBAL_COUNT + 1 + CONNECT_COUNT + 1;
 
-/// Total rows in the editor list (3 headers + 28 bindings).
-pub const EDITOR_ROW_COUNT: usize = 31;
+/// Total rows in the editor list (3 headers + all bindings).
+pub const EDITOR_ROW_COUNT: usize = GLOBAL_COUNT + CONNECT_COUNT + BROWSER_COUNT + 3;
 
 /// Returns true if the given index is a section header row.
 pub fn is_editor_header(idx: usize) -> bool {
     idx == HEADER_GLOBAL || idx == HEADER_CONNECT || idx == HEADER_BROWSER
 }
 
-/// Map a display index to a binding entry index (0..26), or None for headers.
+/// Map a display index to a binding entry index, or None for headers.
 pub fn editor_binding_index(display_idx: usize) -> Option<usize> {
     if is_editor_header(display_idx) {
         return None;
@@ -430,7 +432,8 @@ mod tests {
     /// editor panics with an out-of-bounds `entries[idx]` — fail here instead.
     #[test]
     fn editor_constants_match_binding_entries() {
-        let entries = KeyBindings::default().entries();
+        let kb = KeyBindings::default();
+        let entries = kb.entries();
         let globals = entries.iter().filter(|e| e.group == "global").count();
         let connects = entries.iter().filter(|e| e.group == "connect").count();
         let browsers = entries.iter().filter(|e| e.group == "browser").count();
