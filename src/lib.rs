@@ -8,3 +8,4 @@ pub mod pty;
 pub mod ssh_config;
 pub mod tab;
 pub mod terminal;
+pub mod widgets;

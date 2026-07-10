@@ -1015,4 +1015,23 @@ mod tests {
         assert!(a[1].width >= 1);
         assert_eq!(a[0].width + a[1].width, 59);
     }
+
+    // ---- Golden frames (behavior freeze for the widget refactor) ----------
+
+    #[test]
+    fn golden_exit_overlay() {
+        let area = r(40, 5);
+        let mut buf = Buffer::empty(area);
+        render_exit_overlay(area, &mut buf, 0);
+        crate::widgets::testing::assert_rows(
+            &buf,
+            &[
+                "",
+                "   ┌ session ended ─────────────────┐",
+                "   │     Reconnect / Close pane     │",
+                "   └────────────────────────────────┘",
+                "",
+            ],
+        );
+    }
 }

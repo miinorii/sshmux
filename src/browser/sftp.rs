@@ -1589,6 +1589,112 @@ mod tests {
         assert_eq!(fb.progress_suffix(), "");
     }
 
+    // ---- Golden frames (behavior freeze for the widget refactor) ----------
+
+    use crate::widgets::testing::assert_rows;
+
+    /// A browser with fully deterministic panel content.
+    fn golden_browser() -> FileBrowser {
+        let (mut fb, _h) = make_sftp();
+        fb.sftp_state = SftpState::Idle;
+        fb.core.local.path = std::path::PathBuf::from("C:/l");
+        fb.core.local.entries = vec![
+            dummy_entry("..", true),
+            dummy_entry("a.txt", false),
+            dummy_entry("dir", true),
+        ];
+        fb.core.local.sel.select(Some(1));
+        fb.core.remote.path = "/r".to_string();
+        fb.core.remote.entries = vec![dummy_entry("..", true), dummy_entry("b.txt", false)];
+        fb.core.remote.sel.select(Some(0));
+        fb.core.status_msg = "ready".to_string();
+        fb
+    }
+
+    fn render_golden(fb: &mut FileBrowser) -> ratatui::buffer::Buffer {
+        let area = Rect::new(0, 0, 56, 9);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        fb.render(area, &mut buf, true, 1, &BrowserBindings::default());
+        buf
+    }
+
+    #[test]
+    fn golden_browser_idle() {
+        let mut fb = golden_browser();
+        let buf = render_golden(&mut fb);
+        assert_rows(
+            &buf,
+            &[
+                "┌ C:/l ───────────  local  ┐┌ /r ────────────  remote  ┐",
+                "│../           0 2025-01-01││../           0 2025-01-01│",
+                "│a.txt         0 2025-01-01││b.txt         0 2025-01-01│",
+                "│dir/          0 2025-01-01││                          │",
+                "│                          ││                          │",
+                "│                          ││                          │",
+                "│                          ││                          │",
+                "└──────────────────────────┘└──────────────────────────┘",
+                "[idle] ready                         [T]xfer [Delete]rm",
+            ],
+        );
+    }
+
+    #[test]
+    fn golden_browser_delete_confirm() {
+        let mut fb = golden_browser();
+        fb.core.delete.confirm = Some(DeleteTarget {
+            location: DeleteLocation::Remote,
+            kind: DeleteKind::File,
+            path: "/r/b.txt".to_string(),
+        });
+        let buf = render_golden(&mut fb);
+        assert_rows(
+            &buf,
+            &[
+                "┌ C:/l ───────────  local  ┐┌ /r ────────────  remote  ┐",
+                "│../           0 2025-01-01││../           0 2025-01-01│",
+                "│a.txt         0 2025-01-01││b.txt         0 2025-01-01│",
+                "│dir/          0 2025-01-01││                          │",
+                "│                          ││                          │",
+                "│                          ││                          │",
+                "│                          ││                          │",
+                "└──────────────────────────┘└──────────────────────────┘",
+                "  Delete remote '/r/b.txt'?  [y] Yes   [n] No",
+            ],
+        );
+    }
+
+    #[test]
+    fn golden_browser_transfer_overlay() {
+        let mut fb = golden_browser();
+        fb.sftp_state = SftpState::Transferring;
+        // A future start makes elapsed() saturate to zero — deterministic "0ms".
+        fb.core.transfer.start = Some(Instant::now() + std::time::Duration::from_secs(60));
+        fb.core.transfer.last = Some(TransferStatus {
+            filename: "b.txt".to_string(),
+            direction: TransferDirection::Download,
+            is_dir: false,
+            done: false,
+            progress: 40,
+            file_count: 0,
+        });
+        fb.core.status_msg = "Downloading b.txt...".to_string();
+        let buf = render_golden(&mut fb);
+        assert_rows(
+            &buf,
+            &[
+                "┌ C:/l ───────────  local  ┐┌ /r ────────────  remote  ┐",
+                "│../           0 2025-01-01││../           0 2025-01-01│",
+                "│a┌──────────────────── Transfer ────────────────────┐1│",
+                "│d│↓  b.txt                                       0ms│ │",
+                "│ │████████████████████   40%                        │ │",
+                "│ └──────────────────────────────────────────────────┘ │",
+                "│                          ││                          │",
+                "└──────────────────────────┘└──────────────────────────┘",
+                "[transfer] Downloading b.txt... 40%  [T]xfer [Delete]rm",
+            ],
+        );
+    }
+
     // ---- Command timeout ----
 
     #[test]

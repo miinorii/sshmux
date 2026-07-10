@@ -576,4 +576,65 @@ mod tests {
         assert!(r.x + r.width <= screen.width);
         assert!(r.y + r.height <= screen.height);
     }
+
+    // ---- Golden frames (behavior freeze for the widget refactor) ----------
+
+    use crate::widgets::testing::assert_rows;
+
+    #[test]
+    fn golden_connect_frame_and_tab_bar() {
+        let mut app = make_app();
+        app.hosts = vec![
+            SshHost {
+                label: "alpha".to_string(),
+            },
+            SshHost {
+                label: "beta".to_string(),
+            },
+        ];
+        app.new_tab();
+        app.selected_tab = 0;
+        let area = Rect::new(0, 0, 30, 6);
+        let mut buf = Buffer::empty(area);
+        app.render(area, &mut buf);
+        assert_rows(
+            &buf,
+            &[
+                "> alpha",
+                "  beta",
+                "",
+                "",
+                "  H keybindings",
+                " <connect>  <connect>",
+            ],
+        );
+    }
+
+    #[test]
+    fn golden_context_menu() {
+        let mut app = make_app();
+        app.context_menu = Some(ContextMenu {
+            col: 15,
+            row: 1,
+            selected: Some(2),
+        });
+        let area = Rect::new(0, 0, 30, 10);
+        let mut buf = Buffer::empty(area);
+        app.render(area, &mut buf);
+        assert_rows(
+            &buf,
+            &[
+                "",
+                "    ┌────────────────────┐",
+                "    │      New tab       │",
+                "    │     Close tab      │",
+                "    │  Split left/right  │",
+                "    │  Split top/bottom  │",
+                "    │        Exit        │",
+                "    └────────────────────┘",
+                "  H keybindings",
+                " <connect>",
+            ],
+        );
+    }
 }
