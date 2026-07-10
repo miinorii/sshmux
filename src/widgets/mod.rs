@@ -15,6 +15,7 @@
 //!   field instead of making the decision itself.
 
 pub mod bottom_bar;
+pub mod terminal;
 
 /// Test support: buffer snapshotting shared by golden-frame tests.
 #[cfg(test)]

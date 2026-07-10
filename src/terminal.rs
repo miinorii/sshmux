@@ -12,11 +12,8 @@ use log::{debug, error, info, warn};
 
 use crate::browser::parse::strip_ansi;
 use crate::pty::{self, CommandBuilder};
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Color, Modifier, Style},
-};
+use crate::widgets::terminal::render_screen;
+use ratatui::{buffer::Buffer, layout::Rect};
 use vt100::{MouseProtocolMode, Parser};
 
 /// Split a manual-connect argument string into ssh arguments, honouring
@@ -92,15 +89,6 @@ pub trait PtyChannel {
     fn raw_tail(&self, n: usize) -> Vec<u8>;
     /// Atomically swap the dirty flag, returning the previous value.
     fn take_dirty(&mut self) -> bool;
-}
-
-/// Map a `vt100::Color` to a ratatui `Color`.
-pub(crate) fn vc(c: vt100::Color) -> Color {
-    match c {
-        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
-        vt100::Color::Idx(i) => Color::Indexed(i),
-        _ => Color::Reset,
-    }
 }
 
 /// A single pseudo-terminal session driven by an arbitrary command.
@@ -354,51 +342,7 @@ impl EmbeddedTerminal {
         let Ok(parser) = self.parser.try_lock() else {
             return;
         };
-        let screen = parser.screen();
-
-        for y in 0..area.height {
-            for x in 0..area.width {
-                if let Some(cell) = screen.cell(y, x) {
-                    let s = cell.contents();
-                    let sym = if s.is_empty() { " " } else { s };
-                    if let Some(bc) = buf.cell_mut((area.x + x, area.y + y)) {
-                        bc.set_symbol(sym);
-                        let mut style = Style::default()
-                            .fg(vc(cell.fgcolor()))
-                            .bg(vc(cell.bgcolor()));
-                        if cell.bold() {
-                            style = style.add_modifier(Modifier::BOLD);
-                        }
-                        if cell.dim() {
-                            style = style.add_modifier(Modifier::DIM);
-                        }
-                        if cell.italic() {
-                            style = style.add_modifier(Modifier::ITALIC);
-                        }
-                        if cell.underline() {
-                            style = style.add_modifier(Modifier::UNDERLINED);
-                        }
-                        if cell.inverse() {
-                            style = style.add_modifier(Modifier::REVERSED);
-                        }
-                        bc.set_style(style);
-                    }
-                }
-            }
-        }
-
-        if self.scroll_offset == 0 && !screen.hide_cursor() {
-            let (cy, cx) = screen.cursor_position();
-            let sx = area.x + cx;
-            let sy = area.y + cy;
-            if sx < area.x + area.width
-                && sy < area.y + area.height
-                && let Some(bc) = buf.cell_mut((sx, sy))
-            {
-                let style = bc.style().add_modifier(Modifier::REVERSED);
-                bc.set_style(style);
-            }
-        }
+        render_screen(parser.screen(), self.scroll_offset == 0, area, buf);
     }
 
     pub fn cursor_pos(&self) -> Option<(u16, u16)> {
@@ -714,32 +658,6 @@ mod tests {
     fn dsr_wrong_final_byte() {
         // ESC [ 6 m is NOT a DSR
         assert_eq!(count_dsr(b"\x1b[6m"), 0);
-    }
-
-    #[test]
-    fn vc_all_indexed_stay_indexed() {
-        // vc() always returns Color::Indexed for Idx — the SmartBackend
-        // handles the basic-ANSI vs 256-colour distinction at draw time.
-        assert_eq!(vc(vt100::Color::Idx(0)), Color::Indexed(0));
-        assert_eq!(vc(vt100::Color::Idx(4)), Color::Indexed(4));
-        assert_eq!(vc(vt100::Color::Idx(15)), Color::Indexed(15));
-        assert_eq!(vc(vt100::Color::Idx(16)), Color::Indexed(16));
-        assert_eq!(vc(vt100::Color::Idx(231)), Color::Indexed(231));
-        assert_eq!(vc(vt100::Color::Idx(255)), Color::Indexed(255));
-    }
-
-    #[test]
-    fn vc_rgb_passthrough() {
-        assert_eq!(vc(vt100::Color::Rgb(1, 2, 3)), Color::Rgb(1, 2, 3));
-        assert_eq!(
-            vc(vt100::Color::Rgb(255, 255, 255)),
-            Color::Rgb(255, 255, 255)
-        );
-    }
-
-    #[test]
-    fn vc_default_is_reset() {
-        assert_eq!(vc(vt100::Color::Default), Color::Reset);
     }
 
     // ---- split_ssh_args ----

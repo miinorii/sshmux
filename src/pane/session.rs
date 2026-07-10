@@ -1,6 +1,7 @@
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 
 use crate::terminal::EmbeddedTerminal;
+use crate::widgets::terminal::TerminalView;
 
 use super::{render_exit_overlay, render_pane_border};
 
@@ -16,7 +17,7 @@ pub fn render_session(
 ) {
     let host = ssh_args.split_whitespace().last().unwrap_or("ssh");
     let inner = render_pane_border(area, buf, is_focus, leaf_count, host);
-    terminal.render_into(inner, buf);
+    TerminalView.render(inner, buf, terminal);
 
     if terminal.process_exited() {
         render_exit_overlay(inner, buf, exit_selection);
