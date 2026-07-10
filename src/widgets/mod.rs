@@ -16,6 +16,7 @@
 
 pub mod bottom_bar;
 pub mod file_browser;
+pub mod pane_tree;
 pub mod terminal;
 
 /// Test support: buffer snapshotting shared by golden-frame tests.

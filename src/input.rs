@@ -12,10 +12,7 @@ use crate::pane::connect::{
     ConnectOverlay, ConnectPane, InputField, KeyEditorState, editor_binding_index, editor_nav_down,
     editor_nav_up,
 };
-use crate::pane::{
-    FocusDir, Pane, Split, hit_test_separator, pane_border_inner, pane_inner, split_areas,
-    split_at_path_mut,
-};
+use crate::pane::{FocusDir, Node, Pane, Split, pane_border_inner, pane_inner, split_areas};
 
 // ---------------------------------------------------------------------------
 // Action — returned by input handlers to signal the main loop
@@ -894,8 +891,8 @@ fn handle_pane_resize_mouse(
                 let (new_r0, new_r1) = compute_drag_ratios(drag.start_ratios, drag.span, delta);
                 let path = drag.path.clone();
                 let sep_idx = drag.sep_idx;
-                if let Some(Pane::Split { ratios, .. }) =
-                    split_at_path_mut(&mut app.tabs[app.selected_tab].root, &path)
+                if let Some(Node::Split { ratios, .. }) =
+                    app.tabs[app.selected_tab].root.node_at_path_mut(&path)
                 {
                     ratios[sep_idx] = new_r0;
                     ratios[sep_idx + 1] = new_r1;
@@ -912,16 +909,17 @@ fn handle_pane_resize_mouse(
     // Separator drag start (disabled in zoom mode — no visible separators)
     if !app.tab().zoom && matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
         let content = pane_inner(last_area);
-        if let Some(hit) =
-            hit_test_separator(&app.tabs[app.selected_tab].root, content, column, row)
+        if let Some(hit) = app.tabs[app.selected_tab]
+            .root
+            .hit_test_separator(content, column, row)
         {
-            let split_pane = split_at_path_mut(&mut app.tabs[app.selected_tab].root, &hit.path);
-            let Some(Pane::Split { kind, ratios, .. }) = split_pane else {
+            let split_node = app.tabs[app.selected_tab].root.node_at_path_mut(&hit.path);
+            let Some(Node::Split { kind, ratios, .. }) = split_node else {
                 return true;
             };
             let r0 = ratios[hit.sep_idx];
             let r1 = ratios[hit.sep_idx + 1];
-            let areas = split_areas(hit.split_area, kind, ratios);
+            let areas = split_areas(hit.split_area, *kind, ratios);
             let a0 = areas[hit.sep_idx];
             let a1 = areas[hit.sep_idx + 1];
             let span = if hit.horizontal {

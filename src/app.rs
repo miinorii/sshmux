@@ -9,7 +9,7 @@ use ratatui::{
 
 use crate::browser::{FileBrowser, SshBrowser};
 use crate::keybindings::KeyBindings;
-use crate::pane::{Pane, RenderCtx, pane_border_inner, pane_inner, split_areas, split_at_path_mut};
+use crate::pane::{Node, Pane, RenderCtx, pane_border_inner, pane_inner, split_areas};
 use crate::ssh_config::{SshHost, parse_ssh_config};
 use crate::tab::Tab;
 use crate::terminal::{EmbeddedTerminal, PtyChannel};
@@ -323,10 +323,11 @@ impl App {
         if let Some(ref drag) = self.pane_resize_drag {
             let highlight = Style::default().fg(Color::Yellow);
             let a = drag.split_area;
-            if let Some(Pane::Split { kind, ratios, .. }) =
-                split_at_path_mut(&mut self.tabs[self.selected_tab].root, &drag.path)
+            if let Some(Node::Split { kind, ratios, .. }) = self.tabs[self.selected_tab]
+                .root
+                .node_at_path_mut(&drag.path)
             {
-                let areas = split_areas(a, kind, ratios);
+                let areas = split_areas(a, *kind, ratios);
                 if drag.horizontal {
                     // Re-color the LeftRight separator column computed from current ratios.
                     if let Some(pair) = areas.windows(2).nth(drag.sep_idx) {

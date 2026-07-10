@@ -1,12 +1,12 @@
 use ratatui::layout::Rect;
 
 use crate::pane::{
-    FocusDir, Pane, Split, find_directional_neighbor, pane_border_inner, remove_leaf,
+    FocusDir, Node, Pane, Split, SplitTree, find_directional_neighbor, pane_border_inner,
 };
 
 pub struct Tab {
     pub name: String,
-    pub root: Pane,
+    pub root: SplitTree<Pane>,
     pub focus_idx: usize,
     pub zoom: bool,
 }
@@ -15,7 +15,7 @@ impl Tab {
     pub fn new(name: &str) -> Self {
         Tab {
             name: name.to_string(),
-            root: Pane::new_connect(),
+            root: SplitTree::new(Pane::new_connect()),
             focus_idx: 0,
             zoom: false,
         }
@@ -45,7 +45,7 @@ impl Tab {
     }
 
     pub fn display_name(&self) -> &str {
-        if self.leaf_count() == 1 && matches!(self.root, Pane::Connect(_)) {
+        if self.leaf_count() == 1 && matches!(self.root.root, Node::Leaf(Pane::Connect(_))) {
             "<connect>"
         } else {
             &self.name
@@ -62,24 +62,14 @@ impl Tab {
 
     pub fn split(&mut self, kind: Split, area: Rect) {
         let n = self.focus_idx;
-        let count = self.leaf_count();
-        if count == 1 {
-            let old = std::mem::replace(&mut self.root, Pane::new_connect());
-            self.root = Pane::Split {
-                kind,
-                children: vec![old, Pane::new_connect()],
-                ratios: vec![100, 100],
-            };
-        } else {
-            self.root.split_leaf(n, kind);
-        }
+        self.root.split_leaf(n, kind, Pane::new_connect());
         self.focus_idx = n + 1;
         self.root.resize_all(area, self.leaf_count() > 1);
     }
 
     pub fn close_focused(&mut self) {
         let target = self.focus_idx;
-        remove_leaf(&mut self.root, target);
+        self.root.remove_leaf(target);
         let count = self.leaf_count();
         if self.focus_idx >= count {
             self.focus_idx = count.saturating_sub(1);
@@ -131,7 +121,7 @@ mod tests {
         let t = Tab::new("1");
         assert_eq!(t.leaf_count(), 1);
         assert_eq!(t.focus_idx, 0);
-        assert!(matches!(t.root, Pane::Connect(_)));
+        assert!(matches!(t.root.root, Node::Leaf(Pane::Connect(_))));
         assert_eq!(t.display_name(), "<connect>");
     }
 
