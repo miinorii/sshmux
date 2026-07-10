@@ -15,7 +15,9 @@
 //!   field instead of making the decision itself.
 
 pub mod bottom_bar;
+pub mod connect;
 pub mod file_browser;
+pub mod overlays;
 pub mod pane_tree;
 pub mod terminal;
 

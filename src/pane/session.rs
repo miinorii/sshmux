@@ -1,9 +1,12 @@
-use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    widgets::{StatefulWidget, Widget},
+};
 
 use crate::terminal::EmbeddedTerminal;
+use crate::widgets::overlays::ExitOverlay;
 use crate::widgets::terminal::TerminalView;
-
-use super::render_exit_overlay;
 
 /// Render a Session pane's content: terminal grid + exit overlay when the
 /// process has ended. The title bar is drawn by `PaneTreeView`.
@@ -16,6 +19,9 @@ pub fn render_session(
     TerminalView.render(area, buf, terminal);
 
     if terminal.process_exited() {
-        render_exit_overlay(area, buf, exit_selection);
+        ExitOverlay {
+            selection: exit_selection,
+        }
+        .render(area, buf);
     }
 }

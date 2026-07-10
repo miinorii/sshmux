@@ -3,8 +3,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Widget},
+    widgets::Widget,
 };
 
 use crate::browser::{FileBrowser, SshBrowser};
@@ -14,35 +13,15 @@ use crate::ssh_config::{SshHost, parse_ssh_config};
 use crate::tab::Tab;
 use crate::terminal::{EmbeddedTerminal, PtyChannel};
 use crate::widgets::bottom_bar::BottomBar;
+use crate::widgets::overlays::ContextMenuView;
 use crate::widgets::pane_tree::PaneTreeView;
 
-pub const CONTEXT_MENU_ITEMS: [&str; 5] = [
-    "New tab",
-    "Close tab",
-    "Split left/right",
-    "Split top/bottom",
-    "Exit",
-];
-const CONTEXT_MENU_WIDTH: u16 = 22; // longest item (18) + 2 padding + 2 border
-const CONTEXT_MENU_HEIGHT: u16 = 7; // 5 items + 2 border
+pub use crate::widgets::overlays::{CONTEXT_MENU_ITEMS, context_menu_rect};
 
 pub struct ContextMenu {
     pub col: u16,
     pub row: u16,
     pub selected: Option<usize>,
-}
-
-/// Compute the screen rectangle for the context menu, clamped to `screen`.
-/// The origin (col, row) is placed at the top-center of the menu.
-pub fn context_menu_rect(col: u16, row: u16, screen: Rect) -> Rect {
-    let w = CONTEXT_MENU_WIDTH;
-    let h = CONTEXT_MENU_HEIGHT;
-    let x = (col as i32 - w as i32 / 2).max(screen.x as i32);
-    let x = (x as u16).min(screen.x + screen.width.saturating_sub(w));
-    let y = row
-        .max(screen.y)
-        .min(screen.y + screen.height.saturating_sub(h));
-    Rect::new(x, y, w, h)
 }
 
 pub struct PaneResizeDrag {
@@ -350,35 +329,10 @@ impl App {
         // Context menu overlay (on top of everything)
         if let Some(ref menu) = self.context_menu {
             let rect = context_menu_rect(menu.col, menu.row, full);
-            // Clear background
-            for y in rect.y..rect.y + rect.height {
-                for x in rect.x..rect.x + rect.width {
-                    buf[(x, y)].reset();
-                }
+            ContextMenuView {
+                selected: menu.selected,
             }
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow));
-            let inner = block.inner(rect);
-            block.render(rect, buf);
-            for (i, item) in CONTEXT_MENU_ITEMS.iter().enumerate() {
-                let y = inner.y + i as u16;
-                if y >= inner.y + inner.height {
-                    break;
-                }
-                let style = if menu.selected == Some(i) {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-                let w = inner.width as usize;
-                let pad = w.saturating_sub(item.len()) / 2;
-                let label = format!("{:>pad$}{:<rest$}", "", item, pad = pad, rest = w - pad);
-                let span = Span::styled(label, style);
-                buf.set_line(inner.x, y, &Line::from(span), inner.width);
-            }
+            .render(rect, buf);
         }
     }
 }
@@ -508,55 +462,6 @@ mod tests {
     fn focused_pane_is_connect_by_default() {
         let app = make_app();
         assert!(matches!(app.tab().focused_pane(), Some(Pane::Connect(_))));
-    }
-
-    // ---- context_menu_rect tests ----
-
-    #[test]
-    fn context_menu_rect_center() {
-        let screen = Rect::new(0, 0, 80, 24);
-        let r = context_menu_rect(40, 10, screen);
-        assert_eq!(r.width, CONTEXT_MENU_WIDTH);
-        assert_eq!(r.height, CONTEXT_MENU_HEIGHT);
-        assert_eq!(r.x, 40 - CONTEXT_MENU_WIDTH / 2);
-        assert_eq!(r.y, 10);
-    }
-
-    #[test]
-    fn context_menu_rect_clamp_left() {
-        let screen = Rect::new(0, 0, 80, 24);
-        let r = context_menu_rect(2, 10, screen);
-        assert_eq!(r.x, 0);
-    }
-
-    #[test]
-    fn context_menu_rect_clamp_right() {
-        let screen = Rect::new(0, 0, 80, 24);
-        let r = context_menu_rect(78, 10, screen);
-        assert!(r.x + r.width <= screen.width);
-    }
-
-    #[test]
-    fn context_menu_rect_clamp_bottom() {
-        let screen = Rect::new(0, 0, 80, 24);
-        let r = context_menu_rect(40, 22, screen);
-        assert!(r.y + r.height <= screen.height);
-    }
-
-    #[test]
-    fn context_menu_rect_top_left_corner() {
-        let screen = Rect::new(0, 0, 80, 24);
-        let r = context_menu_rect(0, 0, screen);
-        assert_eq!(r.x, 0);
-        assert_eq!(r.y, 0);
-    }
-
-    #[test]
-    fn context_menu_rect_bottom_right_corner() {
-        let screen = Rect::new(0, 0, 80, 24);
-        let r = context_menu_rect(79, 23, screen);
-        assert!(r.x + r.width <= screen.width);
-        assert!(r.y + r.height <= screen.height);
     }
 
     // ---- Golden frames (behavior freeze for the widget refactor) ----------

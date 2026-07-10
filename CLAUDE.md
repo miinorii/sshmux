@@ -39,7 +39,11 @@ SSH session multiplexer TUI. Uses system `ssh`, `sftp`, and `scp` binaries — n
 
 ### Pane tree
 
-`Pane` is a recursive enum — leaf variants (`Connect`, `Session`, `FileBrowser`, `SshBrowser`) or branch (`Split { kind, children }`). Splitting inserts a new Split node wrapping the target leaf and a new pane. Focus tracks a leaf index via depth-first traversal.
+`SplitTree<T>` (widgets/pane_tree.rs) is a generic tiling layout: `Node<T>` is `Leaf(T)` or `Split { kind, ratios, children }`, with leaves addressed by depth-first index. sshmux instantiates it with `T = Pane`, a leaf-only enum (`Connect`, `Session`, `FileBrowser`, `SshBrowser`); the Pane-specific tree ops (`take_dirty`, `tick_browsers`, `resize_all`) live on `impl SplitTree<Pane>` in pane/mod.rs. `PaneTreeView` renders separators, junction glyphs, and per-leaf title bars (`Pane::title()`), handing each leaf's inner Rect to a closure — leaves never know about multi-pane mode. Zoom stays in app.rs glue (renders the focused leaf directly, full area). Focus tracks a leaf index via depth-first traversal.
+
+### Render-only widgets
+
+`src/widgets/` holds all rendering, one widget per component: `PaneTreeView` (tiling layout), `TerminalView` over `render_screen` (vt100 grid — unit-testable without a PTY), `FileBrowserView` (dual-panel + overlays, `StatefulWidget<State = BrowserCore>`, per-browser status precomputed via `StatusKind`), `ConnectView`, `BottomBar` (tab strip), and `overlays.rs` (`ExitOverlay`, `ContextMenuView`). Conventions (widgets/mod.rs): widgets are cheap per-frame structs holding `&` config; they never handle events, never write to PTYs, and only mutate state through ratatui's scroll-clamp idiom. Events and keybindings stay in input.rs and the state modules. Golden buffer-snapshot tests (`widgets::testing::assert_rows`) freeze the rendered frames.
 
 ### PTY layer
 
@@ -85,7 +89,7 @@ The Connect pane's `KeyEditor` overlay (replacing the old Help overlay) lets use
 - Right-click context menu lives on `App` (not per-pane): `context_menu: Option<ContextMenu>`. Opens on right-click Down, tracks hover via Drag, executes on Up, dismissed by any keypress or resize. Right-click is intercepted before pane dispatch so it is never forwarded to remote apps.
 - Browser focus toggle (`Tab` key) switches between local and remote panels
 - `pane_inner()` computes render area by subtracting tab bar and shortcut bar
-- Exited panes (session or browser) share one exit overlay: `render_exit_overlay()` (pane/mod.rs) draws it, `handle_exit_overlay_key()` (input.rs) handles Reconnect/Close. The key handler MUST run before `handle_browser_key_dispatch` — the browser path consumes every key on browser panes and would make the overlay unreachable.
+- Exited panes (session or browser) share one exit overlay: `ExitOverlay` (widgets/overlays.rs) draws it, `handle_exit_overlay_key()` (input.rs) handles Reconnect/Close. The key handler MUST run before `handle_browser_key_dispatch` — the browser path consumes every key on browser panes and would make the overlay unreachable.
 - `App::close_focused_or_tab()` is the single close path (global shortcut, context menu, exit overlays)
 
 ## Constraints
