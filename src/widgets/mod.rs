@@ -14,6 +14,8 @@
 //!   modules. When a widget needs a decision, it takes a precomputed config
 //!   field instead of making the decision itself.
 
+pub mod bottom_bar;
+
 /// Test support: buffer snapshotting shared by golden-frame tests.
 #[cfg(test)]
 pub mod testing {

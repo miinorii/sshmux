@@ -13,6 +13,7 @@ use crate::pane::{Pane, RenderCtx, pane_border_inner, pane_inner, split_areas, s
 use crate::ssh_config::{SshHost, parse_ssh_config};
 use crate::tab::Tab;
 use crate::terminal::{EmbeddedTerminal, PtyChannel};
+use crate::widgets::bottom_bar::BottomBar;
 
 pub const CONTEXT_MENU_ITEMS: [&str; 5] = [
     "New tab",
@@ -265,38 +266,19 @@ impl App {
         let content = pane_inner(full);
         let tab_y = full.y + content.height;
 
-        // Fill the entire tab bar row with a solid background.
-        let bar_bg = Style::default().bg(Color::DarkGray);
-        buf.set_style(
+        BottomBar {
+            labels: self.tabs.iter().map(|t| t.display_name()).collect(),
+            selected: self.selected_tab,
+        }
+        .render(
             Rect {
                 x: full.x,
                 y: tab_y,
                 width: full.width,
                 height: 1,
             },
-            bar_bg,
+            buf,
         );
-
-        // Tab entries — no separators, each tab is a styled block.
-        let mut spans: Vec<Span> = Vec::new();
-        for (i, tab) in self.tabs.iter().enumerate() {
-            let label = format!(" {} ", tab.display_name());
-            if i == self.selected_tab {
-                spans.push(Span::styled(
-                    label,
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    label,
-                    Style::default().fg(Color::White).bg(Color::DarkGray),
-                ));
-            }
-        }
-        buf.set_line(full.x, tab_y, &Line::from(spans), full.width);
 
         let focus_idx = self.tabs[self.selected_tab].focus_idx;
         let leaf_count = self.tabs[self.selected_tab].root.leaf_count();
