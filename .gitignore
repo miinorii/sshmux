@@ -5,7 +5,6 @@ debug.log
 # Docker integration test SSH keys (private key must never be committed)
 tests/docker/test_key
 tests/docker/test_key.pub
-# Local-only files (cross-compile config, audit notes, refactor plan)
+# Local-only files (cross-compile config; audit notes and plans live in ignored/)
 Cross.toml
-REVIEW.md
-WIDGET_REFACTOR.md
+/ignored/
