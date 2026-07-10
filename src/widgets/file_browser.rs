@@ -1,4 +1,4 @@
-//! Panel, overlay, and status-bar rendering for `BrowserCore`.
+//! Dual-panel file browser rendering (SFTP and SCP panes).
 
 use ratatui::{
     buffer::Buffer,
@@ -8,14 +8,14 @@ use ratatui::{
     widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, StatefulWidget, Widget},
 };
 
-use super::super::browser_layout;
-use super::{BrowserCore, BrowserFocus, TransferDirection};
+use crate::browser::browser_layout;
+use crate::browser::common::{BrowserCore, BrowserFocus, TransferDirection};
 use crate::keybindings::BrowserBindings;
 use crate::pane::{pane_border_inner, render_pane_border};
 
 impl BrowserCore {
     /// Render pane border + both panels. Returns the status bar area.
-    pub fn render_panels(
+    fn render_panels(
         &mut self,
         area: Rect,
         buf: &mut Buffer,
@@ -218,7 +218,7 @@ impl BrowserCore {
     }
 
     /// Render delete confirmation bar. Returns true if rendered.
-    pub fn render_confirm_delete(&self, area: Rect, buf: &mut Buffer) -> bool {
+    fn render_confirm_delete(&self, area: Rect, buf: &mut Buffer) -> bool {
         let Some(ref target) = self.delete.confirm else {
             return false;
         };
@@ -246,7 +246,7 @@ impl BrowserCore {
 
     /// Render the upload confirmation overlay when files are pending.
     /// Returns true if the overlay was rendered (callers can skip status bar).
-    pub fn render_upload_confirm(&mut self, inner: Rect, buf: &mut Buffer) -> bool {
+    fn render_upload_confirm(&mut self, inner: Rect, buf: &mut Buffer) -> bool {
         let Some(paths) = self.drop_confirm.as_ref() else {
             return false;
         };
@@ -353,12 +353,7 @@ impl BrowserCore {
     /// Render the transfer progress overlay during an active transfer.
     /// `transferring` must be true (driven by the concrete browser state) for the overlay to show.
     /// Returns `true` if the overlay was drawn.
-    pub fn render_transfer_progress(
-        &self,
-        inner: Rect,
-        buf: &mut Buffer,
-        transferring: bool,
-    ) -> bool {
+    fn render_transfer_progress(&self, inner: Rect, buf: &mut Buffer, transferring: bool) -> bool {
         let t = match self.transfer.last.as_ref() {
             Some(t) if transferring => t,
             _ => return false,
@@ -496,7 +491,7 @@ impl BrowserCore {
     }
 
     /// Render directional arrows on the panel border during a cross-panel drag.
-    pub fn render_drag_arrow(&self, area: Rect, buf: &mut Buffer, leaf_count: usize) {
+    fn render_drag_arrow(&self, area: Rect, buf: &mut Buffer, leaf_count: usize) {
         let drag = match self.drag {
             Some(ref d) => d,
             None => return,
@@ -529,7 +524,7 @@ impl BrowserCore {
     }
 
     /// Render a ghost label near the cursor during a drag gesture.
-    pub fn render_drag_ghost(&self, buf: &mut Buffer) {
+    fn render_drag_ghost(&self, buf: &mut Buffer) {
         let drag = match self.drag {
             Some(ref d) => d,
             None => return,
@@ -558,7 +553,7 @@ impl BrowserCore {
     }
 
     /// Render the normal status bar (state badge + message + shortcuts).
-    pub fn render_normal_status(
+    fn render_normal_status(
         &self,
         area: Rect,
         buf: &mut Buffer,
@@ -601,9 +596,87 @@ impl BrowserCore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FileBrowserView — the widget
+// ---------------------------------------------------------------------------
+
+/// What the status row shows when no delete-confirm bar is active.
+pub enum StatusKind<'a> {
+    /// State badge + status message + keybinding hints.
+    Normal {
+        label: &'a str,
+        color: Color,
+        progress: &'a str,
+    },
+    /// SCP password prompt (masked input).
+    Password { masked_len: usize },
+}
+
+/// Dual-panel file browser: local + remote listings, a status row, and the
+/// overlays driven by `BrowserCore` state (delete confirm, drop-upload
+/// confirm, transfer progress, drag feedback). The per-browser decisions
+/// (title, status badge, password mode) arrive precomputed as config.
+pub struct FileBrowserView<'a> {
+    pub title: &'a str,
+    pub is_focus: bool,
+    pub leaf_count: usize,
+    pub bindings: &'a BrowserBindings,
+    pub status: StatusKind<'a>,
+    /// Show the transfer-progress overlay (a transfer is running).
+    pub transferring: bool,
+}
+
+impl StatefulWidget for FileBrowserView<'_> {
+    type State = BrowserCore;
+
+    fn render(self, area: Rect, buf: &mut Buffer, core: &mut BrowserCore) {
+        let status_area = core.render_panels(area, buf, self.is_focus, self.leaf_count, self.title);
+        if !core.render_confirm_delete(status_area, buf) {
+            match self.status {
+                StatusKind::Password { masked_len } => {
+                    render_password_bar(status_area, buf, masked_len)
+                }
+                StatusKind::Normal {
+                    label,
+                    color,
+                    progress,
+                } => core.render_normal_status(
+                    status_area,
+                    buf,
+                    label,
+                    color,
+                    progress,
+                    self.bindings,
+                ),
+            }
+        }
+        core.render_upload_confirm(area, buf);
+        core.render_transfer_progress(area, buf, self.transferring);
+        core.render_drag_arrow(area, buf, self.leaf_count);
+        core.render_drag_ghost(buf);
+    }
+}
+
+/// Magenta password-entry bar shown in place of the status line.
+fn render_password_bar(area: Rect, buf: &mut Buffer, masked_len: usize) {
+    let stars = "*".repeat(masked_len);
+    let text = format!("  Password: {stars}\u{2588}");
+    let pad = (area.width as usize).saturating_sub(text.chars().count());
+    let msg = format!("{}{}", text, " ".repeat(pad));
+    let span = Span::styled(
+        msg,
+        Style::default()
+            .fg(Color::White)
+            .bg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    );
+    buf.set_span(area.x, area.y, &span, area.width);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::{
+    use super::render_password_bar;
+    use crate::browser::common::{
         BrowserCore, DeleteKind, DeleteLocation, DeleteTarget, TransferDirection, TransferStatus,
     };
     use crate::keybindings::BrowserBindings;
@@ -623,6 +696,28 @@ mod tests {
                     .unwrap_or_default()
             })
             .collect::<String>()
+    }
+
+    #[test]
+    fn password_bar_masks_input() {
+        let (area, mut buf) = render_buf(40, 1);
+        render_password_bar(area, &mut buf, 3);
+        let text = buf_line_text(&buf, 0);
+        assert!(text.contains("Password:"), "should contain label: {}", text);
+        assert!(text.contains("***"), "should mask with stars: {}", text);
+    }
+
+    #[test]
+    fn password_bar_empty_input_has_no_stars() {
+        let (area, mut buf) = render_buf(40, 1);
+        render_password_bar(area, &mut buf, 0);
+        let text = buf_line_text(&buf, 0);
+        assert!(text.contains("Password:"), "should contain label: {}", text);
+        assert!(
+            !text.contains('*'),
+            "should have no stars for empty password: {}",
+            text
+        );
     }
 
     #[test]

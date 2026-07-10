@@ -15,6 +15,8 @@ use super::parse::{
 };
 use crate::keybindings::BrowserBindings;
 use crate::terminal::{EmbeddedTerminal, PtyChannel};
+use crate::widgets::file_browser::{FileBrowserView, StatusKind};
+use ratatui::widgets::StatefulWidget;
 
 #[cfg(test)]
 use crate::terminal::{MockPty, MockPtyHandle};
@@ -548,23 +550,24 @@ impl FileBrowser {
         bindings: &BrowserBindings,
     ) {
         let title = format!(" sftp: {} ", self.core.host);
-        let status_area = self
-            .core
-            .render_panels(area, buf, is_focus, leaf_count, &title);
-        if !self.core.render_confirm_delete(status_area, buf) {
-            let (label, color) = self.state_label();
-            let progress = self.progress_suffix();
-            self.core
-                .render_normal_status(status_area, buf, label, color, &progress, bindings);
+        let (label, color) = self.state_label();
+        let progress = self.progress_suffix();
+        FileBrowserView {
+            title: &title,
+            is_focus,
+            leaf_count,
+            bindings,
+            status: StatusKind::Normal {
+                label,
+                color,
+                progress: &progress,
+            },
+            transferring: self.core.transfer.start.is_some(),
         }
-        self.core.render_upload_confirm(area, buf);
-        self.core
-            .render_transfer_progress(area, buf, self.core.transfer.start.is_some());
-        self.core.render_drag_arrow(area, buf, leaf_count);
-        self.core.render_drag_ghost(buf);
+        .render(area, buf, &mut self.core);
     }
 
-    fn state_label(&self) -> (&str, Color) {
+    fn state_label(&self) -> (&'static str, Color) {
         match self.sftp_state {
             SftpState::Connecting => ("connecting", Color::Yellow),
             SftpState::WaitingPwd | SftpState::WaitingLs => ("loading", Color::Yellow),

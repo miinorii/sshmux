@@ -4,12 +4,7 @@ use anyhow::Result;
 use crossterm::event::KeyCode;
 use log::{debug, error, info, warn};
 use portable_pty::CommandBuilder;
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::Span,
-};
+use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
 use super::common::{
     Browser, BrowserCore, BrowserFocus, COMMAND_TIMEOUT_SECS, DeleteLocation, LinkProbe,
@@ -23,6 +18,8 @@ use zeroize::Zeroize;
 
 use crate::keybindings::BrowserBindings;
 use crate::terminal::{EmbeddedTerminal, PtyChannel};
+use crate::widgets::file_browser::{FileBrowserView, StatusKind};
+use ratatui::widgets::StatefulWidget;
 
 #[cfg(test)]
 use crate::terminal::{MockPty, MockPtyHandle};
@@ -862,42 +859,31 @@ impl SshBrowser {
         bindings: &BrowserBindings,
     ) {
         let title = format!(" scp: {} ", self.core.host);
-        let status_area = self
-            .core
-            .render_panels(area, buf, is_focus, leaf_count, &title);
-        if !self.core.render_confirm_delete(status_area, buf) {
-            if self.waiting_password {
-                self.render_password_status(status_area, buf);
-            } else {
-                let (label, color) = self.state_label();
-                let progress = self.progress_suffix();
-                self.core
-                    .render_normal_status(status_area, buf, label, color, &progress, bindings);
+        let progress = self.progress_suffix();
+        let status = if self.waiting_password {
+            StatusKind::Password {
+                masked_len: self.password_buf.len(),
             }
+        } else {
+            let (label, color) = self.state_label();
+            StatusKind::Normal {
+                label,
+                color,
+                progress: &progress,
+            }
+        };
+        FileBrowserView {
+            title: &title,
+            is_focus,
+            leaf_count,
+            bindings,
+            status,
+            transferring: self.core.transfer.start.is_some(),
         }
-        self.core.render_upload_confirm(area, buf);
-        self.core
-            .render_transfer_progress(area, buf, self.core.transfer.start.is_some());
-        self.core.render_drag_arrow(area, buf, leaf_count);
-        self.core.render_drag_ghost(buf);
+        .render(area, buf, &mut self.core);
     }
 
-    fn render_password_status(&self, area: Rect, buf: &mut Buffer) {
-        let stars = "*".repeat(self.password_buf.len());
-        let text = format!("  Password: {}\u{2588}", stars);
-        let pad = (area.width as usize).saturating_sub(text.chars().count());
-        let msg = format!("{}{}", text, " ".repeat(pad));
-        let span = Span::styled(
-            msg,
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        );
-        buf.set_span(area.x, area.y, &span, area.width);
-    }
-
-    fn state_label(&self) -> (&str, Color) {
+    fn state_label(&self) -> (&'static str, Color) {
         match self.ssh_state {
             SshBrowserState::Connecting | SshBrowserState::SettingPrompt => {
                 ("connecting", Color::Yellow)
@@ -1998,54 +1984,6 @@ mod tests {
     }
 
     // ---- Render tests ----
-
-    fn buf_line_text(buf: &Buffer, y: u16) -> String {
-        let w = buf.area().width;
-        (0..w)
-            .map(|x| {
-                buf.cell((x, y))
-                    .map(|c| c.symbol().to_string())
-                    .unwrap_or_default()
-            })
-            .collect::<String>()
-    }
-
-    #[test]
-    fn render_password_status_shows_stars() {
-        let (mut sb, _h) = make_ssh();
-        sb.password_buf = "abc".to_string();
-        let area = Rect::new(0, 0, 40, 1);
-        let mut buf = Buffer::empty(area);
-
-        sb.render_password_status(area, &mut buf);
-
-        let text = buf_line_text(&buf, 0);
-        assert!(text.contains("Password:"), "should contain label: {}", text);
-        assert!(text.contains("***"), "should mask with stars: {}", text);
-        assert!(
-            !text.contains("abc"),
-            "should not reveal password: {}",
-            text
-        );
-    }
-
-    #[test]
-    fn render_password_status_empty_password() {
-        let (mut sb, _h) = make_ssh();
-        sb.password_buf.clear();
-        let area = Rect::new(0, 0, 40, 1);
-        let mut buf = Buffer::empty(area);
-
-        sb.render_password_status(area, &mut buf);
-
-        let text = buf_line_text(&buf, 0);
-        assert!(text.contains("Password:"), "should contain label: {}", text);
-        assert!(
-            !text.contains('*'),
-            "should have no stars for empty password: {}",
-            text
-        );
-    }
 
     // ---- Command timeout ----
 

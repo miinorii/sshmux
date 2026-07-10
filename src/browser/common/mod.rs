@@ -101,7 +101,6 @@ mod delete;
 mod keys;
 mod mouse;
 mod navigation;
-mod render;
 mod selection;
 mod transfer;
 
