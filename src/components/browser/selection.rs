@@ -1,6 +1,6 @@
 //! Multi-selection state on `BrowserCore`: anchor, index set, and range update.
 
-use super::super::parse::FsEntry;
+use super::parse::FsEntry;
 use super::{BrowserCore, BrowserFocus};
 
 impl BrowserCore {

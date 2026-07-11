@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use log::{debug, info};
 use ratatui::{style::Color, widgets::ListState};
 
-use super::super::parse::{list_drives, read_local_dir};
+use super::parse::{list_drives, read_local_dir};
 use super::{BrowserCore, BrowserFocus, LinkProbe, PendingTransfer, TransferDirection};
 
 impl BrowserCore {

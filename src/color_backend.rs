@@ -36,7 +36,7 @@
 //!
 //! This backend re-implements the `draw` loop to bypass crossterm's colour
 //! serialisation. `Color::Indexed(0..=15)` — the values produced by
-//! [`vc()`](crate::terminal::vc) for SSH session output — are emitted as
+//! `vc()` (components/terminal/view.rs) for SSH session output — are emitted as
 //! basic ANSI escapes, preserving bold-brightening behaviour. Named ratatui
 //! colours used by sshmux's own UI chrome (`Color::Black`, `Color::DarkGray`,
 //! etc.) remain in 256-colour form so the interface looks consistent across

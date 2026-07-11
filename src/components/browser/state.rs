@@ -1,17 +1,13 @@
-//! Shared types, state, and utilities for the SFTP and SCP browsers.
+//! Shared state for the SFTP and SCP browsers: `BrowserCore`, the transfer
+//! and delete queues, `ResponseWatch`, and the `Browser` trait.
 //!
-//! This module is split across several files for navigability; all items
-//! are re-exported at this module root so external callers can continue to
-//! use paths like `browser::common::BrowserCore`.
-//!
-//! Submodules:
-//! - [`navigation`] — focus, scroll, directory navigation, timer, paste detection
-//! - [`selection`] — multi-select state (indices, anchor, update)
-//! - [`delete`] — local/remote delete flows and confirmation
-//! - [`transfer`] — pending-transfer queue
-//! - [`mouse`] — click, drag, and release handling
-//! - [`render`] — all panel/overlay/status rendering
-//! - [`keys`] — the `handle_browser_key` dispatch
+//! Behaviour lives in sibling modules as `impl BrowserCore` blocks —
+//! `navigation` (focus, scroll, directory navigation, timer, paste
+//! detection), `selection` (multi-select), `delete` (delete flows and
+//! confirmation), `transfer` (pending-transfer queue), `keys` (the
+//! `handle_browser_key` dispatch), and `mouse` (click/drag/release).
+//! Rendering lives in `view`. Everything is re-exported from the component
+//! root, so callers use paths like `components::browser::BrowserCore`.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -96,15 +92,6 @@ pub struct DeleteState {
     pub pending: Vec<DeleteTarget>,
     pub pending_name: Option<String>,
 }
-
-mod delete;
-mod keys;
-mod mouse;
-mod navigation;
-mod selection;
-mod transfer;
-
-pub use keys::handle_browser_key;
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -193,7 +180,7 @@ pub const PROMPT_STABLE_TICKS: u8 = 2;
 /// which resets this watch automatically: state arms need no manual reset
 /// bookkeeping after consuming a response.
 ///
-/// [`PtyChannel::raw_seq`]: crate::terminal::PtyChannel::raw_seq
+/// [`PtyChannel::raw_seq`]: crate::components::terminal::PtyChannel::raw_seq
 #[derive(Default)]
 pub struct ResponseWatch {
     last_seq: u64,

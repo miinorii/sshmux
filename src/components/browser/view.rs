@@ -8,8 +8,8 @@ use ratatui::{
     widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, StatefulWidget, Widget},
 };
 
-use crate::browser::browser_layout;
-use crate::browser::common::{BrowserCore, BrowserFocus, TransferDirection};
+use super::browser_layout;
+use super::state::{BrowserCore, BrowserFocus, TransferDirection};
 use crate::keybindings::BrowserBindings;
 
 impl BrowserCore {
@@ -661,7 +661,7 @@ fn render_password_bar(area: Rect, buf: &mut Buffer, masked_len: usize) {
 #[cfg(test)]
 mod tests {
     use super::render_password_bar;
-    use crate::browser::common::{
+    use crate::components::browser::state::{
         BrowserCore, DeleteKind, DeleteLocation, DeleteTarget, TransferDirection, TransferStatus,
     };
     use crate::keybindings::BrowserBindings;

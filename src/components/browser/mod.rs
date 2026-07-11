@@ -1,13 +1,29 @@
+//! File browser component (SFTP and SCP): shared state-machine core
+//! (`state`, with behaviour spread over `navigation`, `selection`, `delete`,
+//! `transfer`, `keys`, and `mouse` as `impl BrowserCore` blocks), the two
+//! protocol drivers (`sftp`, `ssh`), output parsing (`parse`), and the
+//! dual-panel renderer (`view`).
+
 use ratatui::layout::Rect;
 
-pub mod common;
+mod delete;
+mod keys;
+mod mouse;
+mod navigation;
+mod selection;
+mod state;
+mod transfer;
+mod view;
+
 pub mod parse;
 pub mod sftp;
 pub mod ssh;
 
-pub use common::{BrowserKeyAction, DragAction, handle_browser_key};
+pub use keys::handle_browser_key;
 pub use sftp::FileBrowser;
 pub use ssh::{SshBrowser, SshBrowserState};
+pub use state::*;
+pub use view::{FileBrowserView, StatusKind};
 
 /// Layout areas for the dual-pane browser UI.
 pub struct BrowserLayout {

@@ -6,17 +6,17 @@ use ratatui::{
     widgets::Widget,
 };
 
-use crate::browser::{FileBrowser, SshBrowser};
+use crate::components::bottom_bar::BottomBar;
+use crate::components::browser::{FileBrowser, SshBrowser};
+use crate::components::overlays::ContextMenuView;
+use crate::components::pane_tree::PaneTreeView;
+use crate::components::terminal::{EmbeddedTerminal, PtyChannel};
 use crate::keybindings::KeyBindings;
 use crate::pane::{Node, Pane, pane_border_inner, pane_inner, split_areas};
 use crate::ssh_config::{SshHost, parse_ssh_config};
 use crate::tab::Tab;
-use crate::terminal::{EmbeddedTerminal, PtyChannel};
-use crate::widgets::bottom_bar::BottomBar;
-use crate::widgets::overlays::ContextMenuView;
-use crate::widgets::pane_tree::PaneTreeView;
 
-pub use crate::widgets::overlays::{CONTEXT_MENU_ITEMS, context_menu_rect};
+pub use crate::components::overlays::{CONTEXT_MENU_ITEMS, context_menu_rect};
 
 pub struct ContextMenu {
     pub col: u16,
@@ -466,7 +466,7 @@ mod tests {
 
     // ---- Golden frames (behavior freeze for the widget refactor) ----------
 
-    use crate::widgets::testing::assert_rows;
+    use crate::components::testing::assert_rows;
 
     #[test]
     fn golden_connect_frame_and_tab_bar() {

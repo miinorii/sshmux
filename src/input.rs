@@ -6,12 +6,14 @@ use log::{debug, error, trace};
 use ratatui::{layout::Rect, widgets::ListState};
 
 use crate::app::{App, CONTEXT_MENU_ITEMS, ContextMenu, PaneResizeDrag, context_menu_rect};
-use crate::browser::{BrowserKeyAction, DragAction, FileBrowser, SshBrowser, handle_browser_key};
-use crate::keybindings::KeyBinding;
-use crate::pane::connect::{
+use crate::components::browser::{
+    BrowserKeyAction, DragAction, FileBrowser, SshBrowser, handle_browser_key,
+};
+use crate::components::connect::{
     ConnectOverlay, ConnectPane, InputField, KeyEditorState, editor_binding_index, editor_nav_down,
     editor_nav_up,
 };
+use crate::keybindings::KeyBinding;
 use crate::pane::{FocusDir, Node, Pane, Split, pane_border_inner, pane_inner, split_areas};
 
 // ---------------------------------------------------------------------------
@@ -1172,9 +1174,9 @@ pub fn handle_paste(app: &mut App, text: &str) {
 mod tests {
     use super::*;
     use crate::app::ContextMenu;
+    use crate::components::connect::{ConnectOverlay, ConnectPane};
     use crate::keybindings::KeyBindings;
     use crate::pane::Pane;
-    use crate::pane::connect::{ConnectOverlay, ConnectPane};
     use crate::ssh_config::SshHost;
     use ratatui::layout::Rect;
 
@@ -2134,8 +2136,8 @@ mod tests {
 
     #[test]
     fn live_browser_keys_still_dispatch_after_exit_check() {
-        use crate::browser::common::BrowserFocus;
-        use crate::browser::sftp::SftpState;
+        use crate::components::browser::BrowserFocus;
+        use crate::components::browser::sftp::SftpState;
 
         let mut app = make_app();
         let (mut fb, _h) = FileBrowser::with_mock();

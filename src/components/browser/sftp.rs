@@ -5,21 +5,21 @@ use crossterm::event::KeyCode;
 use log::{debug, info, warn};
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
-use super::common::{
-    Browser, BrowserCore, BrowserFocus, COMMAND_TIMEOUT_SECS, DeleteLocation, LinkProbe,
-    PROMPT_TAIL_BYTES, PendingTransfer, TransferDirection, TransferStatus,
-};
 use super::parse::{
     contains_any_error, parse_ls, parse_pwd, read_local_dir, scrape_transfer_progress, shell_quote,
     strip_ansi,
 };
+use super::state::{
+    Browser, BrowserCore, BrowserFocus, COMMAND_TIMEOUT_SECS, DeleteLocation, LinkProbe,
+    PROMPT_TAIL_BYTES, PendingTransfer, TransferDirection, TransferStatus,
+};
+use super::view::{FileBrowserView, StatusKind};
+use crate::components::terminal::{EmbeddedTerminal, PtyChannel};
 use crate::keybindings::BrowserBindings;
-use crate::terminal::{EmbeddedTerminal, PtyChannel};
-use crate::widgets::file_browser::{FileBrowserView, StatusKind};
 use ratatui::widgets::StatefulWidget;
 
 #[cfg(test)]
-use crate::terminal::{MockPty, MockPtyHandle};
+use crate::components::terminal::{MockPty, MockPtyHandle};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -632,8 +632,8 @@ impl Browser for FileBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::common::{DeleteKind, DeleteTarget, dummy_entry};
-    use crate::browser::parse::FsEntry;
+    use crate::components::browser::parse::FsEntry;
+    use crate::components::browser::state::{DeleteKind, DeleteTarget, dummy_entry};
 
     /// Run tick() enough times for the response watch to trigger a transition:
     /// the first tick observes the new raw_seq (reset), the next two are quiet
@@ -1590,7 +1590,7 @@ mod tests {
 
     // ---- Golden frames (behavior freeze for the widget refactor) ----------
 
-    use crate::widgets::testing::assert_rows;
+    use crate::components::testing::assert_rows;
 
     /// A browser with fully deterministic panel content.
     fn golden_browser() -> FileBrowser {

@@ -1,18 +1,17 @@
-mod browser;
-pub mod connect;
-mod session;
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    widgets::{StatefulWidget, Widget},
+};
 
-use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
-
-use crate::browser::common::Browser;
-use crate::browser::{FileBrowser, SshBrowser};
+use crate::components::browser::{Browser, FileBrowser, SshBrowser};
+use crate::components::connect::{ConnectPane, ConnectView};
+use crate::components::overlays::ExitOverlay;
+use crate::components::terminal::{EmbeddedTerminal, PtyChannel, TerminalView};
 use crate::keybindings::KeyBindings;
 use crate::ssh_config::SshHost;
-use crate::terminal::{EmbeddedTerminal, PtyChannel};
-use crate::widgets::connect::ConnectView;
-use connect::ConnectPane;
 
-pub use crate::widgets::pane_tree::{
+pub use crate::components::pane_tree::{
     FocusDir, Node, SeparatorHit, Split, SplitTree, find_directional_neighbor, split_areas,
 };
 
@@ -141,15 +140,21 @@ impl Pane {
                 exit_selection,
                 ..
             } => {
-                session::render_session(area, buf, terminal, *exit_selection);
+                TerminalView.render(area, buf, terminal);
+                if terminal.process_exited() {
+                    ExitOverlay {
+                        selection: *exit_selection,
+                    }
+                    .render(area, buf);
+                }
             }
             Pane::FileBrowser { browser } => {
                 browser.render(area, buf, is_focus, &keybindings.browser);
-                browser::render_browser_exit_overlay(browser, area, buf);
+                render_browser_exit_overlay(browser, area, buf);
             }
             Pane::SshBrowser { browser } => {
                 browser.render(area, buf, is_focus, &keybindings.browser);
-                browser::render_browser_exit_overlay(browser, area, buf);
+                render_browser_exit_overlay(browser, area, buf);
             }
         }
     }
@@ -180,6 +185,18 @@ impl SplitTree<Pane> {
             pane.resize_all(a, multi_pane);
         }
     }
+}
+
+/// Render a "session ended — Reconnect / Close pane" overlay on top of a browser
+/// pane when its underlying PTY has exited.
+fn render_browser_exit_overlay(browser: &dyn Browser, area: Rect, buf: &mut Buffer) {
+    if !browser.process_exited() {
+        return;
+    }
+    ExitOverlay {
+        selection: browser.core().exit_selection,
+    }
+    .render(area, buf);
 }
 
 // ---------------------------------------------------------------------------

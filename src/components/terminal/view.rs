@@ -8,7 +8,7 @@ use ratatui::{
 };
 use vt100::Screen;
 
-use crate::terminal::EmbeddedTerminal;
+use super::session::EmbeddedTerminal;
 
 /// Map a `vt100::Color` to a ratatui `Color`.
 pub(crate) fn vc(c: vt100::Color) -> Color {
@@ -82,7 +82,7 @@ impl StatefulWidget for TerminalView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::testing::assert_rows;
+    use crate::components::testing::assert_rows;
 
     fn render(parser: &vt100::Parser, show_cursor: bool, w: u16, h: u16) -> Buffer {
         let area = Rect::new(0, 0, w, h);

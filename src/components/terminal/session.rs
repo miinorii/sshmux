@@ -10,9 +10,9 @@ use std::{
 use anyhow::Result;
 use log::{debug, error, info, warn};
 
-use crate::browser::parse::strip_ansi;
+use super::view::render_screen;
+use crate::components::browser::parse::strip_ansi;
 use crate::pty::{self, CommandBuilder};
-use crate::widgets::terminal::render_screen;
 use ratatui::{buffer::Buffer, layout::Rect};
 use vt100::{MouseProtocolMode, Parser};
 

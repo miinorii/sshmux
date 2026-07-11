@@ -129,7 +129,7 @@ impl Widget for ContextMenuView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::testing::assert_rows;
+    use crate::components::testing::assert_rows;
 
     #[test]
     fn golden_exit_overlay() {

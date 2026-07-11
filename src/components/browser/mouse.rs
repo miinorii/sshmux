@@ -3,7 +3,7 @@
 use crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 
-use super::super::browser_layout;
+use super::browser_layout;
 use super::{BrowserCore, BrowserFocus, DragAction, DragState};
 use crate::pane::pane_border_inner;
 

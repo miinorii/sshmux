@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use log::{info, warn};
 use ratatui::style::Color;
 
-use super::super::parse::read_local_dir;
+use super::parse::read_local_dir;
 use super::{BrowserCore, DeleteKind, DeleteLocation, DeleteTarget};
 
 impl BrowserCore {

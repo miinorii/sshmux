@@ -14,10 +14,11 @@ use std::sync::Once;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use sshmux::browser::sftp::SftpState;
-use sshmux::browser::ssh::SshBrowserState;
-use sshmux::browser::{FileBrowser, SshBrowser};
-use sshmux::terminal::EmbeddedTerminal;
+use sshmux::components::browser::parse::{FsEntry, read_local_dir};
+use sshmux::components::browser::sftp::SftpState;
+use sshmux::components::browser::ssh::SshBrowserState;
+use sshmux::components::browser::{BrowserCore, BrowserFocus, FileBrowser, SshBrowser};
+use sshmux::components::terminal::EmbeddedTerminal;
 
 // ---------------------------------------------------------------------------
 // Test connection parameters
@@ -251,7 +252,7 @@ fn make_sftp_browser() -> FileBrowser {
     cmd.env("TERM", "dumb");
     let term = EmbeddedTerminal::new(200, 220, cmd, true).expect("failed to spawn SFTP");
     FileBrowser {
-        core: sshmux::browser::common::BrowserCore::new("test-docker"),
+        core: BrowserCore::new("test-docker"),
         sftp: Box::new(term),
         sftp_state: SftpState::Connecting,
     }
@@ -317,7 +318,7 @@ fn sftp_browser_navigate_into_directory() {
         .position(|e| e.name == "documents")
         .expect("'documents' not found in listing");
     browser.core.remote.sel.select(Some(doc_idx));
-    browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
+    browser.core.focus = BrowserFocus::Remote;
 
     // Enter the directory
     browser.enter();
@@ -369,7 +370,7 @@ fn sftp_browser_download_file() {
         .position(|e| e.name == "documents")
         .expect("'documents' not found");
     browser.core.remote.sel.select(Some(doc_idx));
-    browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
+    browser.core.focus = BrowserFocus::Remote;
     browser.enter();
 
     let reached_idle = wait_sftp_state(&mut browser, CMD_TIMEOUT, |b| {
@@ -438,7 +439,7 @@ fn sftp_browser_upload_file() {
 
     // Set local path to the temp dir
     browser.core.local.path = tmp.clone();
-    browser.core.local.entries = sshmux::browser::parse::read_local_dir(&tmp);
+    browser.core.local.entries = read_local_dir(&tmp);
 
     // Select the upload file in the local panel
     let file_idx = browser
@@ -449,7 +450,7 @@ fn sftp_browser_upload_file() {
         .position(|e| e.name == "upload_test.txt")
         .expect("'upload_test.txt' not found in local entries");
     browser.core.local.sel.select(Some(file_idx));
-    browser.core.focus = sshmux::browser::common::BrowserFocus::Local;
+    browser.core.focus = BrowserFocus::Local;
 
     // Upload
     browser.upload();
@@ -506,7 +507,7 @@ fn sftp_browser_go_up() {
         .position(|e| e.name == "documents")
         .expect("'documents' not found");
     browser.core.remote.sel.select(Some(doc_idx));
-    browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
+    browser.core.focus = BrowserFocus::Remote;
     browser.enter();
 
     let reached_idle = wait_sftp_state(&mut browser, CMD_TIMEOUT, |b| {
@@ -549,7 +550,7 @@ fn make_ssh_browser() -> SshBrowser {
     cmd.env("TERM", "dumb");
     let term = EmbeddedTerminal::new(200, 220, cmd, true).expect("failed to spawn SSH shell");
     SshBrowser {
-        core: sshmux::browser::common::BrowserCore::new(SSH_ALIAS),
+        core: BrowserCore::new(SSH_ALIAS),
         ssh: Box::new(term),
         scp_pty: None,
         ssh_state: SshBrowserState::Connecting,
@@ -612,7 +613,7 @@ fn ssh_browser_navigate_into_directory() {
         .position(|e| e.name == "documents")
         .expect("'documents' not found");
     browser.core.remote.sel.select(Some(doc_idx));
-    browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
+    browser.core.focus = BrowserFocus::Remote;
     browser.enter();
 
     let reached_idle = wait_ssh_state(&mut browser, CMD_TIMEOUT, |b| {
@@ -659,7 +660,7 @@ fn ssh_browser_download_file() {
         .position(|e| e.name == "documents")
         .expect("'documents' not found");
     browser.core.remote.sel.select(Some(doc_idx));
-    browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
+    browser.core.focus = BrowserFocus::Remote;
     browser.enter();
 
     let reached_idle = wait_ssh_state(&mut browser, CMD_TIMEOUT, |b| {
@@ -726,7 +727,7 @@ fn ssh_browser_upload_file() {
     std::fs::write(&upload_file, "uploaded via scp integration test").unwrap();
 
     browser.core.local.path = tmp.clone();
-    browser.core.local.entries = sshmux::browser::parse::read_local_dir(&tmp);
+    browser.core.local.entries = read_local_dir(&tmp);
 
     let file_idx = browser
         .core
@@ -736,7 +737,7 @@ fn ssh_browser_upload_file() {
         .position(|e| e.name == "scp_upload_test.txt")
         .expect("'scp_upload_test.txt' not found in local entries");
     browser.core.local.sel.select(Some(file_idx));
-    browser.core.focus = sshmux::browser::common::BrowserFocus::Local;
+    browser.core.focus = BrowserFocus::Local;
 
     // Upload — spawns a separate SCP process
     browser.upload();
@@ -793,7 +794,7 @@ fn ssh_browser_go_up() {
         .position(|e| e.name == "documents")
         .expect("'documents' not found");
     browser.core.remote.sel.select(Some(doc_idx));
-    browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
+    browser.core.focus = BrowserFocus::Remote;
     browser.enter();
 
     let reached_idle = wait_ssh_state(&mut browser, CMD_TIMEOUT, |b| {
@@ -836,7 +837,7 @@ fn sftp_browser_delete_file() {
     std::fs::write(&upload_file, "delete me").unwrap();
 
     browser.core.local.path = tmp.clone();
-    browser.core.local.entries = sshmux::browser::parse::read_local_dir(&tmp);
+    browser.core.local.entries = read_local_dir(&tmp);
     let file_idx = browser
         .core
         .local
@@ -845,7 +846,7 @@ fn sftp_browser_delete_file() {
         .position(|e| e.name == "to_delete.txt")
         .expect("'to_delete.txt' not found");
     browser.core.local.sel.select(Some(file_idx));
-    browser.core.focus = sshmux::browser::common::BrowserFocus::Local;
+    browser.core.focus = BrowserFocus::Local;
     browser.upload();
 
     let reached_idle = wait_sftp_state(&mut browser, CMD_TIMEOUT, |b| {
@@ -862,7 +863,7 @@ fn sftp_browser_delete_file() {
         .position(|e| e.name == "to_delete.txt")
         .expect("'to_delete.txt' not found on remote after upload");
     browser.core.remote.sel.select(Some(file_idx));
-    browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
+    browser.core.focus = BrowserFocus::Remote;
 
     // Initiate delete (sets confirm dialog)
     browser.delete_focused();
@@ -921,7 +922,7 @@ fn ensure_remote_symlinks() {
 }
 
 /// Select the entry called `name` in the remote panel.
-fn select_remote_entry(entries: &[sshmux::browser::parse::FsEntry], name: &str) -> usize {
+fn select_remote_entry(entries: &[FsEntry], name: &str) -> usize {
     entries
         .iter()
         .position(|e| e.name == name)
@@ -938,7 +939,7 @@ fn sftp_browser_symlinks() {
         b.sftp_state == SftpState::Idle
     });
     assert!(reached_idle, "SFTP browser did not reach Idle");
-    browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
+    browser.core.focus = BrowserFocus::Remote;
 
     // Navigate into linktest
     let idx = select_remote_entry(&browser.core.remote.entries, "linktest");
@@ -1032,7 +1033,7 @@ fn ssh_browser_symlinks() {
         b.ssh_state == SshBrowserState::Idle
     });
     assert!(reached_idle, "SSH browser did not reach Idle");
-    browser.core.focus = sshmux::browser::common::BrowserFocus::Remote;
+    browser.core.focus = BrowserFocus::Remote;
 
     // Navigate into linktest
     let idx = select_remote_entry(&browser.core.remote.entries, "linktest");

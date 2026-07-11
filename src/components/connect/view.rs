@@ -9,10 +9,10 @@ use ratatui::{
     widgets::{Block, Borders, List, Paragraph, StatefulWidget, Widget},
 };
 
-use crate::keybindings::KeyBindings;
-use crate::pane::connect::{
+use super::state::{
     ConnectOverlay, ConnectPane, EDITOR_ROW_COUNT, HEADER_BROWSER, HEADER_CONNECT, HEADER_GLOBAL,
 };
+use crate::keybindings::KeyBindings;
 use crate::ssh_config::SshHost;
 
 /// Host list with the Connect pane's overlays; renders into the pane's
